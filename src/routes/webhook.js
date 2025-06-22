@@ -44,6 +44,7 @@ router.get('/webhook', SecurityMiddleware.verifyWebhookToken, (req, res) => {
  * Processes incoming WhatsApp messages
  */
 router.post('/webhook', 
+  RateLimitMiddleware.webhook,
   SecurityMiddleware.verifyWebhookSignature,
   ValidationMiddleware.validateWebhookPayload,
   async (req, res) => {
