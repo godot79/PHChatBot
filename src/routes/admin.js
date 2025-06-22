@@ -11,6 +11,7 @@ const ChatbotEngine = require('../core/ChatbotEngine');
 const WhatsAppAPI = require('../api/WhatsAppAPI');
 const ClinikoAPI = require('../api/ClinikoAPI');
 const Logger = require('../core/Logger');
+const { RateLimitMiddleware } = require('../middleware/RateLimitMiddleware');
 const { SecurityMiddleware } = require('../middleware/SecurityMiddleware');
 const { ValidationMiddleware } = require('../middleware/ValidationMiddleware');
 
