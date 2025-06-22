@@ -8,6 +8,7 @@ const router = express.Router();
 const ChatbotEngine = require('../core/ChatbotEngine');
 const WhatsAppAPI = require('../api/WhatsAppAPI');
 const Logger = require('../core/Logger');
+const { RateLimitMiddleware } = require('../middleware/RateLimitMiddleware');
 const { SecurityMiddleware } = require('../middleware/SecurityMiddleware');
 const { ValidationMiddleware } = require('../middleware/ValidationMiddleware');
 
