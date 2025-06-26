@@ -1,473 +1,487 @@
-// src/api/ClinikoAPI.js
+// ClinikoAPI.js - Cliniko Healthcare System API Integration
 const axios = require('axios');
-const Logger = require('../utils/Logger');
 
 class ClinikoAPI {
-  constructor(apiKey, subdomain) {
-    this.apiKey = apiKey;
-    this.subdomain = subdomain;
-    this.baseURL = `https://${subdomain}.cliniko.com/api/v1`;
-    this.logger = new Logger('ClinikoAPI');
-
-    this.client = axios.create({
-      baseURL: this.baseURL,
-      headers: {
-        'Authorization': `Basic ${Buffer.from(apiKey + ':').toString('base64')}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': 'WhatsApp-Physio-Chatbot/2.0.0'
-      },
-      timeout: 30000
-    });
-
-    // Add request/response interceptors for logging
-    this.client.interceptors.request.use(
-      (config) => {
-        this.logger.debug('Cliniko API Request:', {
-          method: config.method,
-          url: config.url,
-          params: config.params
-        });
-        return config;
-      },
-      (error) => {
-        this.logger.error('Cliniko API Request Error:', error);
-        return Promise.reject(error);
-      }
-    );
-
-    this.client.interceptors.response.use(
-      (response) => {
-        this.logger.debug('Cliniko API Response:', {
-          status: response.status,
-          url: response.config.url,
-          dataCount: Array.isArray(response.data) ? response.data.length : 'single'
-        });
-        return response;
-      },
-      (error) => {
-        this.logger.error('Cliniko API Response Error:', {
-          status: error.response?.status,
-          url: error.config?.url,
-          message: error.message,
-          data: error.response?.data
-        });
-        return Promise.reject(error);
-      }
-    );
-  }
-
-  // Patient methods
-  async searchPatients(searchTerm) {
-    try {
-      const response = await this.client.get('/patients', {
-        params: {
-          q: searchTerm,
-          per_page: 50
-        }
-      });
-
-      return response.data.patients || [];
-    } catch (error) {
-      this.logger.error('Failed to search patients:', error);
-      throw new Error('Failed to search patients in Cliniko');
-    }
-  }
-
-  async getPatient(patientId) {
-    try {
-      const response = await this.client.get(`/patients/${patientId}`);
-      return response.data;
-    } catch (error) {
-      if (error.response?.status === 404) {
-        return null;
-      }
-      this.logger.error('Failed to get patient:', error);
-      throw new Error('Failed to retrieve patient from Cliniko');
-    }
-  }
-
-  async createPatient(patientData) {
-    try {
-      const response = await this.client.post('/patients', patientData);
-      this.logger.info(`Patient created: ${response.data.id}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error('Failed to create patient:', error);
-      throw new Error('Failed to create patient in Cliniko');
-    }
-  }
-
-  async updatePatient(patientId, patientData) {
-    try {
-      const response = await this.client.put(`/patients/${patientId}`, patientData);
-      this.logger.info(`Patient updated: ${patientId}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error('Failed to update patient:', error);
-      throw new Error('Failed to update patient in Cliniko');
-    }
-  }
-
-  async findPatientByPhone(phoneNumber) {
-    try {
-      // Clean phone number for search
-      const cleanedPhone = phoneNumber.replace(/\D/g, '');
-      const searchTerms = [
-        cleanedPhone,
-        `+${cleanedPhone}`,
-        cleanedPhone.substring(1), // Remove country code
-        cleanedPhone.slice(-10) // Last 10 digits
-      ];
-
-      for (const term of searchTerms) {
-        const patients = await this.searchPatients(term);
-        if (patients.length > 0) {
-          // Find exact match
-          const exactMatch = patients.find(patient => {
-            const patientPhone = patient.mobile_phone_number?.replace(/\D/g, '') || '';
-            return patientPhone.includes(cleanedPhone.slice(-10)) || 
-                   cleanedPhone.includes(patientPhone.slice(-10));
-          });
-          
-          if (exactMatch) {
-            return exactMatch;
-          }
-        }
-      }
-
-      return null;
-    } catch (error) {
-      this.logger.error('Failed to find patient by phone:', error);
-      return null;
-    }
-  }
-
-  // Practitioner methods
-  async getPractitioners() {
-    try {
-      const response = await this.client.get('/practitioners', {
-        params: {
-          per_page: 100
-        }
-      });
-
-      return response.data.practitioners || [];
-    } catch (error) {
-      this.logger.error('Failed to get practitioners:', error);
-      throw new Error('Failed to retrieve practitioners from Cliniko');
-    }
-  }
-
-  async getPractitioner(practitionerId) {
-    try {
-      const response = await this.client.get(`/practitioners/${practitionerId}`);
-      return response.data;
-    } catch (error) {
-      if (error.response?.status === 404) {
-        return null;
-      }
-      this.logger.error('Failed to get practitioner:', error);
-      throw new Error('Failed to retrieve practitioner from Cliniko');
-    }
-  }
-
-  // Appointment methods
-  async getAppointments(params = {}) {
-    try {
-      const defaultParams = {
-        per_page: 100,
-        sort: 'starts_at'
-      };
-
-      const response = await this.client.get('/appointments', {
-        params: { ...defaultParams, ...params }
-      });
-
-      return response.data.appointments || [];
-    } catch (error) {
-      this.logger.error('Failed to get appointments:', error);
-      throw new Error('Failed to retrieve appointments from Cliniko');
-    }
-  }
-
-  async getAppointment(appointmentId) {
-    try {
-      const response = await this.client.get(`/appointments/${appointmentId}`);
-      return response.data;
-    } catch (error) {
-      if (error.response?.status === 404) {
-        return null;
-      }
-      this.logger.error('Failed to get appointment:', error);
-      throw new Error('Failed to retrieve appointment from Cliniko');
-    }
-  }
-
-  async createAppointment(appointmentData) {
-    try {
-      const response = await this.client.post('/appointments', appointmentData);
-      this.logger.info(`Appointment created: ${response.data.id}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error('Failed to create appointment:', error);
-      throw new Error('Failed to create appointment in Cliniko');
-    }
-  }
-
-  async updateAppointment(appointmentId, appointmentData) {
-    try {
-      const response = await this.client.put(`/appointments/${appointmentId}`, appointmentData);
-      this.logger.info(`Appointment updated: ${appointmentId}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error('Failed to update appointment:', error);
-      throw new Error('Failed to update appointment in Cliniko');
-    }
-  }
-
-  async cancelAppointment(appointmentId, reason = 'Cancelled via WhatsApp') {
-    try {
-      const response = await this.client.delete(`/appointments/${appointmentId}`, {
-        data: { cancellation_reason: reason }
-      });
-      this.logger.info(`Appointment cancelled: ${appointmentId}`);
-      return response.data;
-    } catch (error) {
-      this.logger.error('Failed to cancel appointment:', error);
-      throw new Error('Failed to cancel appointment in Cliniko');
-    }
-  }
-
-  async getPatientAppointments(patientId, params = {}) {
-    try {
-      const defaultParams = {
-        patient_id: patientId,
-        per_page: 50,
-        sort: 'starts_at'
-      };
-
-      return await this.getAppointments({ ...defaultParams, ...params });
-    } catch (error) {
-      this.logger.error('Failed to get patient appointments:', error);
-      throw new Error('Failed to retrieve patient appointments from Cliniko');
-    }
-  }
-
-  async getAppointmentsForDate(date) {
-    try {
-      const startDate = new Date(date);
-      startDate.setHours(0, 0, 0, 0);
-      
-      const endDate = new Date(date);
-      endDate.setHours(23, 59, 59, 999);
-
-      const params = {
-        starts_at_from: startDate.toISOString(),
-        starts_at_to: endDate.toISOString(),
-        per_page: 200
-      };
-
-      return await this.getAppointments(params);
-    } catch (error) {
-      this.logger.error('Failed to get appointments for date:', error);
-      throw new Error('Failed to retrieve appointments for date from Cliniko');
-    }
-  }
-
-  // Available times methods
-  async getAvailableTimes(practitionerId, date, appointmentTypeId) {
-    try {
-      const response = await this.client.get('/available_times', {
-        params: {
-          practitioner_id: practitionerId,
-          date: date,
-          appointment_type_id: appointmentTypeId
-        }
-      });
-
-      return response.data.available_times || [];
-    } catch (error) {
-      this.logger.error('Failed to get available times:', error);
-      throw new Error('Failed to retrieve available times from Cliniko');
-    }
-  }
-
-  // Appointment types methods
-  async getAppointmentTypes() {
-    try {
-      const response = await this.client.get('/appointment_types', {
-        params: {
-          per_page: 100
-        }
-      });
-
-      return response.data.appointment_types || [];
-    } catch (error) {
-      this.logger.error('Failed to get appointment types:', error);
-      throw new Error('Failed to retrieve appointment types from Cliniko');
-    }
-  }
-
-  async getAppointmentType(appointmentTypeId) {
-    try {
-      const response = await this.client.get(`/appointment_types/${appointmentTypeId}`);
-      return response.data;
-    } catch (error) {
-      if (error.response?.status === 404) {
-        return null;
-      }
-      this.logger.error('Failed to get appointment type:', error);
-      throw new Error('Failed to retrieve appointment type from Cliniko');
-    }
-  }
-
-  // Business methods
-  async getBusiness() {
-    try {
-      const response = await this.client.get('/businesses');
-      return response.data.businesses?.[0] || null;
-    } catch (error) {
-      this.logger.error('Failed to get business:', error);
-      throw new Error('Failed to retrieve business from Cliniko');
-    }
-  }
-
-  async getBusinessHours() {
-    try {
-      const response = await this.client.get('/business_hours');
-      return response.data.business_hours || [];
-    } catch (error) {
-      this.logger.error('Failed to get business hours:', error);
-      throw new Error('Failed to retrieve business hours from Cliniko');
-    }
-  }
-
-  // Helper methods
-  async findNextAvailableSlot(practitionerId, appointmentTypeId, startDate = new Date()) {
-    try {
-      const searchDays = 14; // Search for next 14 days
-      const slots = [];
-
-      for (let i = 0; i < searchDays; i++) {
-        const searchDate = new Date(startDate);
-        searchDate.setDate(startDate.getDate() + i);
+    constructor(config) {
+        this.apiKey = config.apiKey;
+        this.subdomain = config.subdomain;
+        this.baseURL = `https://api.${this.subdomain}.cliniko.com/v1`;
+        this.userAgent = config.userAgent || 'WhatsApp-Healthcare-Bot/1.0';
         
-        // Skip weekends (assuming clinic is closed)
-        if (searchDate.getDay() === 0 || searchDate.getDay() === 6) {
-          continue;
+        // Initialize axios instance
+        this.client = axios.create({
+            baseURL: this.baseURL,
+            headers: {
+                'User-Agent': this.userAgent,
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            auth: {
+                username: this.apiKey,
+                password: '' // Cliniko uses API key as username, empty password
+            },
+            timeout: 30000
+        });
+
+        // Rate limiting tracking (Cliniko: 5000 requests per hour)
+        this.rateLimitTracker = {
+            requests: 0,
+            resetTime: Date.now() + 3600000, // 1 hour
+            maxRequests: 5000
+        };
+    }
+
+    // Rate limiting check
+    checkRateLimit() {
+        const now = Date.now();
+        if (now > this.rateLimitTracker.resetTime) {
+            this.rateLimitTracker.requests = 0;
+            this.rateLimitTracker.resetTime = now + 3600000;
         }
 
-        const availableTimes = await this.getAvailableTimes(
-          practitionerId,
-          searchDate.toISOString().split('T')[0],
-          appointmentTypeId
-        );
-
-        if (availableTimes.length > 0) {
-          slots.push({
-            date: searchDate,
-            times: availableTimes
-          });
+        if (this.rateLimitTracker.requests >= this.rateLimitTracker.maxRequests) {
+            throw new Error('Cliniko API rate limit exceeded');
         }
-
-        // Return first 5 days with availability
-        if (slots.length >= 5) {
-          break;
-        }
-      }
-
-      return slots;
-    } catch (error) {
-      this.logger.error('Failed to find next available slot:', error);
-      throw new Error('Failed to find available appointment slots');
-    }
-  }
-
-  async validateAppointmentSlot(practitionerId, appointmentTypeId, dateTime) {
-    try {
-      const date = new Date(dateTime).toISOString().split('T')[0];
-      const availableTimes = await this.getAvailableTimes(practitionerId, date, appointmentTypeId);
-      
-      const requestedTime = new Date(dateTime).toISOString();
-      return availableTimes.some(slot => slot.starts_at === requestedTime);
-    } catch (error) {
-      this.logger.error('Failed to validate appointment slot:', error);
-      return false;
-    }
-  }
-
-  // Utility methods
-  formatPatientName(patient) {
-    return `${patient.first_name} ${patient.last_name}`.trim();
-  }
-
-  formatAppointmentDateTime(appointment) {
-    const date = new Date(appointment.starts_at);
-    return {
-      date: date.toLocaleDateString(),
-      time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      datetime: date
-    };
-  }
-
-  formatPractitionerName(practitioner) {
-    return `${practitioner.first_name} ${practitioner.last_name}`.trim();
-  }
-
-  // Health check
-  async healthCheck() {
-    try {
-      await this.getBusiness();
-      return true;
-    } catch (error) {
-      this.logger.error('Cliniko API health check failed:', error);
-      return false;
-    }
-  }
-
-  // Rate limiting awareness
-  async withRateLimit(operation) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (error.response?.status === 429) {
-        // Rate limited - wait and retry
-        const retryAfter = error.response.headers['retry-after'] || 60;
-        this.logger.warn(`Rate limited, waiting ${retryAfter} seconds`);
         
-        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-        return await operation();
-      }
-      throw error;
+        this.rateLimitTracker.requests++;
     }
-  }
 
-  // Error handling with specific Cliniko error codes
-  handleClinikoError(error) {
-    if (error.response?.data?.errors) {
-      const errors = error.response.data.errors;
-      const errorMessages = errors.map(err => err.message || err).join(', ');
-      throw new Error(`Cliniko API Error: ${errorMessages}`);
+    // Handle API response and rate limiting headers
+    handleResponse(response) {
+        if (response.headers['x-ratelimit-remaining']) {
+            this.rateLimitTracker.requests = this.rateLimitTracker.maxRequests - 
+                parseInt(response.headers['x-ratelimit-remaining']);
+        }
+        return response.data;
     }
+
+    // PATIENT MANAGEMENT
     
-    switch (error.response?.status) {
-      case 401:
-        throw new Error('Cliniko API authentication failed - check API key');
-      case 403:
-        throw new Error('Cliniko API access forbidden - insufficient permissions');
-      case 404:
-        throw new Error('Cliniko resource not found');
-      case 422:
-        throw new Error('Cliniko API validation error - invalid data provided');
-      case 429:
-        throw new Error('Cliniko API rate limit exceeded');
-      case 500:
-        throw new Error('Cliniko API server error');
-      default:
-        throw new Error(`Cliniko API error: ${error.message}`);
+    // Get all patients
+    async getPatients(params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/patients', { params });
+            console.log('Patients retrieved:', response.data.patients?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting patients:', error.response?.data || error.message);
+            throw error;
+        }
     }
-  }
+
+    // Get patient by ID
+    async getPatient(patientId) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get(`/patients/${patientId}`);
+            console.log('Patient retrieved:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting patient:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Search patients by phone number
+    async findPatientByPhone(phoneNumber) {
+        this.checkRateLimit();
+        
+        // Clean phone number (remove + and spaces)
+        const cleanPhone = phoneNumber.replace(/[\+\s\-\(\)]/g, '');
+        
+        try {
+            const response = await this.client.get('/patients', {
+                params: {
+                    q: cleanPhone,
+                    per_page: 50
+                }
+            });
+            
+            const patients = response.data.patients || [];
+            
+            // Find exact match by phone number
+            const matchedPatient = patients.find(patient => {
+                const patientPhone = (patient.phone_number || '').replace(/[\+\s\-\(\)]/g, '');
+                const patientMobile = (patient.mobile_phone_number || '').replace(/[\+\s\-\(\)]/g, '');
+                return patientPhone.includes(cleanPhone) || patientMobile.includes(cleanPhone) ||
+                       cleanPhone.includes(patientPhone) || cleanPhone.includes(patientMobile);
+            });
+            
+            if (matchedPatient) {
+                console.log('Patient found by phone:', matchedPatient.id);
+                return matchedPatient;
+            }
+            
+            console.log('No patient found with phone:', phoneNumber);
+            return null;
+        } catch (error) {
+            console.error('Error finding patient by phone:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Create new patient
+    async createPatient(patientData) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.post('/patients', patientData);
+            console.log('Patient created:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error creating patient:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Update patient
+    async updatePatient(patientId, patientData) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.put(`/patients/${patientId}`, patientData);
+            console.log('Patient updated:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error updating patient:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // APPOINTMENT MANAGEMENT
+
+    // Get appointments
+    async getAppointments(params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/appointments', { params });
+            console.log('Appointments retrieved:', response.data.appointments?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting appointments:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Get patient appointments
+    async getPatientAppointments(patientId, params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/appointments', {
+                params: {
+                    patient_id: patientId,
+                    ...params
+                }
+            });
+            console.log('Patient appointments retrieved:', response.data.appointments?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting patient appointments:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Get upcoming appointments for patient
+    async getUpcomingAppointments(patientId, days = 30) {
+        const today = new Date();
+        const futureDate = new Date();
+        futureDate.setDate(today.getDate() + days);
+
+        return await this.getPatientAppointments(patientId, {
+            starts_at_from: today.toISOString(),
+            starts_at_to: futureDate.toISOString(),
+            per_page: 50
+        });
+    }
+
+    // Create appointment
+    async createAppointment(appointmentData) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.post('/appointments', appointmentData);
+            console.log('Appointment created:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error creating appointment:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Update appointment
+    async updateAppointment(appointmentId, appointmentData) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.put(`/appointments/${appointmentId}`, appointmentData);
+            console.log('Appointment updated:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error updating appointment:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Cancel appointment
+    async cancelAppointment(appointmentId, reason = 'Cancelled by patient') {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.put(`/appointments/${appointmentId}`, {
+                cancellation_reason: reason,
+                cancelled_at: new Date().toISOString()
+            });
+            console.log('Appointment cancelled:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error cancelling appointment:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // PRACTITIONER MANAGEMENT
+
+    // Get practitioners
+    async getPractitioners(params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/practitioners', { params });
+            console.log('Practitioners retrieved:', response.data.practitioners?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting practitioners:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Get practitioner by ID
+    async getPractitioner(practitionerId) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get(`/practitioners/${practitionerId}`);
+            console.log('Practitioner retrieved:', response.data.id);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting practitioner:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // APPOINTMENT TYPE MANAGEMENT
+
+    // Get appointment types
+    async getAppointmentTypes(params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/appointment_types', { params });
+            console.log('Appointment types retrieved:', response.data.appointment_types?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting appointment types:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // AVAILABILITY MANAGEMENT
+
+    // Get available times
+    async getAvailableTimes(practitionerId, appointmentTypeId, params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/available_times', {
+                params: {
+                    practitioner_id: practitionerId,
+                    appointment_type_id: appointmentTypeId,
+                    ...params
+                }
+            });
+            console.log('Available times retrieved:', response.data.available_times?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting available times:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Get next available appointments
+    async getNextAvailableSlots(practitionerId, appointmentTypeId, days = 14, limit = 10) {
+        const today = new Date();
+        const futureDate = new Date();
+        futureDate.setDate(today.getDate() + days);
+
+        return await this.getAvailableTimes(practitionerId, appointmentTypeId, {
+            from: today.toISOString().split('T')[0],
+            to: futureDate.toISOString().split('T')[0],
+            per_page: limit
+        });
+    }
+
+    // BUSINESS MANAGEMENT
+
+    // Get businesses
+    async getBusinesses(params = {}) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get('/businesses', { params });
+            console.log('Businesses retrieved:', response.data.businesses?.length || 0);
+            return this.handleResponse(response);
+        } catch (error) {
+            console.error('Error getting businesses:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // HEALTHCARE-SPECIFIC UTILITIES
+
+    // Format appointment for WhatsApp
+    formatAppointmentForWhatsApp(appointment) {
+        const startTime = new Date(appointment.starts_at);
+        const endTime = new Date(appointment.ends_at);
+        
+        return {
+            id: appointment.id,
+            dateTime: startTime.toLocaleString(),
+            date: startTime.toLocaleDateString(),
+            time: startTime.toLocaleTimeString(),
+            duration: `${(endTime - startTime) / (1000 * 60)} minutes`,
+            practitioner: appointment.practitioner?.name || 'Unknown',
+            appointmentType: appointment.appointment_type?.name || 'Appointment',
+            status: appointment.cancelled_at ? 'Cancelled' : 'Scheduled',
+            notes: appointment.notes || ''
+        };
+    }
+
+    // Check if appointment is in next 24 hours
+    isAppointmentSoon(appointment, hours = 24) {
+        const appointmentTime = new Date(appointment.starts_at);
+        const now = new Date();
+        const hoursFromNow = new Date(now.getTime() + (hours * 60 * 60 * 1000));
+        
+        return appointmentTime >= now && appointmentTime <= hoursFromNow;
+    }
+
+    // Get patient's next appointment
+    async getPatientNextAppointment(patientId) {
+        try {
+            const appointments = await this.getPatientAppointments(patientId, {
+                starts_at_from: new Date().toISOString(),
+                per_page: 1,
+                sort: 'starts_at'
+            });
+            
+            return appointments.appointments?.[0] || null;
+        } catch (error) {
+            console.error('Error getting patient next appointment:', error.message);
+            return null;
+        }
+    }
+
+    // Create quick appointment booking
+    async bookAppointment(patientId, practitionerId, appointmentTypeId, startTime, notes = '') {
+        const appointmentData = {
+            patient_id: patientId,
+            practitioner_id: practitionerId,
+            appointment_type_id: appointmentTypeId,
+            starts_at: startTime,
+            notes: notes,
+            booking_ip_address: '127.0.0.1' // Required by Cliniko
+        };
+
+        return await this.createAppointment(appointmentData);
+    }
+
+    // Send appointment reminder data
+    async getAppointmentReminderData(appointmentId) {
+        this.checkRateLimit();
+        
+        try {
+            const response = await this.client.get(`/appointments/${appointmentId}`, {
+                params: {
+                    include: 'patient,practitioner,appointment_type,business'
+                }
+            });
+            
+            const appointment = response.data;
+            
+            return {
+                patient: appointment.patient,
+                practitioner: appointment.practitioner,
+                appointmentType: appointment.appointment_type,
+                business: appointment.business,
+                appointment: appointment,
+                formatted: this.formatAppointmentForWhatsApp(appointment)
+            };
+        } catch (error) {
+            console.error('Error getting appointment reminder data:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    // Get rate limit stats
+    getRateLimitStats() {
+        return {
+            requestsUsed: this.rateLimitTracker.requests,
+            maxRequests: this.rateLimitTracker.maxRequests,
+            resetTime: this.rateLimitTracker.resetTime,
+            remaining: this.rateLimitTracker.maxRequests - this.rateLimitTracker.requests
+        };
+    }
+
+    // Validate patient data
+    validatePatientData(patientData) {
+        const required = ['first_name', 'last_name'];
+        const missing = required.filter(field => !patientData[field]);
+        
+        if (missing.length > 0) {
+            throw new Error(`Missing required patient fields: ${missing.join(', ')}`);
+        }
+
+        // Validate phone number format
+        if (patientData.phone_number || patientData.mobile_phone_number) {
+            const phoneRegex = /^[\+]?[1-9][\d\s\-\(\)]{7,15}$/;
+            const phone = patientData.phone_number || patientData.mobile_phone_number;
+            if (!phoneRegex.test(phone)) {
+                throw new Error('Invalid phone number format');
+            }
+        }
+
+        return true;
+    }
+
+    // Validate appointment data
+    validateAppointmentData(appointmentData) {
+        const required = ['patient_id', 'practitioner_id', 'appointment_type_id', 'starts_at'];
+        const missing = required.filter(field => !appointmentData[field]);
+        
+        if (missing.length > 0) {
+            throw new Error(`Missing required appointment fields: ${missing.join(', ')}`);
+        }
+
+        // Validate date format
+        if (appointmentData.starts_at) {
+            const date = new Date(appointmentData.starts_at);
+            if (isNaN(date.getTime())) {
+                throw new Error('Invalid appointment start time format');
+            }
+            
+            // Check if appointment is in the past
+            if (date < new Date()) {
+                throw new Error('Appointment cannot be scheduled in the past');
+            }
+        }
+
+        return true;
+    }
 }
 
 module.exports = ClinikoAPI;
