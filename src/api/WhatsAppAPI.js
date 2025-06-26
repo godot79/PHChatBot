@@ -1,306 +1,414 @@
-// src/api/WhatsAppAPI.js
 const axios = require('axios');
-const Logger = require('../utils/Logger');
+const FormData = require('form-data');
+const fs = require('fs');
 
+/**
+ * WhatsApp Business API Integration
+ * Handles: Messages, Media, Templates, Buttons, Lists, Contacts
+ */
 class WhatsAppAPI {
-  constructor(accessToken, phoneNumberId) {
-    this.accessToken = accessToken;
-    this.phoneNumberId = phoneNumberId;
-    this.baseURL = 'https://graph.facebook.com/v18.0';
-    this.logger = new Logger('WhatsAppAPI');
-
-    this.client = axios.create({
-      baseURL: this.baseURL,
+  constructor() {
+    this.baseURL = `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}`;
+    this.accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+    this.webhookVerifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+    
+    // Request configuration
+    this.axiosConfig = {
       headers: {
-        'Authorization': `Bearer ${accessToken}`,
+        'Authorization': `Bearer ${this.accessToken}`,
         'Content-Type': 'application/json'
       },
-      timeout: 30000
-    });
-
-    // Add request/response interceptors for logging
-    this.client.interceptors.request.use(
-      (config) => {
-        this.logger.debug('WhatsApp API Request:', {
-          method: config.method,
-          url: config.url,
-          data: config.data
-        });
-        return config;
-      },
-      (error) => {
-        this.logger.error('WhatsApp API Request Error:', error);
-        return Promise.reject(error);
-      }
-    );
-
-    this.client.interceptors.response.use(
-      (response) => {
-        this.logger.debug('WhatsApp API Response:', {
-          status: response.status,
-          data: response.data
-        });
-        return response;
-      },
-      (error) => {
-        this.logger.error('WhatsApp API Response Error:', {
-          status: error.response?.status,
-          data: error.response?.data,
-          message: error.message
-        });
-        return Promise.reject(error);
-      }
-    );
+      timeout: 30000 // 30 second timeout
+    };
+    
+    // Message templates cache
+    this.templates = new Map();
+    this.templateCache = {
+      lastUpdated: null,
+      templates: []
+    };
   }
 
-  async sendMessage(to, text, options = {}) {
+  /**
+   * Send a simple text message
+   */
+  async sendTextMessage(to, text, options = {}) {
     try {
-      const messageData = {
-        messaging_product: 'whatsapp',
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: to,
-        type: 'text',
+        type: "text",
         text: {
+          preview_url: options.preview_url || false,
           body: text
         }
       };
 
-      // Add preview URL if provided
-      if (options.preview_url !== undefined) {
-        messageData.text.preview_url = options.preview_url;
+      if (options.context && options.context.message_id) {
+        payload.context = {
+          message_id: options.context.message_id
+        };
       }
 
-      const response = await this.client.post(
-        `/${this.phoneNumberId}/messages`,
-        messageData
-      );
-
-      this.logger.info(`Message sent to ${to}: ${text.substring(0, 100)}...`);
-      return response.data;
-
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] Text message sent to ${to}:`, text.substring(0, 100));
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
+      };
+      
     } catch (error) {
-      this.logger.error('Failed to send message:', error.response?.data || error.message);
-      throw new Error('Failed to send WhatsApp message');
+      console.error('[WHATSAPP] Send text message error:', error.response?.data || error.message);
+      throw new Error(`Failed to send text message: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
-  async sendInteractiveMessage(to, message) {
+  /**
+   * Send interactive button message
+   */
+  async sendButtonMessage(to, text, buttons, options = {}) {
     try {
-      const messageData = {
-        messaging_product: 'whatsapp',
+      // Validate buttons
+      if (!Array.isArray(buttons) || buttons.length === 0 || buttons.length > 3) {
+        throw new Error('Buttons must be an array with 1-3 items');
+      }
+
+      const formattedButtons = buttons.map((button, index) => ({
+        type: "reply",
+        reply: {
+          id: button.id || `btn_${index}`,
+          title: button.title.substring(0, 20) // Max 20 chars
+        }
+      }));
+
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: to,
-        type: 'interactive',
-        interactive: message
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: {
+            text: text
+          },
+          action: {
+            buttons: formattedButtons
+          }
+        }
       };
 
-      const response = await this.client.post(
-        `/${this.phoneNumberId}/messages`,
-        messageData
-      );
+      if (options.header) {
+        payload.interactive.header = {
+          type: "text",
+          text: options.header
+        };
+      }
 
-      this.logger.info(`Interactive message sent to ${to}`);
-      return response.data;
+      if (options.footer) {
+        payload.interactive.footer = {
+          text: options.footer
+        };
+      }
 
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] Button message sent to ${to}:`, buttons.map(b => b.title).join(', '));
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
+      };
+      
     } catch (error) {
-      this.logger.error('Failed to send interactive message:', error.response?.data || error.message);
-      throw new Error('Failed to send WhatsApp interactive message');
+      console.error('[WHATSAPP] Send button message error:', error.response?.data || error.message);
+      throw new Error(`Failed to send button message: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
-  async sendTemplateMessage(to, templateName, languageCode = 'en_US', components = []) {
+  /**
+   * Send interactive list message
+   */
+  async sendListMessage(to, text, buttonText, sections, options = {}) {
     try {
-      const messageData = {
-        messaging_product: 'whatsapp',
+      // Validate sections
+      if (!Array.isArray(sections) || sections.length === 0 || sections.length > 10) {
+        throw new Error('Sections must be an array with 1-10 items');
+      }
+
+      const formattedSections = sections.map(section => ({
+        title: section.title,
+        rows: section.rows.map(row => ({
+          id: row.id,
+          title: row.title.substring(0, 24), // Max 24 chars
+          description: row.description ? row.description.substring(0, 72) : undefined // Max 72 chars
+        }))
+      }));
+
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: to,
-        type: 'template',
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: {
+            text: text
+          },
+          action: {
+            button: buttonText.substring(0, 20), // Max 20 chars
+            sections: formattedSections
+          }
+        }
+      };
+
+      if (options.header) {
+        payload.interactive.header = {
+          type: "text",
+          text: options.header
+        };
+      }
+
+      if (options.footer) {
+        payload.interactive.footer = {
+          text: options.footer
+        };
+      }
+
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] List message sent to ${to}:`, sections.length + ' sections');
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
+      };
+      
+    } catch (error) {
+      console.error('[WHATSAPP] Send list message error:', error.response?.data || error.message);
+      throw new Error(`Failed to send list message: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Send template message
+   */
+  async sendTemplateMessage(to, templateName, languageCode = 'en_US', parameters = []) {
+    try {
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "template",
         template: {
           name: templateName,
           language: {
             code: languageCode
-          },
-          components: components
+          }
         }
       };
 
-      const response = await this.client.post(
-        `/${this.phoneNumberId}/messages`,
-        messageData
-      );
-
-      this.logger.info(`Template message sent to ${to}: ${templateName}`);
-      return response.data;
-
-    } catch (error) {
-      this.logger.error('Failed to send template message:', error.response?.data || error.message);
-      throw new Error('Failed to send WhatsApp template message');
-    }
-  }
-
-  async sendButtonMessage(to, text, buttons) {
-    try {
-      const interactiveMessage = {
-        type: 'button',
-        body: {
-          text: text
-        },
-        action: {
-          buttons: buttons.map((button, index) => ({
-            type: 'reply',
-            reply: {
-              id: button.id || `btn_${index}`,
-              title: button.title
-            }
+      // Add parameters if provided
+      if (parameters.length > 0) {
+        payload.template.components = [{
+          type: "body",
+          parameters: parameters.map(param => ({
+            type: "text",
+            text: param
           }))
-        }
+        }];
+      }
+
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] Template message sent to ${to}:`, templateName);
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
       };
-
-      return await this.sendInteractiveMessage(to, interactiveMessage);
-
+      
     } catch (error) {
-      this.logger.error('Failed to send button message:', error);
-      throw new Error('Failed to send WhatsApp button message');
+      console.error('[WHATSAPP] Send template message error:', error.response?.data || error.message);
+      throw new Error(`Failed to send template message: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
-  async sendListMessage(to, text, buttonText, sections) {
+  /**
+   * Send media message (image, document, audio, video)
+   */
+  async sendMediaMessage(to, mediaType, mediaUrl, options = {}) {
     try {
-      const interactiveMessage = {
-        type: 'list',
-        body: {
-          text: text
-        },
-        action: {
-          button: buttonText,
-          sections: sections.map(section => ({
-            title: section.title,
-            rows: section.rows.map(row => ({
-              id: row.id,
-              title: row.title,
-              description: row.description || ''
-            }))
-          }))
-        }
-      };
+      const validTypes = ['image', 'document', 'audio', 'video'];
+      if (!validTypes.includes(mediaType)) {
+        throw new Error(`Invalid media type. Must be one of: ${validTypes.join(', ')}`);
+      }
 
-      return await this.sendInteractiveMessage(to, interactiveMessage);
-
-    } catch (error) {
-      this.logger.error('Failed to send list message:', error);
-      throw new Error('Failed to send WhatsApp list message');
-    }
-  }
-
-  async sendLocationMessage(to, latitude, longitude, name, address) {
-    try {
-      const messageData = {
-        messaging_product: 'whatsapp',
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: to,
-        type: 'location',
+        type: mediaType,
+        [mediaType]: {
+          link: mediaUrl
+        }
+      };
+
+      // Add caption for image/video
+      if ((mediaType === 'image' || mediaType === 'video') && options.caption) {
+        payload[mediaType].caption = options.caption;
+      }
+
+      // Add filename for document
+      if (mediaType === 'document' && options.filename) {
+        payload[mediaType].filename = options.filename;
+      }
+
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] ${mediaType} message sent to ${to}:`, mediaUrl);
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
+      };
+      
+    } catch (error) {
+      console.error(`[WHATSAPP] Send ${mediaType} message error:`, error.response?.data || error.message);
+      throw new Error(`Failed to send ${mediaType} message: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Send location message
+   */
+  async sendLocationMessage(to, latitude, longitude, name = '', address = '') {
+    try {
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "location",
         location: {
-          latitude: latitude,
-          longitude: longitude,
+          latitude: parseFloat(latitude),
+          longitude: parseFloat(longitude),
           name: name,
           address: address
         }
       };
 
-      const response = await this.client.post(
-        `/${this.phoneNumberId}/messages`,
-        messageData
-      );
-
-      this.logger.info(`Location message sent to ${to}`);
-      return response.data;
-
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] Location message sent to ${to}:`, `${latitude}, ${longitude}`);
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
+      };
+      
     } catch (error) {
-      this.logger.error('Failed to send location message:', error.response?.data || error.message);
-      throw new Error('Failed to send WhatsApp location message');
+      console.error('[WHATSAPP] Send location message error:', error.response?.data || error.message);
+      throw new Error(`Failed to send location message: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
-  async sendDocumentMessage(to, documentUrl, filename, caption = '') {
+  /**
+   * Send contact message
+   */
+  async sendContactMessage(to, contacts) {
     try {
-      const messageData = {
-        messaging_product: 'whatsapp',
+      if (!Array.isArray(contacts)) {
+        contacts = [contacts];
+      }
+
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: to,
-        type: 'document',
-        document: {
-          link: documentUrl,
-          filename: filename,
-          caption: caption
-        }
+        type: "contacts",
+        contacts: contacts.map(contact => ({
+          name: {
+            formatted_name: contact.name,
+            first_name: contact.firstName || contact.name
+          },
+          phones: contact.phones ? contact.phones.map(phone => ({
+            phone: phone.number,
+            type: phone.type || 'WORK'
+          })) : [],
+          emails: contact.emails ? contact.emails.map(email => ({
+            email: email.address,
+            type: email.type || 'WORK'
+          })) : []
+        }))
       };
 
-      const response = await this.client.post(
-        `/${this.phoneNumberId}/messages`,
-        messageData
-      );
-
-      this.logger.info(`Document message sent to ${to}: ${filename}`);
-      return response.data;
-
+      const response = await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      
+      console.log(`[WHATSAPP] Contact message sent to ${to}:`, contacts.length + ' contacts');
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        status: response.data.messages[0].message_status
+      };
+      
     } catch (error) {
-      this.logger.error('Failed to send document message:', error.response?.data || error.message);
-      throw new Error('Failed to send WhatsApp document message');
+      console.error('[WHATSAPP] Send contact message error:', error.response?.data || error.message);
+      throw new Error(`Failed to send contact message: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
-  async markMessageAsRead(messageId) {
+  /**
+   * Mark message as read
+   */
+  async markAsRead(messageId) {
     try {
-      const response = await this.client.post(
-        `/${this.phoneNumberId}/messages`,
-        {
-          messaging_product: 'whatsapp',
-          status: 'read',
-          message_id: messageId
+      const payload = {
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId
+      };
+
+      await axios.post(`${this.baseURL}/messages`, payload, this.axiosConfig);
+      console.log(`[WHATSAPP] Message marked as read:`, messageId);
+      return { success: true };
+      
+    } catch (error) {
+      console.error('[WHATSAPP] Mark as read error:', error.response?.data || error.message);
+      throw new Error(`Failed to mark message as read: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Get media URL from media ID
+   */
+  async getMediaUrl(mediaId) {
+    try {
+      const response = await axios.get(`https://graph.facebook.com/v18.0/${mediaId}`, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`
         }
-      );
+      });
 
-      this.logger.debug(`Message marked as read: ${messageId}`);
-      return response.data;
-
+      return {
+        success: true,
+        url: response.data.url,
+        mimeType: response.data.mime_type,
+        sha256: response.data.sha256,
+        fileSize: response.data.file_size
+      };
+      
     } catch (error) {
-      this.logger.error('Failed to mark message as read:', error.response?.data || error.message);
-      // Don't throw error for read receipts as it's not critical
-      return null;
+      console.error('[WHATSAPP] Get media URL error:', error.response?.data || error.message);
+      throw new Error(`Failed to get media URL: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
-  async getBusinessProfile() {
-    try {
-      const response = await this.client.get(`/${this.phoneNumberId}`);
-      this.logger.info('Business profile retrieved');
-      return response.data;
-
-    } catch (error) {
-      this.logger.error('Failed to get business profile:', error.response?.data || error.message);
-      throw new Error('Failed to get WhatsApp business profile');
-    }
-  }
-
-  async updateBusinessProfile(profileData) {
-    try {
-      const response = await this.client.post(`/${this.phoneNumberId}`, profileData);
-      this.logger.info('Business profile updated');
-      return response.data;
-
-    } catch (error) {
-      this.logger.error('Failed to update business profile:', error.response?.data || error.message);
-      throw new Error('Failed to update WhatsApp business profile');
-    }
-  }
-
-  async getMedia(mediaId) {
-    try {
-      const response = await this.client.get(`/${mediaId}`);
-      return response.data;
-
-    } catch (error) {
-      this.logger.error('Failed to get media:', error.response?.data || error.message);
-      throw new Error('Failed to get WhatsApp media');
-    }
-  }
-
-  async downloadMedia(mediaUrl) {
+  /**
+   * Download media file
+   */
+  async downloadMedia(mediaUrl, filepath) {
     try {
       const response = await axios.get(mediaUrl, {
         headers: {
@@ -309,104 +417,226 @@ class WhatsAppAPI {
         responseType: 'stream'
       });
 
-      return response.data;
+      const writer = fs.createWriteStream(filepath);
+      response.data.pipe(writer);
 
-    } catch (error) {
-      this.logger.error('Failed to download media:', error.response?.data || error.message);
-      throw new Error('Failed to download WhatsApp media');
-    }
-  }
-
-  // Utility methods for creating common message formats
-  createQuickReplyButtons(options) {
-    return options.map((option, index) => ({
-      id: option.id || `option_${index}`,
-      title: option.title.substring(0, 20) // WhatsApp button title limit
-    }));
-  }
-
-  createListSections(items, title = 'Options') {
-    const sections = [];
-    const itemsPerSection = 10; // WhatsApp list section limit
-
-    for (let i = 0; i < items.length; i += itemsPerSection) {
-      const sectionItems = items.slice(i, i + itemsPerSection);
-      sections.push({
-        title: sections.length === 0 ? title : `${title} (${sections.length + 1})`,
-        rows: sectionItems.map(item => ({
-          id: item.id,
-          title: item.title.substring(0, 24), // WhatsApp list item title limit
-          description: item.description ? item.description.substring(0, 72) : '' // WhatsApp list item description limit
-        }))
+      return new Promise((resolve, reject) => {
+        writer.on('finish', () => {
+          console.log(`[WHATSAPP] Media downloaded:`, filepath);
+          resolve({ success: true, filepath });
+        });
+        writer.on('error', reject);
       });
+      
+    } catch (error) {
+      console.error('[WHATSAPP] Download media error:', error.response?.data || error.message);
+      throw new Error(`Failed to download media: ${error.response?.data?.error?.message || error.message}`);
     }
-
-    return sections;
   }
 
-  // Health check method
+  /**
+   * Get available message templates
+   */
+  async getMessageTemplates(limit = 100) {
+    try {
+      // Check cache first (refresh every 24 hours)
+      const now = Date.now();
+      if (this.templateCache.lastUpdated && (now - this.templateCache.lastUpdated) < 24 * 60 * 60 * 1000) {
+        return { success: true, templates: this.templateCache.templates };
+      }
+
+      const response = await axios.get(`https://graph.facebook.com/v18.0/${process.env.WHATSAPP_BUSINESS_ACCOUNT_ID}/message_templates`, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`
+        },
+        params: {
+          limit: limit,
+          fields: 'name,status,category,language,components'
+        }
+      });
+
+      // Update cache
+      this.templateCache.templates = response.data.data;
+      this.templateCache.lastUpdated = now;
+
+      console.log(`[WHATSAPP] Retrieved ${response.data.data.length} message templates`);
+      return {
+        success: true,
+        templates: response.data.data
+      };
+      
+    } catch (error) {
+      console.error('[WHATSAPP] Get templates error:', error.response?.data || error.message);
+      throw new Error(`Failed to get message templates: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Verify webhook signature
+   */
+  verifyWebhookSignature(payload, signature) {
+    const crypto = require('crypto');
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.WHATSAPP_APP_SECRET)
+      .update(payload)
+      .digest('hex');
+
+    return signature === `sha256=${expectedSignature}`;
+  }
+
+  /**
+   * Process incoming webhook
+   */
+  async processWebhook(body) {
+    try {
+      const entry = body.entry?.[0];
+      if (!entry) return null;
+
+      const changes = entry.changes?.[0];
+      if (!changes) return null;
+
+      const value = changes.value;
+      const field = changes.field;
+
+      if (field !== 'messages') return null;
+
+      // Process messages
+      if (value.messages) {
+        for (const message of value.messages) {
+          await this.processIncomingMessage(message, value);
+        }
+      }
+
+      // Process message status updates
+      if (value.statuses) {
+        for (const status of value.statuses) {
+          await this.processMessageStatus(status);
+        }
+      }
+
+      return { success: true, processed: true };
+      
+    } catch (error) {
+      console.error('[WHATSAPP] Process webhook error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Process individual incoming message
+   */
+  async processIncomingMessage(message, metadata) {
+    const messageData = {
+      id: message.id,
+      from: message.from,
+      timestamp: parseInt(message.timestamp) * 1000, // Convert to JS timestamp
+      type: message.type,
+      context: message.context || null
+    };
+
+    // Extract message content based on type
+    switch (message.type) {
+      case 'text':
+        messageData.text = message.text.body;
+        break;
+        
+      case 'image':
+      case 'document':
+      case 'audio':
+      case 'video':
+        messageData.media = {
+          id: message[message.type].id,
+          mimeType: message[message.type].mime_type,
+          sha256: message[message.type].sha256,
+          caption: message[message.type].caption || null
+        };
+        if (message.type === 'document') {
+          messageData.media.filename = message[message.type].filename;
+        }
+        break;
+        
+      case 'location':
+        messageData.location = {
+          latitude: message.location.latitude,
+          longitude: message.location.longitude,
+          name: message.location.name || null,
+          address: message.location.address || null
+        };
+        break;
+        
+      case 'contacts':
+        messageData.contacts = message.contacts;
+        break;
+        
+      case 'interactive':
+        if (message.interactive.type === 'button_reply') {
+          messageData.buttonReply = {
+            id: message.interactive.button_reply.id,
+            title: message.interactive.button_reply.title
+          };
+        } else if (message.interactive.type === 'list_reply') {
+          messageData.listReply = {
+            id: message.interactive.list_reply.id,
+            title: message.interactive.list_reply.title,
+            description: message.interactive.list_reply.description || null
+          };
+        }
+        break;
+    }
+
+    console.log(`[WHATSAPP] Received ${message.type} message from ${message.from}`);
+    return messageData;
+  }
+
+  /**
+   * Process message status updates
+   */
+  async processMessageStatus(status) {
+    console.log(`[WHATSAPP] Message ${status.id} status: ${status.status}`);
+    
+    // You can emit events or update database here
+    return {
+      messageId: status.id,
+      status: status.status,
+      timestamp: parseInt(status.timestamp) * 1000,
+      recipientId: status.recipient_id
+    };
+  }
+
+  /**
+   * Get business profile
+   */
+  async getBusinessProfile() {
+    try {
+      const response = await axios.get(`${this.baseURL}`, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`
+        },
+        params: {
+          fields: 'id,name,category,description,email,websites,profile_picture_url'
+        }
+      });
+
+      return {
+        success: true,
+        profile: response.data
+      };
+      
+    } catch (error) {
+      console.error('[WHATSAPP] Get business profile error:', error.response?.data || error.message);
+      throw new Error(`Failed to get business profile: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  /**
+   * Health check - verify API connectivity
+   */
   async healthCheck() {
     try {
       await this.getBusinessProfile();
-      return true;
+      return { success: true, status: 'healthy' };
     } catch (error) {
-      this.logger.error('WhatsApp API health check failed:', error);
-      return false;
-    }
-  }
-
-  // Format phone number for WhatsApp
-  static formatPhoneNumber(phoneNumber) {
-    // Remove all non-digit characters
-    const cleaned = phoneNumber.replace(/\D/g, '');
-    
-    // Add country code if not present (assuming US/Canada)
-    if (cleaned.length === 10) {
-      return `1${cleaned}`;
-    }
-    
-    return cleaned;
-  }
-
-  // Validate WhatsApp message
-  static validateMessage(message) {
-    if (!message || typeof message !== 'string') {
-      return { valid: false, error: 'Message must be a non-empty string' };
-    }
-
-    if (message.length > 4096) {
-      return { valid: false, error: 'Message exceeds 4096 character limit' };
-    }
-
-    return { valid: true };
-  }
-
-  // Error handling wrapper
-  async withErrorHandling(operation, operationName) {
-    try {
-      return await operation();
-    } catch (error) {
-      this.logger.error(`${operationName} failed:`, error);
-      
-      // Handle specific WhatsApp API errors
-      if (error.response?.data?.error) {
-        const whatsappError = error.response.data.error;
-        
-        switch (whatsappError.code) {
-          case 131056: // Message undeliverable
-            throw new Error('Message could not be delivered to this number');
-          case 131051: // Unsupported message type
-            throw new Error('This message type is not supported');
-          case 131052: // Re-engagement message
-            throw new Error('Cannot send message - user needs to message us first');
-          case 100: // Invalid parameter
-            throw new Error('Invalid message parameters');
-          default:
-            throw new Error(whatsappError.message || 'WhatsApp API error');
-        }
-      }
-      
-      throw error;
+      return { success: false, status: 'unhealthy', error: error.message };
     }
   }
 }
