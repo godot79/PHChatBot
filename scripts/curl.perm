@@ -1,0 +1,5 @@
+curl -X POST "https://graph.facebook.com/v19.0/oauth/access_token" \
+  -d "grant_type=fb_exchange_token" \
+  -d "client_id=1096518285630314" \
+  -d "client_secret=116dcb4d6e9b495ff5a7a93b77e870de" \
+  -d "fb_exchange_token=EAAPlRw7nm2oBPF1QVYZA7QyflZCaFC8JTu8Vqz95DIo8rBDpwMSCAVplFQZBwWDsFc6hJhazAnNHSxFjUZC0HwK9X2ZAUyafDEBhbe6eDZBZAA8LTULjZAiCd91gF0b4xniflZBiD15U2qW6V5NFWGP8rfxaTvjdqiYFCufOrCuZBatG9613CL7LFs8S8aKJEUrs9Ukpb5f0GX5xcos3wibYg1Euqs6pFONhi6EZCOfoyMaugtaUpaIVlcKntXhMVOmpuEZD"

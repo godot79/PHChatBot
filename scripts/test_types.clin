@@ -1,0 +1,44 @@
+require('dotenv').config();
+const axios = require('axios');
+
+const PRACTITIONER_ID = '1446168189565142292'; // Jolinna Chan
+
+async function fetchAppointmentTypesForPractitioner() {
+  try {
+    //const apiKey = process.env.CLINIKO_API_KEY;
+    const apiKey = 'MS0xNzI2MDgxNDk0NzM0MDc5MTc0LUNNNGU5OUlIS0l2N2dPUzFVZC9SWE9JZXpxTkxPQ0VD-au1';
+    console.log(`🌍 CLINIKO_API_KEY env length: ${process.env.CLINIKO_API_KEY?.length}`);
+    console.log(`🌍 CLINIKO_API_KEY env length: ${apiKey?.length}`);
+    if (!apiKey) throw new Error('CLINIKO_API_KEY missing from .env');
+
+    console.log(`🔑 Using API key prefix: ${apiKey.slice(0, 10)}`);
+
+    //const response = await axios.get('https://api.cliniko.com/v1/appointment_types', {
+    const response = await axios.get('https://api.cliniko.com/v1/businesses', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      }
+    });
+
+    const types = response.data.appointment_types || [];
+
+    const matching = types.filter(t =>
+      Array.isArray(t.practitioner_ids) &&
+      t.practitioner_ids.includes(PRACTITIONER_ID)
+    );
+
+    console.log(`📋 Found ${matching.length} appointment types for practitioner ${PRACTITIONER_ID}:`);
+    matching.forEach(t => {
+      console.log(`• ${t.name} (ID: ${t.id})`);
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching appointment types:', error.message);
+    if (error.response) {
+      console.error('🔎 Response:', JSON.stringify(error.response.data));
+    }
+  }
+}
+
+fetchAppointmentTypesForPractitioner();

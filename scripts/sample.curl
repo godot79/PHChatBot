@@ -1,0 +1,5 @@
+curl -i -X GET  \
+  -u 'MS0xNzEwNzE3OTEzNzI1NDA0OTAyLXRUcXl6NEJtMUVSdGFJUDVxTG9yYTlVZWhIYlExYTIyLWF1MQ:'\
+  -H 'Accept: application/json' \
+  -H 'User-Agent: BookingSysTest (rrv1979@gmail.com)' \
+  https://api.cliniko.com/v1/businesses

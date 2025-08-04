@@ -14,10 +14,6 @@ const healthRoutes = require('./health');
 
 const logger = new Logger('Routes');
 
-/**
- * Mount all routes with their respective prefixes
- */
-
 // Health check routes (no authentication required)
 router.use('/health', healthRoutes);
 
@@ -29,10 +25,10 @@ router.use('/admin', adminRoutes);
 
 /**
  * API documentation endpoint
- * GET /api/docs
+ * GET /docs
  */
 router.get('/docs', (req, res) => {
-  const apiDocs = {
+  res.json({
     service: 'WhatsApp Chatbot API',
     version: '1.0.0',
     description: 'API for WhatsApp chatbot with Cliniko integration',
@@ -74,9 +70,7 @@ router.get('/docs', (req, res) => {
       admin: 'Bearer token required for admin endpoints',
       webhook: 'WhatsApp webhook signature verification'
     }
-  };
-
-  res.json(apiDocs);
+  });
 });
 
 /**
@@ -98,7 +92,6 @@ router.get('/', (req, res) => {
  */
 router.use('*', (req, res) => {
   logger.warn(`404 - Route not found: ${req.method} ${req.originalUrl}`);
-  
   res.status(404).json({
     error: 'Route not found',
     message: `The endpoint ${req.method} ${req.originalUrl} does not exist`,
@@ -118,10 +111,7 @@ router.use('*', (req, res) => {
  */
 router.use((error, req, res, next) => {
   logger.error('Global route error:', error);
-  
-  // Don't expose internal errors in production
   const isDevelopment = process.env.NODE_ENV === 'development';
-  
   res.status(500).json({
     error: 'Internal server error',
     message: isDevelopment ? error.message : 'Something went wrong',

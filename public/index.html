@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PHC WhatsApp Chat Simulator</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>PHC Chat Simulator</h1>
+    <p>Test bot conversations before going live</p>
+  </header>
+
+  <main style="max-width: 800px; margin: 2rem auto;">
+    <!-- Chat area -->
+    <section id="chat-window">
+      <div id="chat-log"></div>
+    </section>
+
+    <!-- Test form -->
+    <form id="testMessageForm">
+      <input id="phoneNumber" type="text" placeholder="Enter phone number" required autocomplete="tel">
+      <input id="message" type="text" placeholder="Enter message" required>
+      <button type="submit" class="refresh-btn">Send</button>
+      <button type="button" id="clear-chat" class="refresh-btn">Clear</button>
+    </form>
+    <p id="status"></p>
+  </main>
+
+  <footer>
+    <p>© 2025 Physio ChatBot | Internal testing only</p>
+  </footer>
+
+  <script src="/js/test-form.js" defer></script>
+</body>
+</html>

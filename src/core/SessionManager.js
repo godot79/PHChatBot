@@ -5,23 +5,30 @@ const DatabaseManager = require('./DatabaseManager');
 class SessionManager {
     constructor(databaseManager = null) {
         this.db = databaseManager || new DatabaseManager();
-        this.logger = new Logger();
+        this.logger = new Logger('SessionManager');
         this.sessionTimeouts = new Map();
         this.defaultSessionDuration = 30; // minutes
         this.verificationTimeout = 5; // minutes
         this.maxVerificationAttempts = 3;
         
-        // Conversation states
+        // Conversation states - aligned with ChatbotEngine
         this.states = {
-            INITIAL: 'initial',
+            VERIFY: 'VERIFY',
+            MAIN_MENU: 'MAIN_MENU',
+            UNVERIFIED_MENU: 'UNVERIFIED_MENU', // Add missing state
+            BOOK_APPOINTMENT: 'BOOK_APPOINTMENT',
+            CANCEL_APPOINTMENT: 'CANCEL_APPOINTMENT',
+            RESCHEDULE_APPOINTMENT: 'RESCHEDULE_APPOINTMENT',
+            REGISTER_PATIENT: 'REGISTER_PATIENT',
+            VIEW_FEES: 'VIEW_FEES',
+            VIEW_PHYSIOS: 'VIEW_PHYSIOS',
+            SYSTEM_HEALTH: 'SYSTEM_HEALTH',
+            FALLBACK: 'FALLBACK',
+            // Additional states for internal use
             VERIFICATION_PENDING: 'verification_pending',
             VERIFIED: 'verified',
-            APPOINTMENT_BOOKING: 'appointment_booking',
-            APPOINTMENT_DETAILS: 'appointment_details',
-            CANCELLATION: 'cancellation',
-            RESCHEDULING: 'rescheduling',
-            COMPLETED: 'completed',
-            ERROR: 'error'
+            ERROR: 'error',
+            COMPLETED: 'completed'
         };
 
         // Start cleanup interval
@@ -32,25 +39,34 @@ class SessionManager {
      * Initialize session manager
      */
     async initialize() {
-        if (!this.db.isInitialized) {
-            await this.db.initialize();
+        try {
+            if (!this.db.isInitialized) {
+                await this.db.initialize();
+            }
+            this.logger.info('SessionManager initialized');
+        } catch (error) {
+            this.logger.error('Failed to initialize SessionManager:', error);
+            throw error;
         }
-        this.logger.info('SessionManager initialized');
     }
 
     /**
-     * Create or get existing session for a phone number
+     * Create or get existing session for a phone number - FIXED
      */
     async getOrCreateSession(phoneNumber, forceNew = false) {
         try {
             // Normalize phone number
             const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
             
+            if (!normalizedPhone) {
+                throw new Error('Invalid phone number provided');
+            }
+            
             if (!forceNew) {
                 // Try to get existing active session
                 const existingSession = await this.db.getSessionByPhone(normalizedPhone);
-                if (existingSession) {
-                    // Update last activity
+                if (existingSession && !this.isSessionExpired(existingSession)) {
+                    // Update last activity safely - but don't fail if it doesn't work
                     await this.updateSessionActivity(existingSession.id);
                     this.logger.debug(`Retrieved existing session ${existingSession.id} for ${normalizedPhone}`);
                     return this.parseSession(existingSession);
@@ -64,13 +80,27 @@ class SessionManager {
                 this.defaultSessionDuration
             );
 
+            // Verify the session was created before trying to retrieve it
+            if (!sessionId) {
+                throw new Error('Failed to create session - no session ID returned');
+            }
+
+            // Add a small delay to ensure database consistency
+            await new Promise(resolve => setTimeout(resolve, 10));
+
             const session = await this.db.getSession(sessionId);
+            if (!session) {
+                throw new Error(`Session ${sessionId} was created but cannot be retrieved`);
+            }
+
             this.logger.info(`Created new session ${sessionId} for ${normalizedPhone}`);
             
+            // Don't call updateSessionActivity immediately after creation
+            // as the session was just created with current timestamp
             return this.parseSession(session);
         } catch (error) {
             this.logger.error('Failed to get or create session:', error);
-            throw new Error('Session creation failed');
+            throw new Error('Session creation failed: ' + error.message);
         }
     }
 
@@ -79,8 +109,18 @@ class SessionManager {
      */
     async getSession(sessionId) {
         try {
+            if (!sessionId) {
+                return null;
+            }
+
             const session = await this.db.getSession(sessionId);
             if (!session) {
+                return null;
+            }
+            
+            // Check if session is expired
+            if (this.isSessionExpired(session)) {
+                this.logger.debug(`Session ${sessionId} is expired`);
                 return null;
             }
             
@@ -93,12 +133,55 @@ class SessionManager {
     }
 
     /**
+     * Get session by phone number
+     */
+    async getSessionByPhone(phoneNumber) {
+        try {
+            const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
+            if (!normalizedPhone) {
+                return null;
+            }
+
+            const session = await this.db.getSessionByPhone(normalizedPhone);
+            if (!session) {
+                return null;
+            }
+            
+            // Check if session is expired
+            if (this.isSessionExpired(session)) {
+                this.logger.debug(`Session ${session.id} is expired for phone ${normalizedPhone}`);
+                return null;
+            }
+            
+            await this.updateSessionActivity(session.id);
+            return this.parseSession(session);
+        } catch (error) {
+            this.logger.error(`Failed to get session by phone ${phoneNumber}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Check if session is expired
+     */
+    isSessionExpired(session) {
+        if (!session || !session.expires_at) {
+            return true;
+        }
+        return new Date(session.expires_at) <= new Date();
+    }
+
+    /**
      * Update session state and context
      */
     async updateSession(sessionId, updates = {}) {
         try {
+            if (!sessionId) {
+                throw new Error('Session ID is required');
+            }
+
             const allowedUpdates = [
-                'patient_id', 'verification_status', 'conversation_state', 'context'
+                'patient_id', 'verification_status', 'conversation_state', 'context', 'verified', "data"
             ];
 
             const filteredUpdates = {};
@@ -113,15 +196,89 @@ class SessionManager {
             }
 
             if (Object.keys(filteredUpdates).length === 0) {
-                throw new Error('No valid updates provided');
+                this.logger.warn(`No valid updates provided for session ${sessionId}`);
+                return await this.getSession(sessionId);
             }
 
-            await this.db.updateSession(sessionId, filteredUpdates);
+            const result = await this.db.updateSession(sessionId, filteredUpdates);
+            if (result === 0) {
+                this.logger.warn(`No session found to update with ID ${sessionId}`);
+                return null;
+            }
+
             this.logger.debug(`Updated session ${sessionId}:`, filteredUpdates);
-            
             return await this.getSession(sessionId);
         } catch (error) {
             this.logger.error(`Failed to update session ${sessionId}:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Save session - handles both session objects and phone number lookups
+     */
+    async saveSession(session) {
+        try {
+            if (!session) {
+                throw new Error('Session object is required');
+            }
+
+            // Handle different input types
+            let sessionToSave;
+            let sessionId;
+
+            if (typeof session === 'string') {
+                // If it's a phone number, get the session first
+                const phoneNumber = this.normalizePhoneNumber(session);
+                sessionToSave = await this.getSessionByPhone(phoneNumber);
+                if (!sessionToSave) {
+                    throw new Error(`No session found for phone number: ${phoneNumber}`);
+                }
+                sessionId = sessionToSave.id;
+            } else if (session.id) {
+                // If it's a session object with ID
+                sessionId = session.id;
+                sessionToSave = session;
+            } else if (session.phone_number || session.phoneNumber) {
+                // If it's a session object without ID, try to find by phone
+                const phoneNumber = this.normalizePhoneNumber(session.phone_number || session.phoneNumber);
+                const existingSession = await this.getSessionByPhone(phoneNumber);
+                if (existingSession) {
+                    sessionId = existingSession.id;
+                    sessionToSave = { ...existingSession, ...session };
+                } else {
+                    throw new Error(`No session found for phone number: ${phoneNumber}`);
+                }
+            } else {
+                throw new Error('Session must have either id or phone_number');
+            }
+
+            // Prepare updates
+            const updates = {};
+            
+            // Map common session properties
+            if (sessionToSave.verified !== undefined) {
+                updates.verified = sessionToSave.verified ? 1 : 0;
+            }
+            if (sessionToSave.state) {
+                updates.conversation_state = sessionToSave.state;
+            }
+            if (sessionToSave.conversation_state) {
+                updates.conversation_state = sessionToSave.conversation_state;
+            }
+            if (sessionToSave.context) {
+                updates.context = sessionToSave.context;
+            }
+            if (sessionToSave.patient_id) {
+                updates.patient_id = sessionToSave.patient_id;
+            }
+            if (sessionToSave.verification_status) {
+                updates.verification_status = sessionToSave.verification_status;
+            }
+
+            return await this.updateSession(sessionId, updates);
+        } catch (error) {
+            this.logger.error('Failed to save session:', error);
             throw error;
         }
     }
@@ -167,7 +324,8 @@ class SessionManager {
 
             const updates = {
                 verification_status: verified ? 'verified' : 'failed',
-                conversation_state: verified ? this.states.VERIFIED : this.states.ERROR
+                conversation_state: verified ? this.states.VERIFIED : this.states.ERROR,
+                verified: verified ? 1 : 0
             };
 
             if (verified) {
@@ -230,7 +388,8 @@ class SessionManager {
     async setState(sessionId, state, context = null) {
         try {
             if (!Object.values(this.states).includes(state)) {
-                throw new Error(`Invalid state: ${state}`);
+                this.logger.warn(`Invalid state: ${state}, using FALLBACK instead`);
+                state = this.states.FALLBACK;
             }
 
             const updates = { conversation_state: state };
@@ -293,8 +452,13 @@ class SessionManager {
      * Check if session is verified
      */
     async isVerified(sessionId) {
-        const session = await this.getSession(sessionId);
-        return session && session.verification_status === 'verified';
+        try {
+            const session = await this.getSession(sessionId);
+            return session && (session.verification_status === 'verified' || session.verified);
+        } catch (error) {
+            this.logger.error(`Failed to check verification status for session ${sessionId}:`, error);
+            return false;
+        }
     }
 
     /**
@@ -302,10 +466,9 @@ class SessionManager {
      */
     requiresVerification(state) {
         const protectedStates = [
-            this.states.APPOINTMENT_BOOKING,
-            this.states.APPOINTMENT_DETAILS,
-            this.states.CANCELLATION,
-            this.states.RESCHEDULING
+            this.states.BOOK_APPOINTMENT,
+            this.states.CANCEL_APPOINTMENT,
+            this.states.RESCHEDULE_APPOINTMENT
         ];
         return protectedStates.includes(state);
     }
@@ -354,15 +517,47 @@ class SessionManager {
     }
 
     /**
-     * Update session activity timestamp
+     * Update session activity timestamp - FIXED with better error handling
      */
     async updateSessionActivity(sessionId) {
         try {
-            await this.db.updateSession(sessionId, {
-                last_activity: new Date().toISOString()
+            if (!sessionId) {
+                this.logger.warn('Cannot update activity: sessionId is required');
+                return false;
+            }
+
+            // First check if session exists
+            const session = await this.db.getSession(sessionId);
+            if (!session) {
+                this.logger.warn(`Cannot update activity: session ${sessionId} not found`);
+                return false;
+            }
+
+            // Check if session is expired before updating
+            if (this.isSessionExpired(session)) {
+                this.logger.debug(`Session ${sessionId} is expired, skipping activity update`);
+                return false;
+            }
+
+            // Update with current timestamp
+            const timestamp = new Date().toISOString();
+            const result = await this.db.updateSession(sessionId, {
+                last_activity: timestamp
             });
+
+            if (result === 0) {
+                this.logger.warn(`No rows updated for session activity ${sessionId}`);
+                return false;
+            }
+
+            this.logger.debug(`Updated activity for session ${sessionId} to ${timestamp}`);
+            return true;
         } catch (error) {
-            this.logger.error(`Failed to update activity for session ${sessionId}:`, error);
+            this.logger.error(`Failed to update activity for session ${sessionId}:`, {
+                error: error.message,
+                stack: error.stack
+            });
+            return false;
         }
     }
 
@@ -405,27 +600,60 @@ class SessionManager {
         if (!sessionData) return null;
 
         const session = { ...sessionData };
-        
+
+        // Normalize phone number properties
+        if (!session.phoneNumber && session.phone_number) {
+            session.phoneNumber = session.phone_number;
+        }
+        if (!session.phone_number && session.phoneNumber) {
+            session.phone_number = session.phoneNumber;
+        }
+
+        // Normalize verification status
+        if (!session.verificationStatus && session.verification_status) {
+            session.verificationStatus = session.verification_status;
+        }
+
+        // Map conversation_state to state for compatibility
+        if (!session.state && session.conversation_state) {
+            session.state = session.conversation_state;
+        }
+
+        // Normalize verified field
+        if (session.verified === undefined && session.verification_status === 'verified') {
+            session.verified = true;
+        } else if (typeof session.verified === 'number') {
+            session.verified = session.verified === 1;
+        }
+
         // Parse context JSON
-        if (session.context) {
+        if (session.context && typeof session.context === 'string') {
             try {
                 session.context = JSON.parse(session.context);
             } catch (error) {
                 this.logger.warn(`Failed to parse context for session ${session.id}:`, error);
                 session.context = {};
             }
-        } else {
+        } else if (!session.context) {
             session.context = {};
         }
 
-        // Add computed properties
-        session.isExpired = new Date(session.expires_at) <= new Date();
-        session.isVerified = session.verification_status === 'verified';
+        // Computed properties
+        session.isExpired = this.isSessionExpired(session);
+        session.isVerified = session.verification_status === 'verified' || session.verified;
         session.timeRemaining = Math.max(0, new Date(session.expires_at) - new Date());
 
         return session;
     }
+    
 
+    async updateSessionActivity(sessionId) {
+    try {
+        await this.db.updateSession(sessionId, { last_activity: new Date().toISOString() });
+    } catch (err) {
+        this.logger.error(`Failed to update activity for session ${sessionId}:`, err);
+    }
+}   
     /**
      * Normalize phone number to consistent format
      */
@@ -435,23 +663,32 @@ class SessionManager {
         // Remove all non-digit characters
         const digits = phoneNumber.replace(/\D/g, '');
         
+        // Validate minimum length
+        if (digits.length < 10) {
+            this.logger.warn(`Invalid phone number length: ${digits.length} digits`);
+            return null;
+        }
+        
         // Handle different country codes and formats
-        if (digits.startsWith('61') && digits.length === 11) {
+        if (digits.startsWith('91') && digits.length === 12) {
+            // Indian format: +91xxxxxxxxxx
+            return `+${digits}`;
+        } else if (digits.startsWith('0') && digits.length === 11) {
+            // Indian domestic format: 0xxxxxxxxxx -> +91xxxxxxxxxx
+            return `+91${digits.substring(1)}`;
+        } else if (digits.length === 10) {
+            // Indian without leading 0: xxxxxxxxxx -> +91xxxxxxxxxx
+            return `+91${digits}`;
+        } else if (digits.startsWith('61') && digits.length === 11) {
             // Australian format: +61xxxxxxxxx
             return `+${digits}`;
-        } else if (digits.startsWith('0') && digits.length === 10) {
-            // Australian domestic format: 0xxxxxxxxx -> +61xxxxxxxxx
-            return `+61${digits.substring(1)}`;
-        } else if (digits.length === 9) {
-            // Australian without leading 0: xxxxxxxxx -> +61xxxxxxxxx
-            return `+61${digits}`;
         } else if (digits.startsWith('1') && digits.length === 11) {
             // US/Canada format: +1xxxxxxxxxx
             return `+${digits}`;
         }
         
         // Default: assume it's already in international format or add +
-        return digits.startsWith('+') ? digits : `+${digits}`;
+        return digits.startsWith('+') ? phoneNumber : `+${digits}`;
     }
 
     /**
@@ -497,48 +734,93 @@ class SessionManager {
      */
     validateStateTransition(currentState, newState) {
         const validTransitions = {
-            [this.states.INITIAL]: [
+            [this.states.VERIFY]: [
                 this.states.VERIFICATION_PENDING,
                 this.states.VERIFIED,
+                this.states.MAIN_MENU,
+                this.states.UNVERIFIED_MENU,
+                this.states.VIEW_FEES,
+                this.states.VIEW_PHYSIOS,
                 this.states.ERROR
             ],
             [this.states.VERIFICATION_PENDING]: [
                 this.states.VERIFIED,
                 this.states.ERROR,
-                this.states.INITIAL
+                this.states.VERIFY
             ],
             [this.states.VERIFIED]: [
-                this.states.APPOINTMENT_BOOKING,
-                this.states.APPOINTMENT_DETAILS,
-                this.states.CANCELLATION,
-                this.states.RESCHEDULING,
+                this.states.MAIN_MENU,
+                this.states.BOOK_APPOINTMENT,
+                this.states.CANCEL_APPOINTMENT,
+                this.states.RESCHEDULE_APPOINTMENT,
                 this.states.COMPLETED,
                 this.states.ERROR
             ],
-            [this.states.APPOINTMENT_BOOKING]: [
-                this.states.APPOINTMENT_DETAILS,
-                this.states.VERIFIED,
+            [this.states.MAIN_MENU]: [
+                this.states.BOOK_APPOINTMENT,
+                this.states.CANCEL_APPOINTMENT,
+                this.states.RESCHEDULE_APPOINTMENT,
+                this.states.REGISTER_PATIENT,
+                this.states.VIEW_FEES,
+                this.states.VIEW_PHYSIOS,
+                this.states.SYSTEM_HEALTH,
+                this.states.FALLBACK,
                 this.states.COMPLETED,
                 this.states.ERROR
             ],
-            [this.states.APPOINTMENT_DETAILS]: [
-                this.states.VERIFIED,
+            [this.states.UNVERIFIED_MENU]: [
+                this.states.VIEW_FEES,
+                this.states.VIEW_PHYSIOS,
+                this.states.REGISTER_PATIENT,
+                this.states.FALLBACK,
+                this.states.ERROR
+            ],
+            [this.states.BOOK_APPOINTMENT]: [
+                this.states.MAIN_MENU,
                 this.states.COMPLETED,
                 this.states.ERROR
             ],
-            [this.states.CANCELLATION]: [
-                this.states.VERIFIED,
+            [this.states.CANCEL_APPOINTMENT]: [
+                this.states.MAIN_MENU,
                 this.states.COMPLETED,
                 this.states.ERROR
             ],
-            [this.states.RESCHEDULING]: [
-                this.states.APPOINTMENT_BOOKING,
-                this.states.VERIFIED,
+            [this.states.RESCHEDULE_APPOINTMENT]: [
+                this.states.MAIN_MENU,
                 this.states.COMPLETED,
+                this.states.ERROR
+            ],
+            [this.states.REGISTER_PATIENT]: [
+                this.states.MAIN_MENU,
+                this.states.UNVERIFIED_MENU,
+                this.states.COMPLETED,
+                this.states.ERROR
+            ],
+            [this.states.VIEW_FEES]: [
+                this.states.MAIN_MENU,
+                this.states.UNVERIFIED_MENU,
+                this.states.REGISTER_PATIENT,
+                this.states.ERROR
+            ],
+            [this.states.VIEW_PHYSIOS]: [
+                this.states.MAIN_MENU,
+                this.states.UNVERIFIED_MENU,
+                this.states.REGISTER_PATIENT,
+                this.states.ERROR
+            ],
+            [this.states.SYSTEM_HEALTH]: [
+                this.states.MAIN_MENU,
+                this.states.ERROR
+            ],
+            [this.states.FALLBACK]: [
+                this.states.MAIN_MENU,
+                this.states.UNVERIFIED_MENU,
                 this.states.ERROR
             ],
             [this.states.ERROR]: [
-                this.states.INITIAL,
+                this.states.VERIFY,
+                this.states.MAIN_MENU,
+                this.states.UNVERIFIED_MENU,
                 this.states.COMPLETED
             ],
             [this.states.COMPLETED]: []
@@ -578,7 +860,7 @@ class SessionManager {
                 WHERE expires_at > datetime('now')
                 ORDER BY last_activity DESC
             `;
-            return await this.db.all(sql);
+            return await this.db.query(sql);
         } catch (error) {
             this.logger.error('Failed to get active sessions:', error);
             throw error;
@@ -594,6 +876,11 @@ class SessionManager {
             clearTimeout(timeout);
         }
         this.sessionTimeouts.clear();
+
+        // Close database connection
+        if (this.db && typeof this.db.close === 'function') {
+            await this.db.close();
+        }
 
         this.logger.info('SessionManager closed');
     }

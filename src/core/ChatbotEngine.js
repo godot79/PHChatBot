@@ -1,1529 +1,1366 @@
-    /**
-     * Handle patient verification state - phone-based lookup
-     */
-    async handlePatientVerificationState(session, message, messageId) {
-        this.logger.info(`Handling patient verification for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        
-        // If patient already verified in session, proceed to DOB verification
-        if (sessionData.patient && !sessionData.verified) {
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.DOB_VERIFICATION);
-            return {
-                message: this.templates.dobVerification,
-                nextState: this.STATES.DOB_VERIFICATION
-            };
-        }
-        
-        // If already verified, proceed based on flow
-        if (sessionData.verified) {
-            return await this.routeVerifiedUser(session, sessionData.flow);
-        }
-        
-        try {
-            // Look up patient by phone number
-            const patient = await this.clinikoAPI.findPatientByPhone(session.phoneNumber);
-            
-            if (!patient) {
-                return {
-                    message: "❌ We couldn't find your details in our system using this phone number.\n\nThis might mean:\n• You're registered with a different number\n• You're a new patient\n\nWould you like to:\n1️⃣ Try a different phone number\n2️⃣ Register as a new patient\n3️⃣ Contact support",
-                    nextState: this.STATES.SUPPORT
-                };
-            }
-            
-            // Store patient data but don't mark as verified yet
-            await this.sessionManager.updateSessionData(session.sessionId, {
-                ...sessionData,
-                patient: patient
-            });
-            
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.DOB_VERIFICATION);
-            
-            return {
-                message: this.templates.dobVerification,
-                nextState: this.STATES.DOB_VERIFICATION
-            };
-            
-        } catch (error) {
-            this.logger.error(`Patient verification error: ${error.message}`);
-            return {
-                message: "❌ Unable to verify your details at the moment. Please try again later or contact support.",
-                nextState: this.STATES.SUPPORT
-            };
-        }
-    }
+// File: /src/core/ChatbotEngine.js
 
-    /**
-     * Handle date of birth verification state
-     */
-    async handleDOBVerificationState(session, message, messageId) {
-        this.logger.info(`Handling DOB verification for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        const dobInput = message.trim();
-        
-        // Validate DOB format
-        if (!this.isValidDOBFormat(dobInput)) {
-            return {
-                message: "Please enter your date of birth in the correct format: DD/MM/YYYY\n\nExample: 15/03/1990",
-                nextState: this.STATES.DOB_VERIFICATION
-            };
-        }
-        
-        try {
-            // Verify DOB matches patient record
-            const patient = sessionData.patient;
-            if (!patient) {
-                throw new Error('Patient data not found in session');
-            }
-            
-            const dobMatch = await this.clinikoAPI.verifyPatientDOB(patient.id, dobInput);
-            
-            if (!dobMatch) {
-                return {
-                    message: "❌ The date of birth doesn't match our records. Please try again or contact support if you believe this is an error.\n\nFormat: DD/MM/YYYY",
-                    nextState: this.STATES.DOB_VERIFICATION
-                };
-            }
-            
-            // Mark as verified and proceed based on flow
-            await this.sessionManager.updateSessionData(session.sessionId, {
-                ...sessionData,
-                verified: true
-            });
-            
-            const flow = sessionData.flow || 'booking';
-            return await this.routeVerifiedUser(session, flow);
-            
-        } catch (error) {
-            this.logger.error(`DOB verification error: ${error.message}`);
-            return {
-                message: "❌ Unable to verify your details at the moment. Please try again later or contact support.",
-                nextState: this.STATES.SUPPORT
-            };
-        }
-    }
-
-    /**
-     * Route verified user based on their intended flow
-     */            
-            practitionerSelection: "Please select your preferred practitioner:\n\n{practitioners}\n\nReply with the number of your choice.",const Logger = require('./Logger');
-const DatabaseManager = require('./DatabaseManager');
+const ConversationService = require('../services/ConversationService.js');
+const ClinikoAPI = require('../api/ClinikoAPI.js');
+const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
-const WhatsAppAPI = require('../api/WhatsAppAPI');
-const ClinikoAPI = require('../api/ClinikoAPI');
+const Logger = require('./Logger.js');
+const axios = require('axios');
 
 /**
- * ChatbotEngine - Core conversation orchestrator
- * Manages conversation flows, state transitions, and business logic
+ * Extracts the Cliniko ID from a reference object.
+ * @param {object} obj - Cliniko reference object.
+ * @param {string} type - Resource type (e.g., 'businesses').
+ * @returns {string|undefined}
+ */
+function extractIdFromClinikoRef(obj, type) {
+  if (!obj) return undefined;
+  if (obj.id) return obj.id;
+  const url = obj.links?.self;
+  if (url) {
+    const parts = url.split('/');
+    const idx = parts.findIndex(p => p === type);
+    if (idx !== -1 && parts[idx + 1]) return parts[idx + 1];
+    return parts[parts.length - 1];
+  }
+  return undefined;
+}
+
+/**
+ * Main Chatbot conversation engine for WhatsApp/Cliniko integration.
  */
 class ChatbotEngine {
-    constructor() {
-        this.logger = new Logger('ChatbotEngine');
-        this.sessionManager = new SessionManager();
-        this.whatsappAPI = new WhatsAppAPI();
-        this.clinikoAPI = new ClinikoAPI();
-        this.conversationFlows = new Map();
-        
-        // Initialize conversation flows
-        this.initializeFlows();
-        
-        // Conversation states
-        this.STATES = {
-            INITIAL: 'initial',
-            MAIN_MENU: 'main_menu',
-            NEW_USER_WELCOME: 'new_user_welcome',
-            PATIENT_VERIFICATION: 'patient_verification',
-            DOB_VERIFICATION: 'dob_verification',
-            NEW_PATIENT_REGISTRATION: 'new_patient_registration',
-            SERVICES_INFO: 'services_info',
-            LOCATIONS_INFO: 'locations_info',
-            APPOINTMENT_BOOKING: 'appointment_booking',
-            APPOINTMENT_MANAGEMENT: 'appointment_management',
-            PRACTITIONER_SELECTION: 'practitioner_selection',
-            DATETIME_SELECTION: 'datetime_selection',
-            CONFIRMATION: 'confirmation',
-            FEEDBACK: 'feedback',
-            SUPPORT: 'support',
-            COMPLETED: 'completed',
-            ERROR: 'error'
-        };
-        
-        // Message templates
-        this.templates = {
-            welcome: "🏥 Welcome to {clinicName}!\n\nI'm your virtual assistant. How can I help you today?\n\n1️⃣ Book an appointment\n2️⃣ Manage existing appointment\n3️⃣ Learn about our services\n4️⃣ Contact support\n\nReply with a number or describe what you need.",
-            
-            mainMenu: "How can I assist you?\n\n1️⃣ Book new appointment\n2️⃣ Reschedule appointment\n3️⃣ Cancel appointment\n4️⃣ View appointment details\n5️⃣ Learn about our services\n6️⃣ Contact support\n\nReply with a number.",
-            
-            newUserWelcome: "👋 Hello! I can see you're new to {clinicName}.\n\nI'd love to help you learn more about us!\n\n1️⃣ View our services & rates\n2️⃣ See our locations & hours\n3️⃣ Book your first appointment\n4️⃣ Speak to our team\n\nWhat interests you most?",
-            
-            patientVerification: "I'm looking up your details using your phone number...\n\nPlease wait a moment. ⏳",
-            
-            dobVerification: "I found your details! For security, please confirm your date of birth:\n\nFormat: DD/MM/YYYY\n\nExample: 15/03/1990",
-            
-            
-            servicesInfo: "🏥 **Our Services & Rates**\n\n💊 **General Practice**\n• Consultation: $85\n• Health Check: $120\n• Vaccination: $35\n\n🦴 **Physiotherapy**\n• Initial Assessment: $110\n• Follow-up Session: $85\n• Sports Injury: $95\n\n🧠 **Psychology**\n• Initial Consultation: $180\n• Follow-up Session: $150\n• Group Session: $120\n\n💉 **Pathology**\n• Blood Test: $45\n• Health Screen: $125\n\n*Bulk billing available for eligible patients\n\nWould you like to:\n1️⃣ Book an appointment\n2️⃣ See our locations\n3️⃣ Return to main menu",
-            
-            locationsInfo: "📍 **Our Locations & Hours**\n\n🏥 **Main Clinic**\n📍 123 Health Street, Melbourne VIC\n🕐 Mon-Fri: 8:00 AM - 6:00 PM\n🕐 Saturday: 9:00 AM - 2:00 PM\n📞 (03) 1234-5678\n\n🏥 **North Branch**\n📍 456 Care Avenue, North Melbourne VIC\n🕐 Mon-Fri: 9:00 AM - 5:00 PM\n🕐 Saturday: 9:00 AM - 1:00 PM\n📞 (03) 8765-4321\n\n🚗 Free parking available at both locations\n🚌 Public transport nearby\n\nWould you like to:\n1️⃣ Book an appointment\n2️⃣ View our services\n3️⃣ Get directions\n4️⃣ Return to main menu",
-            
-            newPatientBooking: "🆕 **New Patient Booking**\n\nGreat! I'll help you book your first appointment.\n\nTo get started, I'll need some basic information:\n\n👤 Full Name:\n📧 Email Address:\n📅 Date of Birth (DD/MM/YYYY):\n\nPlease provide these details in separate lines.",
-            
-            appointmentConfirmation: "📅 Appointment Summary:\n\n👤 Patient: {patientName}\n👨‍⚕️ Practitioner: {practitionerName}\n📅 Date: {date}\n🕐 Time: {time}\n🏥 Location: {location}\n\nConfirm booking? Reply 'YES' to confirm or 'NO' to modify.",
-            
-            bookingSuccess: "✅ Appointment booked successfully!\n\n📅 {date} at {time}\n👨‍⚕️ with {practitionerName}\n\nYou'll receive a reminder 24 hours before your appointment.\n\nReference: #{bookingId}",
-            
-            error: "❌ I'm sorry, something went wrong. Please try again or contact support.\n\nError: {error}",
-            
-            invalidInput: "I didn't understand that. Please choose from the available options or type 'help' for assistance.",
-            
-            supportTransfer: "🔄 Transferring you to human support. Someone will assist you shortly.\n\nIn the meantime, you can also call us at {phone} or email {email}."
-        };
-    }
+  constructor() {
+    this.sessionManager = new SessionManager();
+    this.clinikoAPI = new ClinikoAPI();
+    this.STATES = {
+      INTRO: 'INTRO',
+      VERIFY: 'VERIFY',
+      MAIN_MENU: 'MAIN_MENU',
+      UNVERIFIED_MENU: 'UNVERIFIED_MENU',
+      BOOK_APPOINTMENT: 'BOOK_APPOINTMENT',
+      CANCEL_APPOINTMENT: 'CANCEL_APPOINTMENT',
+      CONFIRM_BOOK_SLOT: 'CONFIRM_BOOK_SLOT',
+      CONFIRM_CANCEL: 'CONFIRM_CANCEL',
+      SELECT_APPOINTMENT_TO_CANCEL: 'SELECT_APPOINTMENT_TO_CANCEL',
+      RESCHEDULE_APPOINTMENT: 'RESCHEDULE_APPOINTMENT',
+      SELECT_APPOINTMENT_TO_RESCHEDULE: 'SELECT_APPOINTMENT_TO_RESCHEDULE',
+      CONFIRM_RESCHEDULE: 'CONFIRM_RESCHEDULE',
+      VIEW_FEES: 'VIEW_FEES',
+      VIEW_PHYSIOS: 'VIEW_PHYSIOS',
+      VIEW_CLINICS: 'VIEW_CLINICS',
+      REGISTER_PATIENT: 'REGISTER_PATIENT',
+      SELECT_PHYSIO: 'SELECT_PHYSIO',
+      SELECT_CLINIC_FOR_PHYSIO: 'SELECT_CLINIC_FOR_PHYSIO',
+      SELECT_SLOT: 'SELECT_SLOT',
+      SELECT_CLINIC: 'SELECT_CLINIC',
+      SELECT_PHYSIO_FOR_CLINIC: 'SELECT_PHYSIO_FOR_CLINIC',
+      SYSTEM_HEALTH: 'SYSTEM_HEALTH',
+      FALLBACK: 'FALLBACK'
+    };
+    this.stateHandlers = {};
+    this.logger = new Logger('ChatbotEngine');
+    this.isInitialized = false;
 
-    /**
-     * Initialize conversation flows
-     */
-    initializeFlows() {
-        // Main conversation flow
-        this.conversationFlows.set('main', {
-            [this.STATES.INITIAL]: this.handleInitialState.bind(this),
-            [this.STATES.MAIN_MENU]: this.handleMainMenuState.bind(this),
-            [this.STATES.NEW_USER_WELCOME]: this.handleNewUserWelcomeState.bind(this),
-            [this.STATES.PATIENT_VERIFICATION]: this.handlePatientVerificationState.bind(this),
-            [this.STATES.DOB_VERIFICATION]: this.handleDOBVerificationState.bind(this),
-            [this.STATES.NEW_PATIENT_REGISTRATION]: this.handleNewPatientRegistrationState.bind(this),
-            [this.STATES.SERVICES_INFO]: this.handleServicesInfoState.bind(this),
-            [this.STATES.LOCATIONS_INFO]: this.handleLocationsInfoState.bind(this),
-            [this.STATES.APPOINTMENT_BOOKING]: this.handleAppointmentBookingState.bind(this),
-            [this.STATES.APPOINTMENT_MANAGEMENT]: this.handleAppointmentManagementState.bind(this),
-            [this.STATES.PRACTITIONER_SELECTION]: this.handlePractitionerSelectionState.bind(this),
-            [this.STATES.DATETIME_SELECTION]: this.handleDateTimeSelectionState.bind(this),
-            [this.STATES.CONFIRMATION]: this.handleConfirmationState.bind(this),
-            [this.STATES.FEEDBACK]: this.handleFeedbackState.bind(this),
-            [this.STATES.SUPPORT]: this.handleSupportState.bind(this),
-            [this.STATES.ERROR]: this.handleErrorState.bind(this)
+    this.initializeFlows();
+  }
+
+  /**
+   * Initialize session manager and mark engine as initialized.
+   */
+  async initialize() {
+    try {
+      await this.sessionManager.initialize();
+      this.isInitialized = true;
+      this.logger.info('ChatbotEngine initialized successfully');
+    } catch (error) {
+      this.logger.error('Failed to initialize ChatbotEngine:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Register all state handlers for the chatbot state machine.
+   */
+  initializeFlows() {
+    if (!this.STATES || !this.STATES.MAIN_MENU) {
+      throw new Error('STATES not initialized before calling initializeFlows()');
+    }
+    this.stateHandlers = {
+      [this.STATES.INTRO]: this.handleIntroState.bind(this),
+      [this.STATES.VERIFY]: this.handleVerifyState.bind(this),
+      [this.STATES.MAIN_MENU]: this.handleMainMenuState.bind(this),
+      [this.STATES.UNVERIFIED_MENU]: this.handleUnverifiedMenuState.bind(this),
+      [this.STATES.BOOK_APPOINTMENT]: this.handleBookAppointmentState.bind(this),
+      [this.STATES.CONFIRM_BOOK_SLOT]: this.handleConfirmBookSlotState.bind(this),
+      [this.STATES.CANCEL_APPOINTMENT]: this.handleCancelAppointmentState.bind(this),
+      [this.STATES.CONFIRM_CANCEL]: this.handleConfirmCancelState.bind(this),
+      [this.STATES.SELECT_APPOINTMENT_TO_CANCEL]: this.handleSelectAppointmentToCancelState.bind(this),
+      [this.STATES.RESCHEDULE_APPOINTMENT]: this.handleRescheduleAppointmentState.bind(this),
+      [this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE]: this.handleSelectAppointmentToRescheduleState.bind(this),
+      [this.STATES.CONFIRM_RESCHEDULE]: this.handleConfirmRescheduleState.bind(this),
+      [this.STATES.VIEW_FEES]: this.handleViewFeesState.bind(this),
+      [this.STATES.VIEW_PHYSIOS]: this.handleViewPhysiosState.bind(this),
+      [this.STATES.VIEW_CLINICS]: this.handleViewClinicsState.bind(this),
+      [this.STATES.REGISTER_PATIENT]: this.handleRegisterPatientState.bind(this),
+      [this.STATES.SELECT_PHYSIO]: this.handleSelectPhysioState.bind(this),
+      [this.STATES.SELECT_CLINIC_FOR_PHYSIO]: this.handleSelectClinicForPhysioState.bind(this),
+      [this.STATES.SELECT_SLOT]: this.handleSelectSlotState.bind(this),
+      [this.STATES.SELECT_CLINIC]: this.handleSelectClinicState.bind(this),
+      [this.STATES.SELECT_PHYSIO_FOR_CLINIC]: this.handleSelectPhysioForClinicState.bind(this),
+      [this.STATES.SYSTEM_HEALTH]: this.handleSystemHealthCheck.bind(this),
+      [this.STATES.FALLBACK]: this.handleFallbackState.bind(this)
+    };
+  }
+  /**
+   * Unified error message with menu and support info.
+   * @param {object} session
+   */
+  async renderErrorWithMenu(session) {
+    let menu = '';
+    if (session && session.verified) {
+      menu = await this.renderMainMenu(session);
+    } else if (session) {
+      menu = await this.renderUnverifiedMenu(session);
+    }
+    return (
+      "We encountered an unexpected error processing your request. "
+      + "You can continue using the menu below, or contact support if the issue persists.\n\n"
+      + menu
+      + "\n\nNeed help? Call us at +65 6123 4567 or email support@prohealth.com.sg"
+    );
+  }
+
+  /**
+   * Main entry point: handle a message for a phone number.
+   * @param {string} message
+   * @param {string} phoneNumber
+   */
+  async handleMessage(message, phoneNumber) {
+    try {
+      if (!this.isInitialized) {
+        await this.initialize();
+      }
+      this.logger.debug('Handling message:', { message, phoneNumber });
+      this.logger.info(`🧾 Message from ${phoneNumber}: "${message}"`);
+      let session = await this.sessionManager.getOrCreateSession(phoneNumber);
+      if (!session) {
+        this.logger.warn(`Failed to create session for ${phoneNumber}`);
+        return 'Sorry, there was an issue starting your session. Please try again.';
+      }
+      // If first message, always start at INTRO unless already set
+      if (!session.conversation_state) {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.INTRO
         });
-    }
+        session.conversation_state = this.STATES.INTRO;
+      }
+      const currentState = session.conversation_state || this.STATES.INTRO;
+      this.logger.info(`📌 Current state for ${phoneNumber}: ${currentState}`);
+      if (!this.stateHandlers[currentState]) {
+        this.logger.warn(`No handler found for state: ${currentState}`);
+        return await this.handleFallbackState(session, message);
+      }
+      this.logger.debug(`⚙️ Invoking handler for state: ${currentState}`);
+      const response = await this.stateHandlers[currentState](session, message);
+      if (session.id) {
+        await this.sessionManager.db.addChatHistory(session.id, message, response);
+      }
+      this.logger.info(`💬 Responding to ${phoneNumber}: "${response}"`);
+      return response;
+    } catch (error) {
+      this.logger.error('handleMessage error:', error.stack || error);
 
-    /**
-     * Process incoming message
-     * @param {string} phoneNumber - User's phone number
-     * @param {string} message - Incoming message
-     * @param {string} messageId - WhatsApp message ID
-     */
-    async processMessage(phoneNumber, message, messageId) {
-        try {
-            this.logger.info(`Processing message from ${phoneNumber}: ${message}`);
-            
-            // Get or create session
-            const session = await this.sessionManager.getOrCreateSession(phoneNumber);
-            
-            // Store conversation
-            await this.storeConversation(phoneNumber, message, 'incoming', messageId);
-            
-            // Process based on current state
-            const currentState = session.conversationState || this.STATES.INITIAL;
-            const flowHandler = this.conversationFlows.get('main')[currentState];
-            
-            if (!flowHandler) {
-                throw new Error(`No handler found for state: ${currentState}`);
-            }
-            
-            // Execute flow handler
-            const response = await flowHandler(session, message, messageId);
-            
-            // Send response
-            if (response) {
-                await this.sendResponse(phoneNumber, response, session);
-            }
-            
-        } catch (error) {
-            this.logger.error(`Error processing message: ${error.message}`, error);
-            await this.handleError(phoneNumber, error);
-        }
-    }
+      let session;
+      try {
+        session = await this.sessionManager.getSessionByPhoneNumber?.(phoneNumber);
+      } catch {}
 
-    /**
-     * Handle initial state - phone number lookup and welcome
-     */
-    async handleInitialState(session, message, messageId) {
-        this.logger.info(`Handling initial state for session ${session.sessionId}`);
-        
-        try {
-            // Look up patient by phone number
-            const patient = await this.clinikoAPI.findPatientByPhone(session.phoneNumber);
-            
-            if (patient) {
-                // Existing patient - store patient data and go to main menu
-                await this.sessionManager.updateSessionData(session.sessionId, {
-                    patient: patient,
-                    existingPatient: true
-                });
-                
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.MAIN_MENU);
-                
-                const clinicName = process.env.CLINIC_NAME || 'Healthcare Clinic';
-                const welcomeMessage = `👋 Welcome back ${patient.firstName}!\n\n` + 
-                    this.templates.mainMenu;
-                
-                return {
-                    message: welcomeMessage,
-                    nextState: this.STATES.MAIN_MENU
-                };
-                
-            } else {
-                // New user - show new user welcome
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_USER_WELCOME);
-                
-                const clinicName = process.env.CLINIC_NAME || 'Healthcare Clinic';
-                const newUserMessage = this.templates.newUserWelcome.replace('{clinicName}', clinicName);
-                
-                return {
-                    message: newUserMessage,
-                    nextState: this.STATES.NEW_USER_WELCOME
-                };
-            }
-            
-        } catch (error) {
-            this.logger.error(`Error in initial state: ${error.message}`);
-            
-            // If lookup fails, treat as new user
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_USER_WELCOME);
-            
-            const clinicName = process.env.CLINIC_NAME || 'Healthcare Clinic';
-            const newUserMessage = this.templates.newUserWelcome.replace('{clinicName}', clinicName);
-            
-            return {
-                message: newUserMessage,
-                nextState: this.STATES.NEW_USER_WELCOME
-            };
-        }
+      if (session) {
+        return await this.renderErrorWithMenu(session);
+      }
+      // If even session cannot be loaded, this is likely a backend/service issue.
+      return (
+        "We're currently experiencing a technical issue and could not start your session. "
+      + "Please try again later. If the problem continues, contact us at +65 6123 4567 or email support@prohealth.com.sg"
+      );
     }
+  }
 
-    /**
-     * Handle new user welcome state
-     */
-    async handleNewUserWelcomeState(session, message, messageId) {
-        this.logger.info(`Handling new user welcome for session ${session.sessionId}`);
-        
-        const input = message.trim().toLowerCase();
-        
-        switch (input) {
-            case '1':
-            case 'services':
-            case 'rates':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.SERVICES_INFO);
-                return {
-                    message: this.templates.servicesInfo,
-                    nextState: this.STATES.SERVICES_INFO
-                };
-                
-            case '2':
-            case 'locations':
-            case 'hours':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.LOCATIONS_INFO);
-                return {
-                    message: this.templates.locationsInfo,
-                    nextState: this.STATES.LOCATIONS_INFO
-                };
-                
-            case '3':
-            case 'book':
-            case 'appointment':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_PATIENT_REGISTRATION);
-                return {
-                    message: this.templates.newPatientBooking,
-                    nextState: this.STATES.NEW_PATIENT_REGISTRATION
-                };
-                
-            case '4':
-            case 'team':
-            case 'speak':
-            case 'support':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.SUPPORT);
-                return await this.handleSupportState(session, message, messageId);
-                
-            default:
-                return {
-                    message: "Please choose from the available options (1-4) or describe what you need.",
-                    nextState: this.STATES.NEW_USER_WELCOME
-                };
-        }
+  // ===============================
+  // MENU RENDER HELPERS
+  // ===============================
+
+  /**
+   * Render the main menu for verified users.
+   * @param {object} session
+   */
+  async renderMainMenu(session) {
+    return (
+      `*Main Menu*\n` +
+      `1️⃣ Book Appointment based on history \n` +
+      `2️⃣ Reschedule Appointment\n` +
+      `3️⃣ Cancel Appointment\n` +
+      `4️⃣ View Fees\n` +
+      `5️⃣ View Physios\n` +
+      `6️⃣ View Clinics\n` +
+      `9️⃣ Logout & Clear Data\n` +
+      `0️⃣ Back to Main Menu (you are already at main menu)\n\n` +
+      `Please type a number or keyword.`
+    );
+  }
+
+  /**
+   * Render the guest (unverified) menu.
+   * @param {object} session
+   */
+  async renderUnverifiedMenu(session) {
+    return (
+      `*Guest Menu*\n` +
+      `1️⃣ View Fees\n` +
+      `2️⃣ View Locations\n` +
+      `3️⃣ Register as New Patient\n` +
+      `9️⃣ Logout & Clear Data\n` +
+      `0️⃣ Back to Main Menu (you are already at guest menu)\n\n` +
+      `Please type a number or keyword.`
+    );
+  }
+
+  // ===============================
+  // MENU STATE HANDLERS
+  // ===============================
+
+  /**
+   * Handle the intro state (first message).
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleIntroState(session, message) {
+    const text = message.trim().toLowerCase();
+    // First interaction or user types 'menu'/'0'
+    if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
+      return (
+        `👋 Welcome to ProHealth Chat!\n\n` +
+        `Please select an option:\n` +
+        `1️⃣ Existing Patient\n` +
+        `2️⃣ New Patient\n\n` +
+        `Reply with the number 1 or 2.`
+      );
     }
-
-    /**
-     * Handle services info state
-     */
-    async handleServicesInfoState(session, message, messageId) {
-        this.logger.info(`Handling services info for session ${session.sessionId}`);
-        
-        const input = message.trim().toLowerCase();
-        
-        switch (input) {
-            case '1':
-            case 'book':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_PATIENT_REGISTRATION);
-                return {
-                    message: this.templates.newPatientBooking,
-                    nextState: this.STATES.NEW_PATIENT_REGISTRATION
-                };
-                
-            case '2':
-            case 'locations':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.LOCATIONS_INFO);
-                return {
-                    message: this.templates.locationsInfo,
-                    nextState: this.STATES.LOCATIONS_INFO
-                };
-                
-            case '3':
-            case 'menu':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_USER_WELCOME);
-                const clinicName = process.env.CLINIC_NAME || 'Healthcare Clinic';
-                return {
-                    message: this.templates.newUserWelcome.replace('{clinicName}', clinicName),
-                    nextState: this.STATES.NEW_USER_WELCOME
-                };
-                
-            default:
-                return {
-                    message: "Please choose from the available options (1-3).",
-                    nextState: this.STATES.SERVICES_INFO
-                };
-        }
+    if (text === '1' || text.includes('existing')) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.VERIFY,
+        verified: false
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return await this.handleVerifyState(updatedSession, '');
     }
-
-    /**
-     * Handle locations info state
-     */
-    async handleLocationsInfoState(session, message, messageId) {
-        this.logger.info(`Handling locations info for session ${session.sessionId}`);
-        
-        const input = message.trim().toLowerCase();
-        
-        switch (input) {
-            case '1':
-            case 'book':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_PATIENT_REGISTRATION);
-                return {
-                    message: this.templates.newPatientBooking,
-                    nextState: this.STATES.NEW_PATIENT_REGISTRATION
-                };
-                
-            case '2':
-            case 'services':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.SERVICES_INFO);
-                return {
-                    message: this.templates.servicesInfo,
-                    nextState: this.STATES.SERVICES_INFO
-                };
-                
-            case '3':
-            case 'directions':
-                return {
-                    message: "🗺️ **Directions**\n\n🏥 **Main Clinic:** https://maps.google.com/?q=123+Health+Street+Melbourne\n\n🏥 **North Branch:** https://maps.google.com/?q=456+Care+Avenue+North+Melbourne\n\nWould you like to book an appointment? Reply 'YES' or choose another option.",
-                    nextState: this.STATES.LOCATIONS_INFO
-                };
-                
-            case '4':
-            case 'menu':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_USER_WELCOME);
-                const clinicName = process.env.CLINIC_NAME || 'Healthcare Clinic';
-                return {
-                    message: this.templates.newUserWelcome.replace('{clinicName}', clinicName),
-                    nextState: this.STATES.NEW_USER_WELCOME
-                };
-                
-            case 'yes':
-            case 'book':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.NEW_PATIENT_REGISTRATION);
-                return {
-                    message: this.templates.newPatientBooking,
-                    nextState: this.STATES.NEW_PATIENT_REGISTRATION
-                };
-                
-            default:
-                return {
-                    message: "Please choose from the available options (1-4).",
-                    nextState: this.STATES.LOCATIONS_INFO
-                };
-        }
+    if (text === '2' || text.includes('new')) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.UNVERIFIED_MENU,
+        verified: false
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return await this.renderUnverifiedMenu(updatedSession);
     }
+    // Invalid option
+    return (
+      `Sorry, I didn't understand that.\n` +
+      `Are you an existing or new patient?\n` +
+      `1️⃣ Existing Patient\n` +
+      `2️⃣ New Patient\n\n` +
+      `Reply with 1 or 2.`
+    );
+  }
 
-    /**
-     * Handle new patient registration state
-     */
-    async handleNewPatientRegistrationState(session, message, messageId) {
-        this.logger.info(`Handling new patient registration for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        const registrationData = this.parseNewPatientData(message);
-        
-        if (!registrationData) {
-            return {
-                message: "Please provide all required information:\n\n👤 Full Name:\n📧 Email Address:\n📅 Date of Birth (DD/MM/YYYY):\n\nPlease enter each on a separate line.",
-                nextState: this.STATES.NEW_PATIENT_REGISTRATION
-            };
+  /**
+   * Handle fallback for any unknown state or invalid input.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleFallbackState(session, message) {
+    try {
+      const latestSession = await this.sessionManager.getSession(session.id);
+      let returnState = latestSession.conversation_state;
+      if (latestSession.verified) returnState = this.STATES.MAIN_MENU;
+      else if (returnState !== this.STATES.INTRO && !latestSession.verified) returnState = this.STATES.UNVERIFIED_MENU;
+      await this.sessionManager.updateSession(latestSession.id, {
+        conversation_state: returnState
+      });
+      const refreshedSession = await this.sessionManager.getSession(latestSession.id);
+      if (returnState === this.STATES.INTRO) {
+        return await this.handleIntroState(refreshedSession, '');
+      } else if (refreshedSession.verified) {
+        return `I'm sorry, I didn't understand that.\n\n` + await this.renderMainMenu(refreshedSession);
+      } else {
+        return `I'm sorry, I didn't understand that.\n\n` + await this.renderUnverifiedMenu(refreshedSession);
+      }
+    } catch (error) {
+      this.logger.error('Fallback state error:', error);
+      try {
+        const sessionState = await this.sessionManager.getSession(session.id);
+        if (sessionState) {
+          return await this.renderErrorWithMenu(sessionState);
         }
-        
-        try {
-            // Create new patient in Cliniko
-            const patient = await this.clinikoAPI.createPatient({
-                firstName: registrationData.firstName,
-                lastName: registrationData.lastName,
-                email: registrationData.email,
-                dateOfBirth: registrationData.dob,
-                phoneNumber: session.phoneNumber
-            });
-            
-            if (patient) {
-                // Store patient data in session
-                await this.sessionManager.updateSessionData(session.sessionId, {
-                    ...sessionData,
-                    patient: patient,
-                    newPatient: true,
-                    verified: true
-                });
-                
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PRACTITIONER_SELECTION);
-                
-                return {
-                    message: `✅ Welcome ${patient.firstName}! Your details have been saved.\n\nLet's book your first appointment!`,
-                    nextState: this.STATES.PRACTITIONER_SELECTION
-                };
-            } else {
-                throw new Error('Failed to create patient record');
-            }
-            
-        } catch (error) {
-            this.logger.error(`New patient registration error: ${error.message}`);
-            return {
-                message: "❌ Unable to save your details at the moment. Please try again or contact our support team.",
-                nextState: this.STATES.SUPPORT
-            };
-        }
+      } catch (_err) {
+        // fallback if session can't be loaded
+      }
+      return (
+        "We're currently experiencing a technical issue and could not process your request. "
+      + "Please try again later. If the problem continues, contact us at +65 6123 4567 or email support@prohealth.com.sg"
+      );
     }
+  }
 
-    /**
-     * Handle main menu state - for existing patients
-     */
-    async handleMainMenuState(session, message, messageId) {
-        this.logger.info(`Handling main menu for session ${session.sessionId}`);
-        
-        const input = message.trim().toLowerCase();
-        
-        switch (input) {
-            case '1':
-            case 'book':
-            case 'new appointment':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PATIENT_VERIFICATION);
-                await this.sessionManager.updateSessionData(session.sessionId, { flow: 'booking' });
-                return {
-                    message: this.templates.patientVerification,
-                    nextState: this.STATES.PATIENT_VERIFICATION
-                };
-                
-            case '2':
-            case 'reschedule':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PATIENT_VERIFICATION);
-                await this.sessionManager.updateSessionData(session.sessionId, { flow: 'reschedule' });
-                return {
-                    message: this.templates.patientVerification,
-                    nextState: this.STATES.PATIENT_VERIFICATION
-                };
-                
-            case '3':
-            case 'cancel':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PATIENT_VERIFICATION);
-                await this.sessionManager.updateSessionData(session.sessionId, { flow: 'cancel' });
-                return {
-                    message: this.templates.patientVerification,
-                    nextState: this.STATES.PATIENT_VERIFICATION
-                };
-                
-            case '4':
-            case 'view':
-            case 'details':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PATIENT_VERIFICATION);
-                await this.sessionManager.updateSessionData(session.sessionId, { flow: 'view' });
-                return {
-                    message: this.templates.patientVerification,
-                    nextState: this.STATES.PATIENT_VERIFICATION
-                };
-                
-            case '5':
-            case 'services':
-            case 'learn':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.SERVICES_INFO);
-                return {
-                    message: this.templates.servicesInfo,
-                    nextState: this.STATES.SERVICES_INFO
-                };
-                
-            case '6':
-            case 'support':
-            case 'help':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.SUPPORT);
-                return await this.handleSupportState(session, message, messageId);
-                
-            default:
-                // Check for natural language intent
-                const intent = await this.detectIntent(message);
-                if (intent) {
-                    return await this.handleIntent(session, intent, message);
-                }
-                
-                return {
-                    message: this.templates.invalidInput,
-                    nextState: this.STATES.MAIN_MENU
-                };
-        }
+  /**
+   * Handle main menu for verified users.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleMainMenuState(session, message) {
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      return await this.renderMainMenu(session);
     }
-
-    /**
-     * Handle patient verification state
-     */
-    async handlePatientVerificationState(session, message, messageId) {
-        this.logger.info(`Handling patient verification for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        
-        // Parse verification data
-        const verificationData = this.parseVerificationData(message);
-        
-        if (!verificationData) {
-            return {
-                message: "Please provide both your email address and date of birth in the format:\nemail@example.com\nDD/MM/YYYY",
-                nextState: this.STATES.PATIENT_VERIFICATION
-            };
-        }
-        
-        try {
-            // Verify patient with Cliniko
-            const patient = await this.clinikoAPI.findPatient(verificationData.email, verificationData.dob);
-            
-            if (!patient) {
-                return {
-                    message: "❌ We couldn't find your details in our system. Please check your email and date of birth, or contact our support team.",
-                    nextState: this.STATES.SUPPORT
-                };
-            }
-            
-            // Store patient data in session
-            await this.sessionManager.updateSessionData(session.sessionId, {
-                ...sessionData,
-                patient: patient,
-                verified: true
-            });
-            
-            // Route based on flow
-            if (sessionData.flow === 'booking') {
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PRACTITIONER_SELECTION);
-                return await this.handlePractitionerSelectionState(session, '', messageId);
-            } else {
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.APPOINTMENT_MANAGEMENT);
-                return await this.handleAppointmentManagementState(session, '', messageId);
-            }
-            
-        } catch (error) {
-            this.logger.error(`Patient verification error: ${error.message}`);
-            return {
-                message: "❌ Unable to verify your details at the moment. Please try again later or contact support.",
-                nextState: this.STATES.SUPPORT
-            };
-        }
+    if (text === '9' || text === 'logout') {
+      await this.sessionManager.deleteSession(session.id);
+      return await this.handleIntroState({ phone_number: session.phone_number }, '');
     }
+    let newState = this.STATES.FALLBACK;
+    if (text.includes('book') || text === '1') {
+      newState = this.STATES.BOOK_APPOINTMENT;
+    } else if (text.includes('reschedule') || text === '2') {
+      newState = this.STATES.RESCHEDULE_APPOINTMENT;
+    } else if (text.includes('cancel') || text === '3') {
+      newState = this.STATES.CANCEL_APPOINTMENT;
+    } else if (text.includes('fees') || text.includes('rate') || text === '4') {
+      newState = this.STATES.VIEW_FEES;
+    } else if (text.includes('physio') || text === '5') {
+      newState = this.STATES.VIEW_PHYSIOS;
+    } else if (text.includes('clinic') || text === '6' || text.includes('location')) {
+      newState = this.STATES.VIEW_CLINICS;
+    } else if (text.includes('health') || text.includes('status')) {
+      newState = this.STATES.SYSTEM_HEALTH;
+    } else if (text.includes('help')) {
+      return await this.renderMainMenu(session);
+    }
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: newState
+    });
+    const updatedSession = await this.sessionManager.getSession(session.id);
+    return await this.stateHandlers[newState](updatedSession, '');
+  }
 
-    /**
-     * Handle practitioner selection state
-     */
-    async handlePractitionerSelectionState(session, message, messageId) {
-        this.logger.info(`Handling practitioner selection for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        
-        if (!message.trim()) {
-            // First time - show practitioners
-            try {
-                const practitioners = await this.clinikoAPI.getPractitioners();
-                
-                if (!practitioners || practitioners.length === 0) {
-                    return {
-                        message: "❌ No practitioners available at the moment. Please contact support.",
-                        nextState: this.STATES.SUPPORT
-                    };
-                }
-                
-                let practitionerList = '';
-                practitioners.forEach((practitioner, index) => {
-                    practitionerList += `${index + 1}️⃣ ${practitioner.name}\n`;
-                });
-                
-                // Store practitioners in session
-                await this.sessionManager.updateSessionData(session.sessionId, {
-                    ...sessionData,
-                    practitioners: practitioners
-                });
-                
-                return {
-                    message: this.templates.practitionerSelection.replace('{practitioners}', practitionerList),
-                    nextState: this.STATES.PRACTITIONER_SELECTION
-                };
-                
-            } catch (error) {
-                this.logger.error(`Error fetching practitioners: ${error.message}`);
-                return {
-                    message: "❌ Unable to load practitioner list. Please try again later.",
-                    nextState: this.STATES.ERROR
-                };
-            }
-        }
-        
-        // Process selection
-        const selection = parseInt(message.trim());
-        const practitioners = sessionData.practitioners || [];
-        
-        if (isNaN(selection) || selection < 1 || selection > practitioners.length) {
-            return {
-                message: `Please select a valid practitioner number (1-${practitioners.length}).`,
-                nextState: this.STATES.PRACTITIONER_SELECTION
-            };
-        }
-        
-        const selectedPractitioner = practitioners[selection - 1];
-        
-        // Update session with selected practitioner
-        await this.sessionManager.updateSessionData(session.sessionId, {
-            ...sessionData,
-            selectedPractitioner: selectedPractitioner
+  /**
+   * Handle guest/unverified menu.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleUnverifiedMenuState(session, message) {
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      return await this.renderUnverifiedMenu(session);
+    }
+    if (text === '9' || text === 'logout') {
+      await this.sessionManager.deleteSession(session.id);
+      return await this.handleIntroState({ phone_number: session.phone_number }, '');
+    }
+    let newState = this.STATES.FALLBACK;
+    if (text.includes('fees') || text.includes('rate') || text === '1') {
+      newState = this.STATES.VIEW_FEES;
+    } else if (text.includes('location') || text === '2' || text.includes('clinic')) {
+      newState = this.STATES.VIEW_CLINICS;
+    } else if (text.includes('register') || text === '3') {
+      newState = this.STATES.REGISTER_PATIENT;
+    } else if (text.includes('help')) {
+      return await this.renderUnverifiedMenu(session);
+    }
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: newState
+    });
+    const updatedSession = await this.sessionManager.getSession(session.id);
+    return await this.stateHandlers[newState](updatedSession, '');
+  }
+
+  // ===============================
+  // MESSAGE HANDLERS (USER-DRIVEN TRANSITIONS)
+  // ===============================
+
+  /**
+   * Handle user identity verification state.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleVerifyState(session, message) {
+    try {
+      const text = message.trim();
+      let data = {};
+      try {
+        data = typeof session.data === 'string'
+          ? JSON.parse(session.data)
+          : session.data || {};
+      } catch (e) {
+        data = {};
+      }
+      if (!data.awaiting_email) {
+        const updatedData = { ...data, awaiting_email: true };
+        await this.sessionManager.updateSession(session.id, {
+          data: JSON.stringify(updatedData)
         });
-        
-        await this.sessionManager.updateSessionState(session.sessionId, this.STATES.DATETIME_SELECTION);
-        
-        return {
-            message: `Great! You've selected ${selectedPractitioner.name}.\n\nNow, please let me know your preferred date and time for the appointment.\n\nExample: "Next Monday at 2 PM" or "25/12/2024 at 10:30 AM"`,
-            nextState: this.STATES.DATETIME_SELECTION
-        };
-    }
-
-    /**
-     * Handle date/time selection state
-     */
-    async handleDateTimeSelectionState(session, message, messageId) {
-        this.logger.info(`Handling datetime selection for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        const dateTimeInput = message.trim();
-        
+        return 'To verify your identity, please enter the email address you used to register with us.';
+      }
+      const email = text.toLowerCase();
+      if (!email.includes('@') || !email.includes('.')) {
+        return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.';
+      }
+      const patient = await this.clinikoAPI.findPatientByEmail(email);
+      const clearedData = { ...data };
+      delete clearedData.awaiting_email;
+      if (patient) {
+        // Fetch latest appointment to infer preferred practitioner and appointment type
+        const phoneNumber = session.phone_number;
         try {
-            // Parse date/time from natural language
-            const parsedDateTime = this.parseDateTimeInput(dateTimeInput);
-            
-            if (!parsedDateTime) {
-                return {
-                    message: "I couldn't understand the date/time. Please try again with format like:\n• Tomorrow at 2 PM\n• 25/12/2024 at 10:30 AM\n• Next Monday 2:30 PM",
-                    nextState: this.STATES.DATETIME_SELECTION
-                };
+          const latestAppt = await this.clinikoAPI.getLatestAppointmentSummaryForPatient(patient.id);
+          if (latestAppt) {
+            const businessId = extractIdFromClinikoRef(latestAppt.business, 'businesses');
+            const practitionerId = extractIdFromClinikoRef(latestAppt.practitioner, 'practitioners');
+            const appointmentTypeId = extractIdFromClinikoRef(latestAppt.appointment_type, 'appointment_types');
+            const appointmentId = latestAppt.id;
+            if (businessId && practitionerId && appointmentTypeId && appointmentId) {
+              session.context = {
+                preferred_practitioner_id: practitionerId,
+                preferred_appointment_type_id: appointmentTypeId,
+                preferred_business_id: businessId,
+                latest_appointment_id: appointmentId
+              };
+              this.logger.info(`[VERIFY] Set preferred context from latest appointment for ${phoneNumber}: practitioner ${practitionerId}, type ${appointmentTypeId}`);
             }
-            
-            // Check availability
-            const availability = await this.clinikoAPI.checkAvailability(
-                sessionData.selectedPractitioner.id,
-                parsedDateTime.date,
-                parsedDateTime.time
-            );
-            
-            if (!availability.available) {
-                const suggestions = await this.clinikoAPI.getSuggestedTimes(
-                    sessionData.selectedPractitioner.id,
-                    parsedDateTime.date
-                );
-                
-                let suggestionText = '';
-                if (suggestions && suggestions.length > 0) {
-                    suggestionText = '\n\nAvailable times:\n' + 
-                        suggestions.map((time, index) => `${index + 1}. ${time}`).join('\n');
-                }
-                
-                return {
-                    message: `❌ That time slot is not available.${suggestionText}\n\nPlease choose another time or date.`,
-                    nextState: this.STATES.DATETIME_SELECTION
-                };
-            }
-            
-            // Store appointment details
-            await this.sessionManager.updateSessionData(session.sessionId, {
-                ...sessionData,
-                appointmentDateTime: parsedDateTime,
-                availability: availability
-            });
-            
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.CONFIRMATION);
-            
-            // Show confirmation
-            const confirmationMessage = this.templates.appointmentConfirmation
-                .replace('{patientName}', sessionData.patient.name)
-                .replace('{practitionerName}', sessionData.selectedPractitioner.name)
-                .replace('{date}', parsedDateTime.dateFormatted)
-                .replace('{time}', parsedDateTime.timeFormatted)
-                .replace('{location}', availability.location || 'Main Clinic');
-            
-            return {
-                message: confirmationMessage,
-                nextState: this.STATES.CONFIRMATION
-            };
-            
-        } catch (error) {
-            this.logger.error(`DateTime selection error: ${error.message}`);
-            return {
-                message: "❌ Unable to process your date/time selection. Please try again.",
-                nextState: this.STATES.DATETIME_SELECTION
-            };
+          } else {
+            this.logger.warn(`[VERIFY] No appointments found for verified patient ${phoneNumber}`);
+          }
+        } catch (e) {
+          this.logger.error(`[VERIFY] Failed to fetch latest appointment for ${phoneNumber}:`, e.message);
         }
-    }
-
-    /**
-     * Handle confirmation state
-     */
-    async handleConfirmationState(session, message, messageId) {
-        this.logger.info(`Handling confirmation for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        const input = message.trim().toLowerCase();
-        
-        if (input === 'yes' || input === 'y' || input === 'confirm') {
-            try {
-                // Book appointment via Cliniko
-                const booking = await this.clinikoAPI.bookAppointment({
-                    patientId: sessionData.patient.id,
-                    practitionerId: sessionData.selectedPractitioner.id,
-                    dateTime: sessionData.appointmentDateTime,
-                    notes: `Booked via WhatsApp chatbot - Session: ${session.sessionId}`
-                });
-                
-                if (booking.success) {
-                    // Schedule reminder
-                    await this.scheduleReminder(session.phoneNumber, booking.appointmentId, sessionData.appointmentDateTime);
-                    
-                    // Update session to completed
-                    await this.sessionManager.updateSessionState(session.sessionId, this.STATES.COMPLETED);
-                    
-                    const successMessage = this.templates.bookingSuccess
-                        .replace('{date}', sessionData.appointmentDateTime.dateFormatted)
-                        .replace('{time}', sessionData.appointmentDateTime.timeFormatted)
-                        .replace('{practitionerName}', sessionData.selectedPractitioner.name)
-                        .replace('{bookingId}', booking.appointmentId);
-                    
-                    return {
-                        message: successMessage,
-                        nextState: this.STATES.COMPLETED
-                    };
-                } else {
-                    throw new Error(booking.error || 'Booking failed');
-                }
-                
-            } catch (error) {
-                this.logger.error(`Booking confirmation error: ${error.message}`);
-                return {
-                    message: "❌ Unable to confirm your booking. Please try again or contact support.",
-                    nextState: this.STATES.ERROR
-                };
-            }
-            
-        } else if (input === 'no' || input === 'n' || input === 'modify') {
-            // Go back to practitioner selection
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PRACTITIONER_SELECTION);
-            return {
-                message: "Let's modify your appointment. Please select a different practitioner or time.",
-                nextState: this.STATES.PRACTITIONER_SELECTION
-            };
-        } else {
-            return {
-                message: "Please reply 'YES' to confirm or 'NO' to modify your appointment.",
-                nextState: this.STATES.CONFIRMATION
-            };
-        }
-    }
-
-    /**
-     * Handle appointment management state
-     */
-    async handleAppointmentManagementState(session, message, messageId) {
-        this.logger.info(`Handling appointment management for session ${session.sessionId}`);
-        
-        const sessionData = session.sessionData || {};
-        
-        if (!sessionData.patient) {
-            return {
-                message: "❌ Patient verification required.",
-                nextState: this.STATES.PATIENT_VERIFICATION
-            };
-        }
-        
-        try {
-            // Get patient's appointments
-            const appointments = await this.clinikoAPI.getPatientAppointments(sessionData.patient.id);
-            
-            if (!appointments || appointments.length === 0) {
-                return {
-                    message: "You don't have any upcoming appointments.\n\nWould you like to book a new appointment? Reply 'YES' to book or 'NO' to return to main menu.",
-                    nextState: this.STATES.MAIN_MENU
-                };
-            }
-            
-            let appointmentList = "Your upcoming appointments:\n\n";
-            appointments.forEach((appointment, index) => {
-                appointmentList += `${index + 1}️⃣ ${appointment.dateFormatted} at ${appointment.timeFormatted}\n   with ${appointment.practitionerName}\n\n`;
-            });
-            
-            appointmentList += "What would you like to do?\n1️⃣ Reschedule\n2️⃣ Cancel\n3️⃣ View details\n\nReply with the number of your choice.";
-            
-            // Store appointments in session
-            await this.sessionManager.updateSessionData(session.sessionId, {
-                ...sessionData,
-                appointments: appointments
-            });
-            
-            return {
-                message: appointmentList,
-                nextState: this.STATES.APPOINTMENT_MANAGEMENT
-            };
-            
-        } catch (error) {
-            this.logger.error(`Appointment management error: ${error.message}`);
-            return {
-                message: "❌ Unable to retrieve your appointments. Please try again later.",
-                nextState: this.STATES.ERROR
-            };
-        }
-    }
-
-    /**
-     * Handle support state
-     */
-    async handleSupportState(session, message, messageId) {
-        this.logger.info(`Handling support for session ${session.sessionId}`);
-        
-        const phone = process.env.SUPPORT_PHONE || '(555) 123-4567';
-        const email = process.env.SUPPORT_EMAIL || 'support@clinic.com';
-        
-        const supportMessage = this.templates.supportTransfer
-            .replace('{phone}', phone)
-            .replace('{email}', email);
-        
-        // Mark session for human handover
-        await this.sessionManager.updateSessionData(session.sessionId, {
-            humanHandover: true,
-            handoverReason: 'User requested support',
-            handoverTime: new Date().toISOString()
+        await this.sessionManager.updateSession(session.id, {
+          verified: true,
+          patient_id: patient.id,
+          conversation_state: this.STATES.MAIN_MENU,
+          data: JSON.stringify(clearedData)
         });
-        
-        return {
-            message: supportMessage,
-            nextState: this.STATES.SUPPORT
-        };
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return 'Welcome back! What would you like to do today?\n\n' + await this.renderMainMenu(updatedSession);
+      } else {
+        await this.sessionManager.updateSession(session.id, {
+          verified: false,
+          conversation_state: this.STATES.UNVERIFIED_MENU,
+          data: JSON.stringify(clearedData)
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        return 'We couldn\'t find a patient with that email.\n\n' + await this.renderUnverifiedMenu(updated);
+      }
+    } catch (err) {
+      this.logger.error('❌ [handleVerifyState] Email verification error:', err);
+      return 'Unable to verify your email right now. Please try again later.\n\n' + await this.renderUnverifiedMenu(session);
     }
+  }
 
-    /**
-     * Handle error state
-     */
-    async handleErrorState(session, message, messageId) {
-        this.logger.info(`Handling error state for session ${session.sessionId}`);
-        
-        // Reset to main menu after error
-        await this.sessionManager.updateSessionState(session.sessionId, this.STATES.MAIN_MENU);
-        
-        return {
-            message: "I'm sorry for the inconvenience. Let's start fresh.\n\n" + this.templates.mainMenu,
-            nextState: this.STATES.MAIN_MENU
-        };
+  /**
+   * Handle patient registration flow.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleRegisterPatientState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const requiredFields = ['first_name', 'last_name', 'email'];
+    let nextField = null;
+    for (const field of requiredFields) {
+      if (!data[field]) {
+        nextField = field;
+        break;
+      }
     }
+    if (nextField) {
+      if (message.trim()) {
+        data[nextField] = message.trim();
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      }
+      const prompts = {
+        first_name: "Please tell me your first name:",
+        last_name: "Got it. What's your last name?",
+        email: "Thanks. Lastly, what's your email address?"
+      };
+      if (!data.first_name) return prompts.first_name;
+      if (!data.last_name) return prompts.last_name;
+      if (!data.email) return prompts.email;
+    }
+    // All fields collected, now try registration
+    const phoneNumber = session.phone_number || session.phoneNumber;
+    if (!data.email || !phoneNumber) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.UNVERIFIED_MENU });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return "We need both email and phone number to complete registration.\n\n" + await this.renderUnverifiedMenu(updatedSession);
+    }
+    const patient = {
+      first_name: data.first_name,
+      last_name: data.last_name,
+      email: data.email,
+      phone: phoneNumber
+    };
+    try {
+      const result = await this.clinikoAPI.registerNewPatient(patient);
+      if (result) {
+        await this.sessionManager.updateSession(session.id, {
+          verified: true,
+          conversation_state: this.STATES.MAIN_MENU,
+          data: null // Clear registration data
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return `✅ You've been registered! Welcome ${patient.first_name}.\n\n` + await this.renderMainMenu(updatedSession);
+      }
+    } catch (err) {
+      this.logger.error("Registration error:", err);
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.UNVERIFIED_MENU,
+        data: null
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return (
+        "❌ Error during registration (your details could not be registered, please check spelling or try again).\n\n"
+        + (await this.renderUnverifiedMenu(updatedSession))
+      );
+    }
+  }
 
-    /**
-     * Send response to user
-     */
-    async sendResponse(phoneNumber, response, session) {
-        try {
-            const messageId = await this.whatsappAPI.sendMessage(phoneNumber, response.message);
-            
-            // Store outgoing message
-            await this.storeConversation(phoneNumber, response.message, 'outgoing', messageId);
-            
-            this.logger.info(`Response sent to ${phoneNumber}: ${response.message.substring(0, 50)}...`);
-            
-        } catch (error) {
-            this.logger.error(`Error sending response: ${error.message}`);
-            throw error;
-        }
-    }
+// ===============================
+  // MENU ACTION HANDLERS: BOOKING
+  // ===============================
 
-    /**
-     * Store conversation in database
-     */
-    async storeConversation(phoneNumber, message, direction, messageId) {
-        try {
-            const query = `
-                INSERT INTO conversations (phone_number, message, direction, message_id, timestamp)
-                VALUES (?, ?, ?, ?, datetime('now'))
-            `;
-            
-            await DatabaseManager.run(query, [phoneNumber, message, direction, messageId]);
-            
-        } catch (error) {
-            this.logger.error(`Error storing conversation: ${error.message}`);
-        }
+  /**
+   * Handle booking appointment flow.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleBookAppointmentState(session, message) {
+    try {
+      const phoneNumber = session.phone_number || session.phoneNumber;
+      // Check if user is verified for booking
+      if (!session.verified && !session.isVerified) {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.VERIFY
+        });
+        return 'You need to be a registered patient to book appointments. Let me verify your details first.';
+      }
+      if (!session.verified && !session.isVerified) {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.VERIFY
+          });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        // Immediately hand over to the verification handler
+        return await this.handleVerifyState(updatedSession, '');
+      }
+      // Always extract context at the top!
+      const {
+        preferred_practitioner_id,
+        preferred_appointment_type_id,
+        preferred_business_id
+      } = session.context || {};
+      if (!preferred_practitioner_id || !preferred_appointment_type_id || !preferred_business_id) {
+        this.logger.warn(`[BookAppointment] Missing context for preferred practitioner, appointment type, or business for session ${session.id}`);
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.MAIN_MENU
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return 'Sorry, we could not retrieve your booking preferences. Please choose from the physios and clinics list.\n\n' + await this.renderMainMenu(updatedSession);
+      }
+      // Fetch next available slots for preferred practitioner, type, and business
+      const slots = await this.clinikoAPI.getNextAvailableSlots({
+        practitioner_id: preferred_practitioner_id,
+        business_id: preferred_business_id
+      });
+      if (!slots || slots.length === 0) {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.MAIN_MENU
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return 'Sorry, no available slots at the moment. Please try again later or call us directly.\n\n' + await this.renderMainMenu(updatedSession);
+      }
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      // Present the slots in a user-friendly way
+      return `Here are the next available appointment slots:\n\n${slots.map((slot, index) => {
+        const dt = new Date(slot.slot);
+        return `${index + 1}. ${slot.practitioner_name} — ${slot.appointment_type_name}\n   ${dt.toLocaleString()}`;
+        }).join('\n')}\n\nTo book any of these slots, please call us directly or visit our website.\n\n` + await this.renderMainMenu(updatedSession);
+    } catch (error) {
+      this.logger.error('Booking error:', error && error.stack ? error.stack : JSON.stringify(error));
+      await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.MAIN_MENU
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return 'Could not fetch appointment slots right now. Please try again later.\n\n' + await this.renderMainMenu(updatedSession);
     }
+  }
 
-    /**
-     * Parse verification data (email and DOB)
-     */
-    parseVerificationData(message) {
-        const lines = message.trim().split('\n').map(line => line.trim());
-        
-        // Look for email and date patterns
-        let email = null;
-        let dob = null;
-        
-        for (const line of lines) {
-            // Email pattern
-            const emailMatch = line.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
-            if (emailMatch) {
-                email = emailMatch[0].toLowerCase();
-            }
-            
-            // Date pattern (DD/MM/YYYY)
-            const dobMatch = line.match(/\b\d{1,2}\/\d{1,2}\/\d{4}\b/);
-            if (dobMatch) {
-                dob = dobMatch[0];
-            }
-        }
-        
-        if (email && dob) {
-            return { email, dob };
-        }
-        
-        return null;
+  /**
+   * Handle slot selection and confirmation for booking.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectSlotState(session, message) {
+    const text = message.trim().toLowerCase();
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    if (['0', 'menu', 'back'].includes(text)) {
+      // Go back to previous step
+      if (data.physio_list_for_clinic && data.selected_clinic) {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.SELECT_PHYSIO_FOR_CLINIC,
+          data: JSON.stringify(data)
+        });
+        const physios = data.physio_list_for_clinic || [];
+        const displayText = physios.map((p, idx) => {
+          const name = p.display_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+          return `${idx + 1}. ${name}${p.specialization ? ' - ' + p.specialization : ''}`;
+        }).join('\n');
+        return `Physiotherapists at ${data.selected_clinic.business_name}:\n\n${displayText}\n\nPlease reply with the number of the physiotherapist to see their available slots.\n\n0️⃣ Back to Main Menu`;
+      } else {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.SELECT_CLINIC_FOR_PHYSIO,
+          data: JSON.stringify(data)
+        });
+        const selectedPhysio = data.selected_physio;
+        const clinics = data.attached_clinics || [];
+        let clinicText = clinics.map((c, idx) =>
+          `${idx + 1}. ${c.business_name}`
+        ).join('\n');
+        const name = `${selectedPhysio.first_name || ''} ${selectedPhysio.last_name || ''}`.trim() || selectedPhysio.display_name;
+        return `Please select a clinic for ${name}:\n\n${clinicText}\n\n0️⃣ Back to Main Menu`;
+      }
     }
+    const slots = data.slot_list || [];
+    const index = parseInt(message, 10) - 1;
+    if (!slots[index]) {
+      return 'Invalid selection. Please reply with the number of a slot from the list.\n\n0️⃣ Back to Main Menu';
+    }
+    const pickedSlot = slots[index];
+    data.picked_slot = pickedSlot;
+    await this.sessionManager.updateSession(session.id, {
+      data: JSON.stringify(data),
+      conversation_state: this.STATES.CONFIRM_BOOK_SLOT
+    });
+    const dt = new Date(pickedSlot.slot);
+    return `You selected:\n${pickedSlot.practitioner_name} — ${pickedSlot.appointment_type_name}\n${dt.toLocaleString()}\n\nType "yes" to confirm, or "0" to go back.`;
+  }
 
-    /**
-     * Parse date/time from natural language
-     */
-    parseDateTimeInput(input) {
-        // This is a simplified parser - in production, use a library like chrono-node
-        const now = new Date();
-        
-        // Basic patterns
-        const patterns = [
-            {
-                regex: /tomorrow\s+at\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?/i,
-                handler: (match) => {
-                    const tomorrow = new Date(now);
-                    tomorrow.setDate(tomorrow.getDate() + 1);
-                    return this.parseTime(match[1], match[2] || '00', match[3], tomorrow);
-                }
-            },
-            {
-                regex: /(\d{1,2})\/(\d{1,2})\/(\d{4})\s+at\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?/i,
-                handler: (match) => {
-                    const date = new Date(match[3], match[2] - 1, match[1]);
-                    return this.parseTime(match[4], match[5] || '00', match[6], date);
-                }
-            },
-            {
-                regex: /next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+at?\s*(\d{1,2}):?(\d{2})?\s*(am|pm)?/i,
-                handler: (match) => {
-                    const dayName = match[1].toLowerCase();
-                    const targetDay = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(dayName);
-                    const date = this.getNextWeekday(targetDay);
-                    return this.parseTime(match[2], match[3] || '00', match[4], date);
-                }
-            }
-        ];
-        
-        for (const pattern of patterns) {
-            const match = input.match(pattern.regex);
-            if (match) {
-                return pattern.handler(match);
-            }
-        }
-        
-        return null;
+  /**
+   * Handle confirmation of booking slot.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleConfirmBookSlotState(session, message) {
+    const text = message.trim().toLowerCase();
+    // Fetch fresh session (to get updated patient_id, etc.)
+    const latestSession = await this.sessionManager.getSession(session.id);
+    let data = typeof latestSession.data === 'string' ? JSON.parse(latestSession.data || '{}') : (latestSession.data || {});
+    if (['0', 'menu', 'back'].includes(text)) {
+      // Go back to slot selection
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.SELECT_SLOT,
+        data: JSON.stringify(data)
+      });
+      // Re-show slots
+      const slots = data.slot_list || [];
+      const slotText = slots.map((slot, idx) => {
+        const dt = new Date(slot.slot);
+        return `${idx + 1}. ${slot.practitioner_name} — ${slot.appointment_type_name}\n   ${dt.toLocaleString()}`;
+      }).join('\n');
+      const selectedPhysio = data.selected_physio;
+      const selectedClinic = data.selected_clinic;
+      const physioName = selectedPhysio && (`${selectedPhysio.first_name || ''} ${selectedPhysio.last_name || ''}`.trim() || selectedPhysio.display_name);
+      return `Available slots for ${physioName} at ${selectedClinic?.business_name || ''}:\n\n${slotText}\n\nPlease reply with the number to pick a slot, or 0️⃣ Back to Main Menu.`;
     }
+    if (text === 'yes') {
+      // Book the appointment via API
+      const patient_id = latestSession.patient_id;
+      const slot = data.picked_slot;
+      if (!patient_id || !slot) {
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU });
+        return 'Cannot proceed with booking. Please start again.\n\n' + await this.renderMainMenu(session);
+      }
+      this.logger.info('Booking slot object:', JSON.stringify(slot));
+      const result = await this.clinikoAPI.bookAppointment({
+        patient_id,
+        practitioner_id: slot.practitioner_id,
+        business_id: slot.business_id,
+        appointment_type_id: slot.appointment_type_id,
+        starts_at: slot.slot
+      });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      if (result.success) {
+        return `✅ Your appointment is booked for:\n${slot.practitioner_name} — ${slot.appointment_type_name}\n${new Date(slot.slot).toLocaleString()}\n\n` + await this.renderMainMenu(updatedSession);
+      } else {
+        return `❌ Could not book your appointment. ${result.message || ''}\n\n` + await this.renderMainMenu(updatedSession);
+      }
+    }
+    return 'Please type "yes" to confirm booking, or "0" to go back.';
+  }
 
-    /**
-     * Parse time with AM/PM
-     */
-    parseTime(hours, minutes, ampm, date) {
-        let hour = parseInt(hours);
-        const minute = parseInt(minutes);
-        
-        if (ampm) {
-            if (ampm.toLowerCase() === 'pm' && hour !== 12) {
-                hour += 12;
-            } else if (ampm.toLowerCase() === 'am' && hour === 12) {
-                hour = 0;
-            }
-        }
-        
-        const appointmentDate = new Date(date);
-        appointmentDate.setHours(hour, minute, 0, 0);
-        
-        return {
-            date: appointmentDate.toISOString().split('T')[0],
-            time: `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`,
-            dateFormatted: appointmentDate.toLocaleDateString('en-AU'),
-            timeFormatted: appointmentDate.toLocaleTimeString('en-AU', { 
-                hour: '2-digit', 
-                minute: '2-digit',
-                hour12: true 
-            })
-        };
-    }
+  // ===============================
+  // MENU ACTION HANDLERS: CANCELLING
+  // ===============================
 
-    /**
-     * Get next occurrence of a weekday
-     */
-    getNextWeekday(targetDay) {
-        const today = new Date();
-        const currentDay = today.getDay();
-        const daysUntilTarget = (targetDay + 7 - currentDay) % 7;
-        const targetDate = new Date(today);
-        targetDate.setDate(today.getDate() + (daysUntilTarget || 7));
-        return targetDate;
+  /**
+   * Handle appointment cancellation flow.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleCancelAppointmentState(session, message) {
+    const patient_id = session.patient_id;
+    if (!patient_id) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.VERIFY
+      });
+      return 'You need to be a registered patient to cancel appointments. Let me verify your details first.';
     }
+    // Fetch all future appointments
+    const appts = await this.clinikoAPI.getBookingsByPatientId(patient_id);
+    const futureAppts = appts.filter(a => new Date(a.starts_at) > new Date());
+    if (!futureAppts.length) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      return 'No upcoming appointments found to cancel.\n\n' + await this.renderMainMenu(session);
+    }
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    data.cancel_appt_list = futureAppts;
+    if (futureAppts.length === 1) {
+      // Only one appointment, ask for confirmation
+      data.selected_cancel_appt = futureAppts[0];
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.CONFIRM_CANCEL,
+        data: JSON.stringify(data)
+      });
+      const appt = futureAppts[0];
+      const dt = new Date(appt.starts_at).toLocaleString();
+      let practitioner = 'Practitioner';
+      if (appt.practitioner) {
+        if (appt.practitioner.first_name || appt.practitioner.last_name) {
+          practitioner = `${appt.practitioner.first_name || ''} ${appt.practitioner.last_name || ''}`.trim();
+        } else if (appt.practitioner.display_name) {
+          practitioner = appt.practitioner.display_name;
+        }
+      }
+      const apptType = (appt.appointment_type && appt.appointment_type.name) ? appt.appointment_type.name : 'Appointment';
+      return `You have one upcoming appointment:\n\n${practitioner} — ${apptType}\n${dt}\n\nType "yes" to confirm cancellation, or "0" to go back.`;
+    } else {
+      // Multiple, show list and prompt to pick one
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.SELECT_APPOINTMENT_TO_CANCEL,
+        data: JSON.stringify(data)
+      });
+      const listText = futureAppts.map((appt, idx) => {
+        const dt = new Date(appt.starts_at).toLocaleString();
+        return `${idx + 1}. ${appt.practitioner?.display_name || 'Practitioner'} — ${appt.appointment_type?.name}\n   ${dt}`;
+      }).join('\n');
+      return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to cancel, or "0" to go back.`;
+    }
+  }
 
-    /**
-     * Detect intent from natural language
-     */
-    async detectIntent(message) {
-        const input = message.toLowerCase();
-        
-        // Simple intent detection - in production, use NLP service
-        const intents = {
-            booking: ['book', 'appointment', 'schedule', 'reserve'],
-            cancellation: ['cancel', 'cancel appointment', 'delete'],
-            reschedule: ['reschedule', 'change', 'move', 'modify'],
-            inquiry: ['when', 'what time', 'details', 'info'],
-            support: ['help', 'support', 'problem', 'issue']
-        };
-        
-        for (const [intent, keywords] of Object.entries(intents)) {
-            if (keywords.some(keyword => input.includes(keyword))) {
-                return intent;
-            }
-        }
-        
-        return null;
+  /**
+   * Handle selection of which appointment to cancel.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectAppointmentToCancelState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const appts = data.cancel_appt_list || [];
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU });
+      return await this.renderMainMenu(session);
     }
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !appts[idx]) {
+      return 'Invalid selection. Please reply with the number of the appointment you want to cancel, or "0" to go back.';
+    }
+    data.selected_cancel_appt = appts[idx];
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.CONFIRM_CANCEL,
+      data: JSON.stringify(data)
+    });
+    const appt = appts[idx];
+    const dt = new Date(appt.starts_at).toLocaleString();
+    return `You selected:\n${appt.practitioner?.display_name || 'Practitioner'} — ${appt.appointment_type?.name}\n${dt}\n\nType "yes" to confirm cancellation, or "0" to go back.`;
+  }
 
-    /**
-     * Handle detected intent
-     */
-    async handleIntent(session, intent, message) {
-        switch (intent) {
-            case 'booking':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.PATIENT_VERIFICATION);
-                await this.sessionManager.updateSessionData(session.sessionId, { flow: 'booking' });
-                return {
-                    message: this.templates.patientVerification,
-                    nextState: this.STATES.PATIENT_VERIFICATION
-                };
-                
-            case 'support':
-                await this.sessionManager.updateSessionState(session.sessionId, this.STATES.SUPPORT);
-                return await this.handleSupportState(session, message, null);
-                
-            default:
-                return {
-                    message: this.templates.invalidInput,
-                    nextState: this.STATES.MAIN_MENU
-                };
-        }
+  /**
+   * Handle confirmation of cancellation of appointment.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleConfirmCancelState(session, message) {
+    const text = message.trim().toLowerCase();
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU });
+      return await this.renderMainMenu(session);
     }
+    if (text === 'yes') {
+      const appt = data.selected_cancel_appt;
+      if (!appt?.id) {
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU });
+        return 'Could not find the selected appointment. Please try again.\n\n' + await this.renderMainMenu(session);
+      }
+      const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id);
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU, data: null });
+      if (result.success) {
+        return `✅ Your appointment has been canceled.\n\n` + await this.renderMainMenu(session);
+      } else {
+        return `❌ Could not cancel your appointment. ${result.message || ''}\n\n` + await this.renderMainMenu(session);
+      }
+    }
+    return 'Please type "yes" to confirm cancellation, or "0" to go back.';
+  }
 
-    /**
-     * Schedule appointment reminder
-     */
-    async scheduleReminder(phoneNumber, appointmentId, appointmentDateTime) {
-        try {
-            const reminderTime = new Date(appointmentDateTime.date + 'T' + appointmentDateTime.time);
-            reminderTime.setHours(reminderTime.getHours() - 24); // 24 hours before
-            
-            const query = `
-                INSERT INTO reminders (phone_number, appointment_id, reminder_time, status)
-                VALUES (?, ?, ?, 'scheduled')
-            `;
-            
-            await DatabaseManager.run(query, [
-                phoneNumber,
-                appointmentId,
-                reminderTime.toISOString()
-            ]);
-            
-            this.logger.info(`Reminder scheduled for ${phoneNumber} at ${reminderTime.toISOString()}`);
-            
-        } catch (error) {
-            this.logger.error(`Error scheduling reminder: ${error.message}`);
-        }
-    }
+  // ===============================
+  // MENU ACTION HANDLERS: RESCHEDULING
+  // ===============================
 
-    /**
-     * Handle general error
-     */
-    async handleError(phoneNumber, error) {
-        try {
-            const errorMessage = this.templates.error.replace('{error}', 'Please try again');
-            
-            await this.whatsappAPI.sendMessage(phoneNumber, errorMessage);
-            
-            // Log error details
-            this.logger.error(`Error handling message from ${phoneNumber}: ${error.message}`, error);
-            
-            // Reset session to main menu
-            const session = await this.sessionManager.getOrCreateSession(phoneNumber);
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.MAIN_MENU);
-            
-        } catch (sendError) {
-            this.logger.error(`Failed to send error message: ${sendError.message}`);
-        }
+  /**
+   * Handle rescheduling flow: user selects which appointment to reschedule.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleRescheduleAppointmentState(session, message) {
+    const patient_id = session.patient_id;
+    if (!patient_id) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.VERIFY
+      });
+      return 'You need to be a registered patient to reschedule appointments. Let me verify your details first.';
     }
+    // Fetch all future appointments
+    const appts = await this.clinikoAPI.getBookingsByPatientId(patient_id);
+    const futureAppts = appts.filter(a => new Date(a.starts_at) > new Date());
+    if (!futureAppts.length) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      return 'No upcoming appointments found to reschedule.\n\n' + await this.renderMainMenu(session);
+    }
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    data.reschedule_appt_list = futureAppts;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
+      data: JSON.stringify(data)
+    });
+    const listText = futureAppts.map((appt, idx) => {
+      let practitioner = 'Practitioner';
+      if (appt.practitioner) {
+        if (appt.practitioner.first_name || appt.practitioner.last_name) {
+          practitioner = `${appt.practitioner.first_name || ''} ${appt.practitioner.last_name || ''}`.trim();
+        } else if (appt.practitioner.display_name) {
+          practitioner = appt.practitioner.display_name;
+        }
+      }
+      const apptType = (appt.appointment_type && appt.appointment_type.name) ? appt.appointment_type.name : 'Appointment';
+      const dt = new Date(appt.starts_at).toLocaleString();
+      return `${idx + 1}. ${practitioner} — ${apptType}\n   ${dt}`;
+    }).join('\n');
+    return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to reschedule, or "0" to go back.`;
+  }
 
-    /**
-     * Process reminder notifications
-     * Called by scheduler/cron job
-     */
-    async processReminders() {
-        try {
-            this.logger.info('Processing scheduled reminders');
-            
-            const query = `
-                SELECT * FROM reminders 
-                WHERE status = 'scheduled' 
-                AND reminder_time <= datetime('now')
-                ORDER BY reminder_time ASC
-                LIMIT 50
-            `;
-            
-            const reminders = await DatabaseManager.all(query);
-            
-            for (const reminder of reminders) {
-                try {
-                    // Get appointment details
-                    const appointment = await this.clinikoAPI.getAppointment(reminder.appointment_id);
-                    
-                    if (appointment) {
-                        const reminderMessage = `🔔 Appointment Reminder\n\n` +
-                            `You have an appointment tomorrow:\n` +
-                            `📅 ${appointment.dateFormatted}\n` +
-                            `🕐 ${appointment.timeFormatted}\n` +
-                            `👨‍⚕️ with ${appointment.practitionerName}\n` +
-                            `🏥 ${appointment.location}\n\n` +
-                            `Please reply 'CONFIRM' to confirm your attendance or 'RESCHEDULE' if you need to change the time.`;
-                        
-                        await this.whatsappAPI.sendMessage(reminder.phone_number, reminderMessage);
-                        
-                        // Update reminder status
-                        await DatabaseManager.run(
-                            'UPDATE reminders SET status = ?, sent_at = datetime("now") WHERE id = ?',
-                            ['sent', reminder.id]
-                        );
-                        
-                        this.logger.info(`Reminder sent to ${reminder.phone_number} for appointment ${reminder.appointment_id}`);
-                    }
-                    
-                } catch (reminderError) {
-                    this.logger.error(`Error processing reminder ${reminder.id}: ${reminderError.message}`);
-                    
-                    // Mark as failed
-                    await DatabaseManager.run(
-                        'UPDATE reminders SET status = ?, error = ? WHERE id = ?',
-                        ['failed', reminderError.message, reminder.id]
-                    );
-                }
-            }
-            
-        } catch (error) {
-            this.logger.error(`Error processing reminders: ${error.message}`);
-        }
+  /**
+   * Handle selection of which appointment to reschedule.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectAppointmentToRescheduleState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const appts = data.reschedule_appt_list || [];
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU });
+      return await this.renderMainMenu(session);
     }
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !appts[idx]) {
+      return 'Invalid selection. Please reply with the number of the appointment you want to reschedule, or "0" to go back.';
+    }
+    const appt = appts[idx];
+    data.selected_reschedule_appt = appt;
+    const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
+    const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
+    const appointment_type_id = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
+    if (!business_id || !practitioner_id || !appointment_type_id) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return (
+        'Sorry, this appointment does not have enough information to find available slots for rescheduling. ' +
+        'Please contact our clinic for assistance, or try a different appointment.\n\n' +
+        await this.renderMainMenu(session)
+      );
+    }
+    // Fetch available times for same physio, clinic, and appointment type
+    const availableTimes = await this.clinikoAPI.getAvailableTimes({
+      practitioner_id,
+      business_id,
+      appt_type: appointment_type_id
+    });
+    if (!availableTimes.length) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return 'Sorry, there are no available slots for this practitioner at this clinic for this appointment type. Please try again later.\n\n' + await this.renderMainMenu(session);
+    }
+    data.available_times = availableTimes;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.CONFIRM_RESCHEDULE,
+      data: JSON.stringify(data)
+    });
+    const slotList = availableTimes.map((slot, i) =>
+      `${i + 1}. ${new Date(slot.appointment_start).toLocaleString()}`
+    ).join('\n');
+    let practitioner = 'Practitioner';
+    if (appt.practitioner) {
+      if (appt.practitioner.first_name || appt.practitioner.last_name) {
+        practitioner = `${appt.practitioner.first_name || ''} ${appt.practitioner.last_name || ''}`.trim();
+      } else if (appt.practitioner.display_name) {
+        practitioner = appt.practitioner.display_name;
+      }
+    }
+    const apptType = (appt.appointment_type && appt.appointment_type.name) ? appt.appointment_type.name : 'Appointment';
+    const dt = new Date(appt.starts_at).toLocaleString();
+    return `You selected to reschedule:\n${practitioner} — ${apptType}\n${dt}\n\nPlease choose a new slot:\n\n${slotList}\n\nReply with the number of your chosen slot, or "0" to go back.`;
+  }
 
-    /**
-     * Get conversation statistics
-     */
-    async getConversationStats(phoneNumber, days = 30) {
-        try {
-            const query = `
-                SELECT 
-                    COUNT(*) as total_messages,
-                    COUNT(CASE WHEN direction = 'incoming' THEN 1 END) as incoming_messages,
-                    COUNT(CASE WHEN direction = 'outgoing' THEN 1 END) as outgoing_messages,
-                    MIN(timestamp) as first_message,
-                    MAX(timestamp) as last_message
-                FROM conversations 
-                WHERE phone_number = ? 
-                AND timestamp >= datetime('now', '-${days} days')
-            `;
-            
-            const stats = await DatabaseManager.get(query, [phoneNumber]);
-            return stats;
-            
-        } catch (error) {
-            this.logger.error(`Error getting conversation stats: ${error.message}`);
-            return null;
-        }
+  /**
+   * Handle confirmation of rescheduling.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleConfirmRescheduleState(session, message) {
+    const text = message.trim();
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    if (['0', 'menu', 'back'].includes(text.toLowerCase())) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU, data: null });
+      return await this.renderMainMenu(session);
     }
+    const availableTimes = data.available_times || [];
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !availableTimes[idx]) {
+      return 'Invalid slot selection. Please reply with the number of your chosen slot, or "0" to go back.';
+    }
+    const slot = availableTimes[idx];
+    const appt = data.selected_reschedule_appt;
+    if (!appt?.id) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU, data: null });
+      return 'Could not find the selected appointment. Please try again.\n\n' + await this.renderMainMenu(session);
+    }
+    const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
+    const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
+    const appointment_type_id = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
+    const patient_id = session.patient_id;
+    const starts_at = slot.starts_at || slot.appointment_start || slot.slot;
+    let ends_at = slot.ends_at || slot.appointment_end;
+    if (!ends_at) {
+      ends_at = new Date(new Date(starts_at).getTime() + 30 * 60000).toISOString();
+    }
+    if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU, data: null });
+      return 'Could not retrieve all necessary details for rescheduling. Please try again or contact the clinic.\n\n' + await this.renderMainMenu(session);
+    }
+    const payload = {
+      appointment_type_id,
+      business_id,
+      patient_id,
+      practitioner_id,
+      starts_at,
+      ends_at
+    };
+    const result = await this.clinikoAPI.updateIndividualAppointment(appt.id, payload);
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.MAIN_MENU, data: null });
+    if (result.success) {
+      return `✅ Your appointment has been rescheduled to:\n${new Date(payload.starts_at).toLocaleString()}\n\n` + await this.renderMainMenu(session);
+    } else {
+      return `❌ Could not reschedule your appointment. ${result.message || ''}\n\n` + await this.renderMainMenu(session);
+    }
+  }
 
-    /**
-     * Clean up old sessions and conversations
-     */
-    async cleanupOldData(daysOld = 90) {
-        try {
-            this.logger.info(`Cleaning up data older than ${daysOld} days`);
-            
-            // Clean old conversations
-            const conversationQuery = `
-                DELETE FROM conversations 
-                WHERE timestamp < datetime('now', '-${daysOld} days')
-            `;
-            const conversationResult = await DatabaseManager.run(conversationQuery);
-            
-            // Clean old completed sessions
-            const sessionQuery = `
-                DELETE FROM sessions 
-                WHERE last_activity < datetime('now', '-${daysOld} days')
-                AND conversation_state IN ('completed', 'error')
-            `;
-            const sessionResult = await DatabaseManager.run(sessionQuery);
-            
-            // Clean old processed reminders
-            const reminderQuery = `
-                DELETE FROM reminders 
-                WHERE sent_at < datetime('now', '-${daysOld} days')
-                AND status IN ('sent', 'failed')
-            `;
-            const reminderResult = await DatabaseManager.run(reminderQuery);
-            
-            this.logger.info(`Cleanup completed: ${conversationResult.changes} conversations, ${sessionResult.changes} sessions, ${reminderResult.changes} reminders deleted`);
-            
-        } catch (error) {
-            this.logger.error(`Error during cleanup: ${error.message}`);
-        }
-    }
+  // ===============================
+  // MENU ACTION HANDLERS: VIEWING INFO
+  // ===============================
 
-    /**
-     * Export conversation history
-     */
-    async exportConversationHistory(phoneNumber, startDate = null, endDate = null) {
-        try {
-            let query = `
-                SELECT 
-                    c.timestamp,
-                    c.direction,
-                    c.message,
-                    c.message_id,
-                    s.conversation_state,
-                    s.session_data
-                FROM conversations c
-                LEFT JOIN sessions s ON c.phone_number = s.phone_number
-                WHERE c.phone_number = ?
-            `;
-            
-            const params = [phoneNumber];
-            
-            if (startDate) {
-                query += ' AND c.timestamp >= ?';
-                params.push(startDate);
-            }
-            
-            if (endDate) {
-                query += ' AND c.timestamp <= ?';
-                params.push(endDate);
-            }
-            
-            query += ' ORDER BY c.timestamp ASC';
-            
-            const conversations = await DatabaseManager.all(query, params);
-            
-            return conversations;
-            
-        } catch (error) {
-            this.logger.error(`Error exporting conversation history: ${error.message}`);
-            return null;
-        }
-    }
+  /**
+   * Handle viewing fees for clinics.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleViewFeesState(session, message) {
+    try {
+      const feesByClinic = `
+💰 *Fee Structure by Clinic*
 
-    /**
-     * Reset user session (admin function)
-     */
-    async resetUserSession(phoneNumber) {
-        try {
-            this.logger.info(`Resetting session for ${phoneNumber}`);
-            
-            // Reset session state
-            await this.sessionManager.updateSessionState(
-                await this.sessionManager.getSessionId(phoneNumber),
-                this.STATES.INITIAL
-            );
-            
-            // Clear session data
-            await this.sessionManager.updateSessionData(
-                await this.sessionManager.getSessionId(phoneNumber),
-                {}
-            );
-            
-            return true;
-            
-        } catch (error) {
-            this.logger.error(`Error resetting session: ${error.message}`);
-            return false;
-        }
-    }
+🏥 *Prohealth Physiofocus Pte Ltd*
+• Initial: SGD 180
+• Follow-up: SGD 150
+• Specialties: Musculoskeletal, Sports, Post-Surgical Rehab
 
-    /**
-     * Get active sessions count
-     */
-    async getActiveSessionsCount() {
-        try {
-            const query = `
-                SELECT COUNT(*) as count 
-                FROM sessions 
-                WHERE last_activity > datetime('now', '-1 hour')
-                AND conversation_state NOT IN ('completed', 'error')
-            `;
-            
-            const result = await DatabaseManager.get(query);
-            return result ? result.count : 0;
-            
-        } catch (error) {
-            this.logger.error(`Error getting active sessions count: ${error.message}`);
-            return 0;
-        }
-    }
+🏥 *Prohealth In Touch Physiotherapy*
+• Initial: SGD 190
+• Follow-up: SGD 160
+• Specialties: Neurological, Vestibular, Geriatric
 
-    /**
-     * Validate session and handle expired sessions
-     */
-    async validateSession(session) {
-        const sessionTimeout = 30 * 60 * 1000; // 30 minutes
-        const now = new Date();
-        const lastActivity = new Date(session.lastActivity);
-        
-        if (now - lastActivity > sessionTimeout) {
-            // Session expired - reset to initial state
-            await this.sessionManager.updateSessionState(session.sessionId, this.STATES.INITIAL);
-            await this.sessionManager.updateSessionData(session.sessionId, {});
-            
-            return {
-                expired: true,
-                message: "Your session has expired due to inactivity. Let's start fresh!\n\n" + this.templates.welcome.replace('{clinicName}', process.env.CLINIC_NAME || 'Healthcare Clinic')
-            };
-        }
-        
-        return { expired: false };
-    }
+🏥 *UWC East*
+• Initial: SGD 170
+• Follow-up: SGD 140
+• Specialties: Paediatric, School-based Sports Injuries
 
-    /**
-     * Handle webhook verification (for WhatsApp)
-     */
-    verifyWebhook(mode, token, challenge) {
-        const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
-        
-        if (mode === 'subscribe' && token === verifyToken) {
-            this.logger.info('Webhook verified successfully');
-            return challenge;
-        }
-        
-        this.logger.error('Webhook verification failed');
-        return null;
+🏥 *UWC Dover*
+• Initial: SGD 175
+• Follow-up: SGD 145
+• Specialties: Adolescent Care, Postural, Musculoskeletal
+      `.trim();
+      const newState = session.verified ? this.STATES.MAIN_MENU : this.STATES.UNVERIFIED_MENU;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: newState
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      const nextHandler = this.stateHandlers[newState];
+      const menuMessage = await nextHandler(updatedSession, '');
+      return `${feesByClinic}\n\n${menuMessage}`;
+    } catch (error) {
+      this.logger.error('Fees error:', {
+        error: error?.message || String(error),
+        stack: error?.stack
+      });
+      return `Unable to fetch fee details right now. Please call us directly.\n\n` + await this.renderMainMenu(session);
     }
+  }
 
-    /**
-     * Process batch messages (for high volume)
-     */
-    async processBatchMessages(messages) {
-        const results = [];
-        
-        for (const message of messages) {
-            try {
-                await this.processMessage(
-                    message.phoneNumber,
-                    message.message,
-                    message.messageId
-                );
-                results.push({ success: true, messageId: message.messageId });
-            } catch (error) {
-                results.push({ 
-                    success: false, 
-                    messageId: message.messageId, 
-                    error: error.message 
-                });
-            }
-        }
-        
-        return results;
+  /**
+   * Handle viewing clinics for both verified and unverified users.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleViewClinicsState(session, message) {
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      const newState = session.verified ? this.STATES.MAIN_MENU : this.STATES.UNVERIFIED_MENU;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: newState
+      });
+      return session.verified
+        ? await this.renderMainMenu(session)
+        : await this.renderUnverifiedMenu(session);
     }
+    try {
+      const clinics = await this.clinikoAPI.getClinics();
+      if (!clinics.length) {
+        return 'Unable to fetch locations right now.\n\n' +
+          (session.verified ? await this.renderMainMenu(session) : await this.renderUnverifiedMenu(session));
+      }
+      const displayText = clinics.map((c, idx) =>
+        `${idx + 1}. ${c.business_name}\n   ${c.street_address_1}`
+      ).join('\n');
+      if (session.verified) {
+        let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+        data.clinic_list = clinics;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.SELECT_CLINIC,
+          data: JSON.stringify(data)
+        });
+        return `Here are our clinics:\n\n${displayText}\n\nPlease reply with the number of a clinic to see its physiotherapists.\n\n0️⃣ Back to Main Menu`;
+      } else {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.UNVERIFIED_MENU
+        });
+        return `Here are our clinic locations:\n\n${displayText}\n\n${await this.renderUnverifiedMenu(session)}`;
+      }
+    } catch (err) {
+      return 'Unable to fetch locations right now.\n\n' +
+        (session.verified ? await this.renderMainMenu(session) : await this.renderUnverifiedMenu(session));
+    }
+  }
 
-    /**
-     * Get system health status
-     */
-    async getHealthStatus() {
-        try {
-            const activeSessions = await this.getActiveSessionsCount();
-            const dbStatus = await this.checkDatabaseHealth();
-            const apiStatus = await this.checkAPIHealth();
-            
-            return {
-                status: 'healthy',
-                timestamp: new Date().toISOString(),
-                activeSessions,
-                database: dbStatus,
-                apis: apiStatus,
-                uptime: process.uptime()
-            };
-            
-        } catch (error) {
-            return {
-                status: 'unhealthy',
-                timestamp: new Date().toISOString(),
-                error: error.message
-            };
-        }
+  /**
+   * Handle user selection of a clinic (from list), showing physios for that clinic.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectClinicState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const clinics = data.clinic_list || [];
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return await this.renderMainMenu(session);
     }
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !clinics[idx]) {
+      return 'Invalid clinic selection. Please reply with a number from the clinics list, or 0️⃣ to go back.';
+    }
+    const selectedClinic = clinics[idx];
+    // Get physios for this clinic
+    const physios = await this.clinikoAPI.getPhysiosByClinic(selectedClinic.id);
+    if (!physios || physios.length === 0) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return `No physiotherapists found for ${selectedClinic.business_name}.\n\n` + await this.renderMainMenu(session);
+    }
+    data.selected_clinic = selectedClinic;
+    data.physio_list_for_clinic = physios;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_PHYSIO_FOR_CLINIC,
+      data: JSON.stringify(data)
+    });
+    const displayText = physios.map((p, idx) => {
+      const name = p.display_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+      return `${idx + 1}. ${name}${p.specialization ? ' - ' + p.specialization : ''}`;
+    }).join('\n');
+    return `Physiotherapists at ${selectedClinic.business_name}:\n\n${displayText}\n\nPlease reply with the number of the physiotherapist to see their available slots.\n\n0️⃣ Back to Main Menu`;
+  }
 
-    /**
-     * Check database health
-     */
-    async checkDatabaseHealth() {
-        try {
-            await DatabaseManager.get('SELECT 1');
-            return { status: 'connected' };
-        } catch (error) {
-            return { status: 'error', error: error.message };
-        }
+  /**
+   * Handle user selection of a physio for a chosen clinic, showing their available slots.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectPhysioForClinicState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const physios = data.physio_list_for_clinic || [];
+    const selectedClinic = data.selected_clinic;
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      // Go back to clinic selection
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.SELECT_CLINIC,
+        data: JSON.stringify(data)
+      });
+      const clinics = data.clinic_list || [];
+      const displayText = clinics.map((c, idx) =>
+        `${idx + 1}. ${c.business_name}\n   ${c.street_address_1}`
+      ).join('\n');
+      return `Here are our clinics:\n\n${displayText}\n\nPlease reply with the number of a clinic to see its physiotherapists.\n\n0️⃣ Back to Main Menu`;
     }
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !physios[idx]) {
+      return 'Invalid selection. Please reply with a number from the physiotherapist list, or 0️⃣ to go back.';
+    }
+    const selectedPhysio = physios[idx];
+    // Get next available slots for this physio at this clinic
+    const slots = await this.clinikoAPI.getNextAvailableSlots({
+      practitioner_id: selectedPhysio.id,
+      business_id: selectedClinic.id
+    });
+    if (!slots || slots.length === 0) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return `No available slots for ${selectedPhysio.display_name || selectedPhysio.first_name} at ${selectedClinic.business_name}.\n\n` + await this.renderMainMenu(session);
+    }
+    data.selected_physio = selectedPhysio;
+    data.slot_list = slots;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_SLOT,
+      data: JSON.stringify(data)
+    });
+    const slotText = slots.map((slot, idx) => {
+      const dt = new Date(slot.slot);
+      return `${idx + 1}. ${slot.practitioner_name} — ${slot.appointment_type_name}\n   ${dt.toLocaleString()}`;
+    }).join('\n');
+    return `Available slots for ${selectedPhysio.display_name || (selectedPhysio.first_name + ' ' + selectedPhysio.last_name)} at ${selectedClinic.business_name}:\n\n${slotText}\n\nPlease reply with the number to pick a slot, or 0️⃣ Back to Main Menu.`;
+  }
 
-    /**
-     * Check API health
-     */
-    async checkAPIHealth() {
-        const results = {};
-        
-        try {
-            await this.whatsappAPI.checkHealth();
-            results.whatsapp = { status: 'connected' };
-        } catch (error) {
-            results.whatsapp = { status: 'error', error: error.message };
-        }
-        
-        try {
-            await this.clinikoAPI.checkHealth();
-            results.cliniko = { status: 'connected' };
-        } catch (error) {
-            results.cliniko = { status: 'error', error: error.message };
-        }
-        
-        return results;
+  /**
+   * Handle viewing all physiotherapists (shows list, then lets user select one for slot viewing).
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleViewPhysiosState(session, message) {
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      return await this.renderMainMenu(session);
     }
+    const physios = await this.clinikoAPI.getAllPhysios();
+    if (!physios || physios.length === 0) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      return 'Unable to fetch physiotherapists right now.\n\n' + await this.renderMainMenu(session);
+    }
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    data.physio_list = physios;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_PHYSIO,
+      data: JSON.stringify(data)
+    });
+    const displayText = physios.map((p, idx) => {
+      const name = p.display_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+      return `${idx + 1}. ${name}${p.specialization ? ' - ' + p.specialization : ''}`;
+    }).join('\n');
+    return `Our physiotherapists:\n\n${displayText}\n\nPlease reply with the number of a physiotherapist to see their clinics.\n\n0️⃣ Back to Main Menu`;
+  }
+
+  /**
+   * Handle user selecting a physiotherapist from the list, showing their clinics.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectPhysioState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const physios = data.physio_list || [];
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return await this.renderMainMenu(session);
+    }
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !physios[idx]) {
+      return 'Invalid physiotherapist selection. Please reply with a number from the list, or 0️⃣ to go back.';
+    }
+    const selectedPhysio = physios[idx];
+    // Get clinics for this physio
+    const clinics = await this.clinikoAPI.getClinicsByPhysio(selectedPhysio.id);
+    if (!clinics || clinics.length === 0) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return `No clinics found for ${selectedPhysio.display_name || selectedPhysio.first_name}.\n\n` + await this.renderMainMenu(session);
+    }
+    data.selected_physio = selectedPhysio;
+    data.attached_clinics = clinics;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_CLINIC_FOR_PHYSIO,
+      data: JSON.stringify(data)
+    });
+    let clinicText = clinics.map((c, idx) =>
+      `${idx + 1}. ${c.business_name}`
+    ).join('\n');
+    const name = `${selectedPhysio.first_name || ''} ${selectedPhysio.last_name || ''}`.trim() || selectedPhysio.display_name;
+    return `Please select a clinic for ${name}:\n\n${clinicText}\n\n0️⃣ Back to Main Menu`;
+  }
+
+  /**
+   * Handle user selecting a clinic for a specific physio, then show their available slots there.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSelectClinicForPhysioState(session, message) {
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const clinics = data.attached_clinics || [];
+    const selectedPhysio = data.selected_physio;
+    const text = message.trim().toLowerCase();
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.SELECT_PHYSIO,
+        data: JSON.stringify(data)
+      });
+      const physios = data.physio_list || [];
+      const displayText = physios.map((p, idx) => {
+        const name = p.display_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+        return `${idx + 1}. ${name}${p.specialization ? ' - ' + p.specialization : ''}`;
+      }).join('\n');
+      return `Our physiotherapists:\n\n${displayText}\n\nPlease reply with the number of a physiotherapist to see their clinics.\n\n0️⃣ Back to Main Menu`;
+    }
+    const idx = parseInt(text, 10) - 1;
+    if (isNaN(idx) || !clinics[idx]) {
+      return 'Invalid clinic selection. Please reply with a number from the list, or 0️⃣ to go back.';
+    }
+    const selectedClinic = clinics[idx];
+    // Get next available slots for this physio at this clinic
+    const slots = await this.clinikoAPI.getNextAvailableSlots({
+      practitioner_id: selectedPhysio.id,
+      business_id: selectedClinic.id
+    });
+    if (!slots || slots.length === 0) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU,
+        data: null
+      });
+      return `No available slots for ${selectedPhysio.display_name || selectedPhysio.first_name} at ${selectedClinic.business_name}.\n\n` + await this.renderMainMenu(session);
+    }
+    data.selected_clinic = selectedClinic;
+    data.slot_list = slots;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_SLOT,
+      data: JSON.stringify(data)
+    });
+    const slotText = slots.map((slot, idx) => {
+      const dt = new Date(slot.slot);
+      return `${idx + 1}. ${slot.practitioner_name} — ${slot.appointment_type_name}\n   ${dt.toLocaleString()}`;
+    }).join('\n');
+    const physioName = selectedPhysio.display_name || (`${selectedPhysio.first_name || ''} ${selectedPhysio.last_name || ''}`.trim());
+    return `Available slots for ${physioName} at ${selectedClinic.business_name}:\n\n${slotText}\n\nPlease reply with the number to pick a slot, or 0️⃣ Back to Main Menu.`;
+  }
+
+  // ===============================
+  // MISCELLANEOUS: SYSTEM HEALTH & UTILITIES
+  // ===============================
+
+  /**
+   * Check system health (database and API) and show to user.
+   * @param {object} session
+   * @param {string} message
+   */
+  async handleSystemHealthCheck(session, message) {
+    try {
+      const dbStatus = await checkDatabaseHealth();
+      const apiStatus = await checkAPIHealth();
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      return `System Status:\n• Database: ${dbStatus ? 'Healthy' : 'Issues detected'}\n• API: ${apiStatus ? 'Healthy' : 'Issues detected'}\n\n` + await this.renderMainMenu(session);
+    } catch (error) {
+      this.logger.error('Health check error:', error);
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.MAIN_MENU
+      });
+      return 'Health check failed. Please try again later.\n\n' + await this.renderMainMenu(session);
+    }
+  }
+
+  /**
+   * Utility method to get session stats.
+   */
+  async getSessionStats() {
+    try {
+      return await this.sessionManager.getSessionStats();
+    } catch (error) {
+      this.logger.error('Failed to get session stats:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Clean up the chatbot engine, closing sessions and freeing resources.
+   */
+  async cleanup() {
+    try {
+      await this.sessionManager.close();
+      this.logger.info('ChatbotEngine cleanup completed');
+    } catch (error) {
+      this.logger.error('Error during cleanup:', error);
+    }
+  }
 }
 
 module.exports = ChatbotEngine;

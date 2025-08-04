@@ -77,7 +77,26 @@ async function testChatbot() {
   }
 }
 
-// Check if server is running first
-async function checkServer() {
-  try {
-    await axios.get('http://localhost:3000
+/**
+ * Waits until the local server is up by pinging the health endpoint.
+ * @param {string} url - URL to check (e.g., 'http://localhost:3000/health')
+ * @param {number} retries - Number of retries before failing
+ * @param {number} delayMs - Delay between retries in ms
+ */
+async function checkServer(url = 'http://localhost:3000/health', retries = 10, delayMs = 1000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await axios.get(url);
+      if (response.status === 200) {
+        console.log(`✅ Server is up at ${url}`);
+        return true;
+      }
+    } catch (err) {
+      console.log(`⏳ Waiting for server... (attempt ${attempt}/${retries})`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  console.error(`❌ Server did not respond after ${retries} attempts.`);
+  process.exit(1); // exit with failure
+}
+

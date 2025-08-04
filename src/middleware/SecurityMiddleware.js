@@ -10,14 +10,14 @@ const slowDown = require('express-slow-down');
 const helmet = require('helmet');
 const xss = require('xss');
 const validator = require('validator');
-const { Logger } = require('./Logger');
+const  Logger = require('./Logger');
 
 class SecurityMiddleware {
     constructor(config = {}) {
         this.logger = new Logger('SecurityMiddleware');
         this.config = {
             webhookSecret: process.env.WHATSAPP_WEBHOOK_SECRET,
-            apiKey: process.env.API_KEY,
+            apiKey: process.env.ADMIN_API_KEY || process.env.CLINIKO_API_KEY,
             encryptionKey: process.env.ENCRYPTION_KEY,
             jwtSecret: process.env.JWT_SECRET,
             maxRequestSize: config.maxRequestSize || '10mb',
@@ -90,7 +90,8 @@ class SecurityMiddleware {
         this.slowDown = slowDown({
             windowMs: this.config.rateLimitWindow,
             delayAfter: this.config.slowDownThreshold,
-            delayMs: 500, // Start with 500ms delay
+            // delayMs: 500, // Start with 500ms delay
+            delayMs: () => 500,
             maxDelayMs: 5000, // Cap at 5 seconds
             skipSuccessfulRequests: true
         });
@@ -126,9 +127,21 @@ class SecurityMiddleware {
     /**
      * Verify WhatsApp webhook signature
      */
+/*
     verifyWebhookSignature(req, res, next) {
+console.log('✅ ENTERED verifyWebhookSignature');
         try {
-            const signature = req.get('X-Hub-Signature-256');
+            //const signature = req.get('X-Hub-Signature-256');
+            const signatureHeader = req.get('X-Hub-Signature-256');
+            //const signature = signatureHeader?.replace(/^sha256=/, '');
+if (!signatureHeader?.startsWith('sha256=')) {
+  this.logger.warn('Missing or malformed webhook signature header', { ip: req.ip, header: signatureHeader });
+  return res.status(401).json({
+    error: 'Malformed signature',
+    code: 'MALFORMED_SIGNATURE_HEADER'
+  });
+}
+const signature = signatureHeader.replace(/^sha256=/, '');
             
             if (!signature) {
                 this.logger.warn('Missing webhook signature', { ip: req.ip });
@@ -149,20 +162,29 @@ class SecurityMiddleware {
             // Calculate expected signature
             const expectedSignature = crypto
                 .createHmac('sha256', this.config.webhookSecret)
-                .update(req.body, 'utf8')
+                .update(req.body)
                 .digest('hex');
 
-            const expectedHash = `sha256=${expectedSignature}`;
+this.logger.info("🔍 Signature header raw:", signatureHeader);
+this.logger.info("🔍 Signature stripped:", signature);
 
+        try{
+            const sigBuf = Buffer.from(signature, 'hex');
+            const expectedBuf = Buffer.from(expectedSignature, 'hex');
+        } catch (err) {
+            this.logger.error("💥 Invalid hex format for signature", err);
+            return res.status(400).json({
+            error: 'Invalid signature format',
+            code: 'INVALID_SIGNATURE_FORMAT'
+        });
+        }
             // Use timing-safe comparison
-            if (!crypto.timingSafeEqual(
-                Buffer.from(signature),
-                Buffer.from(expectedHash)
-            )) {
+            if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+
                 this.logger.warn('Invalid webhook signature', {
                     ip: req.ip,
                     received: signature,
-                    expected: expectedHash
+                    expected: expectedSignature
                 });
                 return res.status(401).json({
                     error: 'Invalid signature',
@@ -181,7 +203,55 @@ class SecurityMiddleware {
             });
         }
     }
+*/
 
+verifyWebhookSignature(req, res, next) {
+  console.log('✅ ENTERED verifyWebhookSignature');
+console.log('🧾 Content-Type:', req.get('Content-Type'));
+console.log('📦 typeof req.body:', typeof req.body, 'Buffer?', Buffer.isBuffer(req.body));
+
+  const signatureHeader = req.get('X-Hub-Signature-256');
+
+  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) {
+    console.error('❌ Missing or malformed signature header:', signatureHeader);
+    return res.status(401).json({ error: 'Malformed signature', code: 'MALFORMED_SIGNATURE_HEADER' });
+  }
+
+  const signature = signatureHeader.replace(/^sha256=/, '');
+
+  if (!this.config.webhookSecret) {
+    console.error('❌ Webhook secret not configured');
+    return res.status(500).json({ error: 'Server config error', code: 'CONFIG_ERROR' });
+  }
+
+  let expectedSignature;
+  try {
+    expectedSignature = crypto
+      .createHmac('sha256', this.config.webhookSecret)
+      .update(req.body)
+      .digest('hex');
+  } catch (err) {
+    console.error('❌ HMAC generation failed:', err);
+    return res.status(500).json({ error: 'HMAC failure', code: 'HMAC_FAILURE' });
+  }
+
+  let sigBuf, expectedBuf;
+  try {
+    sigBuf = Buffer.from(signature, 'hex');
+    expectedBuf = Buffer.from(expectedSignature, 'hex');
+  } catch (err) {
+    console.error('❌ Buffer conversion failed:', err);
+    return res.status(400).json({ error: 'Invalid hex encoding', code: 'INVALID_SIGNATURE_ENCODING' });
+  }
+
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    console.warn('❌ Invalid signature match');
+    return res.status(401).json({ error: 'Invalid signature', code: 'INVALID_SIGNATURE' });
+  }
+
+  console.log('✅ Webhook signature verified successfully');
+  next();
+}
     /**
      * Verify API key for admin endpoints
      */
@@ -452,6 +522,13 @@ class SecurityMiddleware {
             this.verifyApiKey.bind(this)
         ];
     }
+    requireAuth(req, res, next) {
+        if (!this.apiKey || req.headers['x-api-key'] !== this.apiKey) {
+            this.logger.warn('Unauthorized access attempt.');
+            return res.status(401).json({ error: 'Authentication failure' });
+        }
+        next();
+    }
 }
 
-module.exports = { SecurityMiddleware };
+module.exports = SecurityMiddleware ;

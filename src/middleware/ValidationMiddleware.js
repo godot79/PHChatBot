@@ -5,7 +5,7 @@
  */
 
 const validator = require('validator');
-const { Logger } = require('./Logger');
+const Logger = require('./Logger');
 
 class ValidationMiddleware {
     constructor(config = {}) {
@@ -543,11 +543,11 @@ class ValidationMiddleware {
             const [hours, minutes] = time.split(':').map(Number);
             const appointmentMinutes = hours * 60 + minutes;
 
-            const [startHours, startMinutes] = this.config.businessHours.start.split(':').map(Number);
-            const startMinutes = startHours * 60 + startMinutes;
+            const [startHours, startMins] = this.config.businessHours.start.split(':').map(Number);
+            const startMinutes = startHours * 60 + startMins;
 
-            const [endHours, endMinutes] = this.config.businessHours.end.split(':').map(Number);
-            const endMinutes = endHours * 60 + endMinutes;
+            const [endHours, endMins] = this.config.businessHours.end.split(':').map(Number);
+            const endMinutes = endHours * 60 + endMins;
 
             if (appointmentMinutes < startMinutes || appointmentMinutes >= endMinutes) {
                 this.logger.warn('Appointment outside business hours', { 
@@ -786,4 +786,4 @@ class ValidationMiddleware {
     }
 }
 
-module.exports = { ValidationMiddleware };
+module.exports = ValidationMiddleware ;

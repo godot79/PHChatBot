@@ -10,7 +10,7 @@ app.post('/webhook', (req, res) => {
   res.status(200).json({ status: 'mock received' });
 });
 
-const PORT = process.env.MOCK_PORT || 3030;
+const PORT = process.env.MOCK_PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Mock WhatsApp webhook running on port ${PORT}`);
 });
