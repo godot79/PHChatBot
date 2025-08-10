@@ -95,6 +95,8 @@ class ClinikoAPI {
         const blocks = await this.getNextAvailableSlots({
           practitioner_id: `${practitioner.id}`,
           business_id,
+          maxDays,
+          maxSlots,
         });
         if (blocks?.length) {
           results.push(...blocks);
@@ -160,7 +162,7 @@ class ClinikoAPI {
       params.append('to', to);
     } else {
       const maxDaysToSearch = parseInt(config.maxSlotDays ?? 5);
-      const toDate = new Date(today.setDate(today.getDate() + maxDaysToSearch)).toISOString().split('T')[0];
+      const toDate = new Date(today.setDate(today.getDate() + 1 + maxDaysToSearch)).toISOString().split('T')[0];
       params.append('to', toDate);
     }
 
@@ -218,7 +220,7 @@ class ClinikoAPI {
       const maxSlotsTotal = parseInt(maxSlots ?? config.maxSlotCount ?? 5);
       const today = new Date();
       const fromDate = new Date(today.setDate(today.getDate() + 1)).toISOString().split('T')[0];
-      const toDate = new Date(today.setDate(today.getDate() + maxDaysToSearch)).toISOString().split('T')[0];
+      const toDate = new Date(today.setDate(today.getDate() + 1 + maxDaysToSearch)).toISOString().split('T')[0];
 
       let practitionerObj = { display_name: "" };
       try {
@@ -393,6 +395,168 @@ class ClinikoAPI {
     }
   }
 
+  /**
+   * Get all practitioners grouped by clinic, including clinic name and id.
+   * Returns an array of objects each containing clinic_id, clinic_name, and practitioners[].
+   * This eliminates the need for an extra clinics fetch in handlers.
+   * @returns {Promise<Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>}
+   */
+  async getPractitionersByClinic() {
+    const params = new URLSearchParams();
+    params.append('q[]', 'show_in_online_bookings:=T');
+    try {
+      const clinics = await this.getClinics();
+      const grouped = [];
+
+      for (const clinic of clinics) {
+        const url = `/businesses/${clinic.id}/practitioners?${params.toString()}`;
+        console.debug(`Fetching physios : ${url}`); 
+        const practitioners = await new SendMessage(url, {}).get();
+
+        grouped.push({
+          clinic_id: clinic.id,
+          clinic_name: clinic.business_name,
+          practitioners: practitioners.practitioners || []
+        });
+      }
+      return grouped;
+    } catch (error) {
+      this.logger.error("getPractitionersByClinic failed : ${error}");
+      return [];
+    }
+  }
+
+  /**
+   * Get available slots for a business (and optionally a practitioner) within a date range.
+   * Returns an array of slots, each containing practitioner, appointment type, and slot info.
+   *
+   * @param {Object} options
+   * @param {string} options.business_id - Clinic/business ID
+   * @param {string} options.from - ISO start datetime (e.g. '2024-08-10T00:00:00Z')
+   * @param {string} options.to - ISO end datetime (e.g. '2024-08-10T23:59:59Z')
+   * @param {string} [options.practitioner_id] - (Optional) Practitioner ID to filter
+   * @returns {Promise<Array>} Array of slots: [{ practitioner_id, practitioner_name, appointment_type_id, appointment_type_name, slot }]
+   */
+  async getAvailableSlotsByBusinessAndDate({ business_id, from, to, practitioner_id }) {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    try {
+      if (!business_id || !from || !to) throw new Error('Missing required parameters.');
+      const fromDate = new Date(from);
+      const toDate = new Date(to);
+      if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) throw new Error('Invalid date format.');
+      if ((toDate - fromDate) / DAY_MS > 7) throw new Error('Date range must not exceed 7 days.');
+
+      let practitioners = [];
+      if (practitioner_id) {
+        // Fetch single practitioner object (for display name) if only one is specified
+        const all = await this.getPractitionersForClinic(business_id);
+        practitioners = all.filter(p => `${p.id}` === `${practitioner_id}`);
+        if (!practitioners.length) throw new Error('Practitioner not found for this clinic.');
+      } else {
+        practitioners = await this.getPractitionersForClinic(business_id);
+      }
+
+      let allSlots = [];
+      for (const practitioner of practitioners) {
+        const apptTypes = await this.getAppointmentTypes({ practitioner_id: practitioner.id });
+        for (const apptType of apptTypes) {
+          let slots = [];
+          try {
+            slots = await this.getAvailableTimes({
+              practitioner_id: practitioner.id,
+              business_id,
+              appt_type: apptType.id,
+              from,
+              to,
+            });
+          } catch (slotErr) {
+            this.logger.error(`Slot fetch failed for practitioner ${practitioner.id} appt type ${apptType.id}: ${slotErr.message}`);
+          }
+          if (slots.length) {
+            allSlots.push(...slots.map(slot => ({
+              practitioner_id: practitioner.id,
+              practitioner_name: practitioner.display_name || `${practitioner.first_name} ${practitioner.last_name}`.trim(),
+              appointment_type_id: apptType.id,
+              appointment_type_name: apptType.name,
+              slot: slot.appointment_start || slot.start_time || slot.starts_at,
+            })));
+          }
+        }
+      }
+
+      return allSlots;
+    } catch (error) {
+      this.logger && this.logger.error && this.logger.error(`getAvailableSlotsByBusinessAndDate failed: ${error.message || error}`);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch a practitioner by ID from the Cliniko API.
+   * @param {string|number} practitionerId - The practitioner ID.
+   * @returns {Promise<Object|null>} Practitioner object (or null if not found).
+   */
+  async getPractitionerById(practitionerId) {
+    if (!practitionerId) {
+      this.logger.error("getPractitionerById: practitionerId is required");
+      return null;
+    }
+    try {
+      const url = `/practitioners/${practitionerId}`;
+      const result = await new SendMessage(url,{}).get();
+      return result || null;
+    } catch (error) {
+      this.logger.error(`getPractitionerById failed for ${practitionerId}: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch a appointment type by ID from the Cliniko API.
+   * @param {string|number} appointmentTypeId - The appointment type ID.
+   * @returns {Promise<Object|null>} Appointment type object (or null if not found).
+   */
+  async getAppointmentTypeById(appointmentTypeId) {
+    if (!appointmentTypeId) {
+      this.logger.error("getAppointmentTypeById: appointmentTypeId is required");
+      return null;
+    }
+    try {
+      const url = `/appointment_types/${appointmentTypeId}`;
+      const result = await new SendMessage(url, {}).get();
+      return result || null;
+    } catch (error) {
+      this.logger.error(`getAppointmentTypeById failed for ${appointmentTypeId}: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch a business (clinic) by ID from the Cliniko API.
+   * @param {string|number} businessId - The business/clinic ID.
+   * @returns {Promise<Object|null>} Business object (or null if not found).
+   */
+  async getBusinessById(businessId) {
+    if (!businessId) {
+      this.logger.error("getBusinessById: businessId is required");
+      return null;
+    }
+    try {
+      const url = `/businesses/${businessId}`;
+      const result = await new SendMessage(url, {}).get();
+      console.log('[DEBUG getBusinessById result]', result);
+      // The response IS the business object, NOT { business: ... }
+      if (result && result.id) {
+        return result;
+      }
+      this.logger.warn(`No business found for businessId=${businessId}`);
+      return null;
+    } catch (error) {
+      this.logger.error(`getBusinessById failed for ${businessId}: ${error}`);
+      return null;
+    }
+  }
+
   /* ----------------------------------------------------------------------
    * Deprecated / Not Used By ChatbotEngine.js (for future clean-up/removal)
    * --------------------------------------------------------------------*/
@@ -402,7 +566,7 @@ class ClinikoAPI {
    * @deprecated
    * @returns {Promise<Object>} Map of clinicId -> practitioners[]
    */
-  async getPractitionersByClinic() {
+  async DeprecatedgetPractitionersByClinic() {
     const params = new URLSearchParams();
     params.append('q[]', 'show_in_online_bookings:=T');
     try {
