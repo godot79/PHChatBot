@@ -66,6 +66,10 @@ class SessionManager {
                 // Try to get existing active session
                 const existingSession = await this.db.getSessionByPhone(normalizedPhone);
                 if (existingSession && !this.isSessionExpired(existingSession)) {
+                    if (existingSession && existingSession.conversation_state === 'initial') {
+                        await this.updateSession(existingSession.id, { conversation_state: 'INTRO' });
+                        existingSession.conversation_state = 'INTRO';
+                    }
                     // Update last activity safely - but don't fail if it doesn't work
                     await this.updateSessionActivity(existingSession.id);
                     this.logger.debug(`Retrieved existing session ${existingSession.id} for ${normalizedPhone}`);
@@ -884,6 +888,58 @@ class SessionManager {
 
         this.logger.info('SessionManager closed');
     }
+
+    /**
+     * Delete a session by sessionId
+     */
+    async deleteSession(sessionId) {
+        try {
+            await this.db.deleteSession(sessionId);
+            this.clearVerificationTimeout(sessionId);
+            this.logger.info(`Deleted session ${sessionId}`);
+            return true;
+        } catch (error) {
+            this.logger.error(`Failed to delete session ${sessionId}:`, error);
+            throw error;
+        }
+    }
+    /**
+     * Delete a session and all related data (chat history, verification codes).
+     * @param {string} sessionId - The session ID to delete.
+     * @returns {Promise<number>} - Number of session rows deleted (0 or 1).
+     */
+    async deleteSessionAndData(sessionId) {
+        this.logger.debug(`[deleteSessionAndData] Called for session: ${sessionId}`);
+        // Get session to find phone number for verification codes
+        const session = await this.getSession(sessionId);
+        if (!session) {
+            this.logger.warn(`[deleteSessionAndData] Session not found: ${sessionId}`);
+            return 0;
+        }
+        const phoneNumber = session.phone_number;
+
+        // Delete chat history (use DatabaseManager.query)
+        await this.db.query(
+            `DELETE FROM chat_history WHERE session_id = ?`,
+            [sessionId]
+        );
+        this.logger.debug(`[deleteSessionAndData] Deleted chat history for session: ${sessionId}`);
+
+        // Delete verification codes for this phone number (use DatabaseManager.query)
+        if (phoneNumber) {
+            await this.db.query(
+                `DELETE FROM verification_codes WHERE phone_number = ?`,
+                [phoneNumber]
+            );
+            this.logger.debug(`[deleteSessionAndData] Deleted verification codes for phone: ${phoneNumber}`);
+        }
+
+        // Delete the session itself (use DatabaseManager.deleteSession)
+        const deleted = await this.db.deleteSession(sessionId);
+        this.logger.debug(`[deleteSessionAndData] Deleted session row: ${sessionId}`);
+        return deleted;
+    }
+
 }
 
 module.exports = SessionManager;

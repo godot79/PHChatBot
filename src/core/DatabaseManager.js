@@ -35,7 +35,7 @@ class DatabaseManager {
           phone_number TEXT NOT NULL,
           patient_id TEXT,
           verification_status TEXT DEFAULT 'pending',
-          conversation_state TEXT DEFAULT 'initial',
+          conversation_state TEXT DEFAULT 'INTRO',
           context TEXT DEFAULT '{}',
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
