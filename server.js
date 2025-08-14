@@ -20,7 +20,7 @@ app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
     ? ['https://your-production-domain.com']
-    : ['http://localhost:3000', 'http://127.0.0.1:3000']
+    : [`http://localhost:${PORT}`, 'http://127.0.0.1:3000']
 }));
 app.set('trust proxy', 1);
 
