@@ -940,6 +940,33 @@ class SessionManager {
         return deleted;
     }
 
+    /**
+     * Extract region/country from phone number (supports HK, SG, IN, PH, fallback: undefined)
+     * Returns: { region: 'HK'|'SG'|'IN'|'PH'|undefined, countryCode, nationalNumber }
+     */
+    getRegionFromPhoneNumber(phoneNumber) {
+        if (!phoneNumber) return { region: undefined, countryCode: undefined, nationalNumber: undefined };
+        // Remove all non-digit chars
+        const digits = phoneNumber.replace(/\D/g, '');
+        // HK: +852, 8 digits
+        if ((digits.startsWith('852') && digits.length === 11) || (digits.length === 8 && !digits.startsWith('0'))) {
+            return { region: 'HK', countryCode: '852', nationalNumber: digits.slice(-8) };
+        }
+        // SG: +65, 8 digits
+        if ((digits.startsWith('65') && digits.length === 10) || (digits.length === 8 && !digits.startsWith('0'))) {
+            return { region: 'SG', countryCode: '65', nationalNumber: digits.slice(-8) };
+        }
+        // India: +91, 10 digits
+        if ((digits.startsWith('91') && digits.length === 12) || (digits.length === 10 && !digits.startsWith('0'))) {
+            return { region: 'IN', countryCode: '91', nationalNumber: digits.slice(-10) };
+        }
+        // Philippines: +63, 10 digits (mobile: 9xx..., landline: 2xx...)
+        if ((digits.startsWith('63') && (digits.length === 12 || digits.length === 11))) {
+            return { region: 'PH', countryCode: '63', nationalNumber: digits.slice(2) };
+        }
+        // fallback: undefined
+        return { region: undefined, countryCode: undefined, nationalNumber: undefined };
+    }
 }
 
 module.exports = SessionManager;

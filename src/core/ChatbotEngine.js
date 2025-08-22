@@ -14,6 +14,36 @@ const MAX_SLOT_ITEMS = 10;
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 
+const REGION_SUPPORT_INFO = {
+  SG: {
+    phone: '+65 6123 4567',
+    email: 'support@prohealth.com.sg'
+  },
+  HK: {
+    phone: '+852 1234 5678',
+    email: 'support@prohealth.hk'
+  },
+  IN: {
+    phone: '+91 98765 43210',
+    email: 'support@prohealth.in'
+  },
+  PH: {
+    phone: '+63 912 345 6789',
+    email: 'support@prohealth.ph'
+  }
+};
+
+/**
+ * Returns support info string for the given region code.
+ * Defaults to SG if region not found.
+ * @param {string} region
+ * @returns {string}
+ */
+function getSupportInfo(region) {
+  const info = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+  return `Need help? Call us at ${info.phone} or email ${info.email}`;
+}
+
 /**
  * Extracts the Cliniko ID from a reference object.
  * @param {object} obj - Cliniko reference object.
@@ -215,13 +245,19 @@ function formatPaginatedList({
 
 /**
  * Format a slot object for display in slot lists.
+ * Omit practitioner_name and/or business_name if already selected.
  * @param {Object} slot
  * @param {number} idx - 1-based index for display
+ * @param {Object} [opts] - { omitPhysio, omitClinic }
  * @returns {string}
  */
-function formatSlotItem(slot, idx) {
+function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
-  return `${idx}. ${slot.practitioner_name} — ${slot.appointment_type_name}\n   ${dt.toLocaleString()}`;
+  let main = [];
+  if (!opts.omitPhysio && slot.practitioner_name) main.push(slot.practitioner_name);
+  if (!opts.omitClinic && slot.business_name) main.push(slot.business_name);
+  if (slot.appointment_type_name) main.push(slot.appointment_type_name);
+  return `${idx}. ${main.join(' — ')}\n   ${dt.toLocaleString()}`;
 }
 
 /**
@@ -294,6 +330,19 @@ class ChatbotEngine {
   }
 
   /**
+   * Returns the region code for this session, or 'SG' if not set.
+   * @param {object} session
+   * @returns {string}
+   */
+  _getSessionRegion(session) {
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch {}
+    }
+    return (context && context.region) || 'SG';
+  }
+
+  /**
    * Unified error message with menu and support info.
    * @param {object} session
    */
@@ -306,7 +355,7 @@ class ChatbotEngine {
       "We encountered an unexpected error processing your request. " +
       "You can continue using the menu below, or contact support if the issue persists.\n\n" +
       menu +
-      "\n\nNeed help? Call us at +65 6123 4567 or email support@prohealth.com.sg"
+      "\n\n" + getSupportInfo(this._getSessionRegion(session))
     );
   }
 
@@ -389,27 +438,51 @@ class ChatbotEngine {
   }
 
   /**
-   * Render the correct main menu based on verification.
-   * @param {object} session
-   */
+    Render the correct main menu based on verification and region.
+    Always shows the current region (if set) and a hint to change it.
+    @param {object} session
+    @returns {Promise<string>}
+  */
   async renderMainMenu(session) {
+    // Get region from context (parse string if needed)
+    let region = '';
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch {}
+    }
+    if (context && context.region) {
+      const regionLabels = {
+        HK: 'Hong Kong 🇭🇰',
+        SG: 'Singapore 🇸🇬',
+        IN: 'India 🇮🇳',
+        PH: 'Philippines 🇵🇭'
+      };
+      if (regionLabels[context.region]) {
+        region = `🌏 *Your region*: ${regionLabels[context.region]}\n`;
+      }
+    }
+
     if (session.verified) {
       return (
+        `${region}` +
         `What would you like to do?\n\n` +
         `1️⃣ Book Appointment\n` +
         `2️⃣ Cancel Appointment\n` +
         `3️⃣ Reschedule Appointment\n` +
         `9️⃣ Logout & Delete Data\n\n` +
+        `Type "region" anytime to change region.\n` +
         `Reply with the number or a keyword.`
       );
     } else {
       return (
         `👋 *Welcome to ProHealthAsia*\n\n` +
+        `${region}` +
         `Please select an option:\n` +
         `1️⃣ Book or Manage Appointment\n` +
         `2️⃣ View Fees\n` +
         `3️⃣ View Locations\n` +
         `4️⃣ Register as New Patient\n\n` +
+        `Type "region" anytime to change region.\n` +
         `Reply with the number or a keyword.`
       );
     }
@@ -459,8 +532,9 @@ class ChatbotEngine {
         return await this.renderErrorWithMenu(session);
       }
       return (
-        "We're currently experiencing a technical issue and could not start your session. " +
-        "Please try again later. If the problem continues, contact us at +65 6123 4567 or email support@prohealth.com.sg"
+          "We're currently experiencing a technical issue and could not start your session. " +
+          "Please try again later. If the problem continues, " +
+        getSupportInfo(this._getSessionRegion(session))
       );
     }
   }
@@ -468,18 +542,76 @@ class ChatbotEngine {
   // ====== STATE HANDLERS ======
 
   /**
-   * Handle the intro state (first message).
-   * @param {object} session
-   * @param {string} message
-   */
+
+  Handle the intro state (first message), including region detection and selection.
+  If region can be detected from phone, set as default.
+  If not, prompt user to select.
+  User can type "region" anytime to change region.
+  All menu rendering is delegated to renderMainMenu.
+  @param {object} session
+  @param {string} message
+  @returns {Promise<string>}
+  */
   async handleIntroState(session, message) {
+    const regionLabels = {
+      HK: 'Hong Kong 🇭🇰',
+      SG: 'Singapore 🇸🇬',
+      IN: 'India 🇮🇳',
+      PH: 'Philippines 🇵🇭'
+    };
+    const regionCodes = Object.keys(regionLabels);
+
+    // Parse context safely
+    let context = (session.context && typeof session.context === 'string')
+      ? JSON.parse(session.context)
+      : (session.context || {});
+    const text = (message || '').trim().toLowerCase();
+
+    // If region not set, try auto-detect
+    if (!context.region) {
+      const phone = session.phone_number || session.phoneNumber;
+      if (typeof this.sessionManager.getRegionFromPhoneNumber === 'function') {
+        const info = this.sessionManager.getRegionFromPhoneNumber(phone);
+        if (info && info.region && regionLabels[info.region]) {
+          context.region = info.region;
+          await this.sessionManager.updateSession(session.id, { context });
+        }
+      }
+    }
+
+    // If region not set or user typed "region", show region selection menu
+    if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
+      context.awaiting_region_selection = true;
+      // Handle selection input
+      if (/^\d+$/.test(text)) {
+        const idx = parseInt(text, 10) - 1;
+        if (idx >= 0 && idx < regionCodes.length) {
+          context.region = regionCodes[idx];
+          delete context.awaiting_region_selection;
+          await this.sessionManager.updateSession(session.id, { context });
+        }
+      } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
+        const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
+        context.region = found;
+        delete context.awaiting_region_selection;
+        await this.sessionManager.updateSession(session.id, { context });
+      }
+
+      if (!context.region || context.awaiting_region_selection) {
+        const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
+        await this.sessionManager.updateSession(session.id, { context });
+        return `Please select your region:\n\n${menu}\n\nReply with the number.`;
+      }
+    }
+
+    // From here, region is set. Proceed with your existing menu logic, using renderMainMenu.
     if (session.verified) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
       });
       return await this.renderMainMenu(session);
     }
-    const text = message.trim().toLowerCase();
+
     if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
       return await this.renderMainMenu(session);
     }
@@ -509,8 +641,9 @@ class ChatbotEngine {
       });
       return await this.handleRegisterPatientState(session, '');
     }
-    return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
-  }
+    return `Sorry, I didn't understand that.\n\n` +
+      await this.renderMainMenu(session);
+  } 
 
   /**
    * Handle fallback for any unknown state or invalid input.
@@ -567,7 +700,7 @@ class ChatbotEngine {
         "We encountered an unexpected error processing your request. " +
         "You can continue using the menu below, or contact support if the issue persists.\n\n" +
         await this.renderMainMenu(session) +
-        "\n\nNeed help? Call us at +65 6123 4567 or email support@prohealth.com.sg"
+        "\n\n" + getSupportInfo(this._getSessionRegion(session))
       );
     }
   }
@@ -690,11 +823,13 @@ class ChatbotEngine {
     return reply;
   }
   
-
   /**
    * Book soonest available appointment, with pagination for slots, clinics and physios.
+   * "Back" goes up one submenu step, or to Booking Options menu if at top.
+   * Slot display omits physio/clinic per slot when already selected, showing them in header.
    * @param {object} session
    * @param {string} message
+   * @returns {Promise<string>}
    */
   async handleBookSoonest(session, message) {
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
@@ -703,14 +838,30 @@ class ChatbotEngine {
     // Always use a flow step marker
     if (!data.selection_step) data.selection_step = 'choose_type';
 
-    // "Back" to booking method menu ONLY from root step
-    if (['0', 'menu', 'back'].includes(text) && data.selection_step === 'choose_type') {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
-        data: null
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.goToInteractiveMenu(updatedSession);
+    // One-up "back" navigation
+    if (['0', 'menu', 'back'].includes(text)) {
+      if (data.selection_step === 'choose_clinic' || data.selection_step === 'choose_physio') {
+        data.selection_step = 'choose_type';
+        delete data.clinic_list;
+        delete data.clinic_page;
+        delete data.physio_list;
+        delete data.physio_page;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOK_SOONEST,
+          data: JSON.stringify(data)
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return await this.handleBookSoonest(updatedSession, '');
+      }
+      // At top: go to Booking Options menu
+      if (data.selection_step === 'choose_type') {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+          data: null
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return await this.goToInteractiveMenu(updatedSession);
+      }
     }
 
     // ---- Choose type: Any / Clinic / Physio ----
@@ -749,7 +900,7 @@ class ChatbotEngine {
         const updatedSession = await this.sessionManager.getSession(session.id);
         const reply = formatPaginatedList({
           items: slots,
-          formatFn: formatSlotItem,
+          formatFn: (slot, idx) => formatSlotItem(slot, idx, {}),
           page: 0,
           pageSize: MAX_SLOT_ITEMS,
           moreLabel: 'M. More slots',
@@ -811,19 +962,6 @@ class ChatbotEngine {
       return "Do you have a preference for clinic or physio?\n\n1️⃣ Any\n2️⃣ Choose clinic\n3️⃣ Choose physio\n\nReply with number. (0️⃣ Back)";
     }
 
-    // ---- Back from clinic list goes to choose_type ----
-    if (data.selection_step === 'choose_clinic' && ['0', 'menu', 'back'].includes(text)) {
-      data.selection_step = 'choose_type';
-      delete data.clinic_list;
-      delete data.clinic_page;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_SOONEST,
-        data: JSON.stringify(data)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.handleBookSoonest(updatedSession, '');
-    }
-
     // ---- Clinic list pagination and selection ----
     if (data.selection_step === 'choose_clinic') {
       if (text === 'm' || text === 'more') {
@@ -866,7 +1004,7 @@ class ChatbotEngine {
         const updatedSession = await this.sessionManager.getSession(session.id);
         const reply = formatPaginatedList({
           items: slots,
-          formatFn: formatSlotItem,
+          formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitClinic: true }),
           page: 0,
           pageSize: MAX_SLOT_ITEMS,
           moreLabel: 'M. More slots',
@@ -886,19 +1024,6 @@ class ChatbotEngine {
         header: 'Select a clinic:'
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply;
-    }
-
-    // ---- Back from physio list goes to choose_type ----
-    if (data.selection_step === 'choose_physio' && ['0', 'menu', 'back'].includes(text)) {
-      data.selection_step = 'choose_type';
-      delete data.physio_list;
-      delete data.physio_page;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_SOONEST,
-        data: JSON.stringify(data)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.handleBookSoonest(updatedSession, '');
     }
 
     // ---- Physio list pagination and selection ----
@@ -946,7 +1071,7 @@ class ChatbotEngine {
         const updatedSession = await this.sessionManager.getSession(session.id);
         const reply = formatPaginatedList({
           items: slots,
-          formatFn: formatSlotItem,
+          formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitPhysio: true }),
           page: 0,
           pageSize: MAX_SLOT_ITEMS,
           moreLabel: 'M. More slots',
@@ -973,9 +1098,10 @@ class ChatbotEngine {
   }
 
   /**
-   * Book at a specific date, with pagination for date, clinic, physio, and slots.
+   * Book at a specific date, with up-one-step navigation and slot display cosmetics.
    * @param {object} session
    * @param {string} message
+   * @returns {Promise<string>}
    */
   async handleBookSpecificDate(session, message) {
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
@@ -983,40 +1109,29 @@ class ChatbotEngine {
 
     if (!data.selection_step) data.selection_step = 'choose_date';
 
-    // Go up from clinic/physio selection to choose_type
-    if (data.selection_step === 'choose_clinic' && ['0', 'menu', 'back'].includes(text)) {
-      data.selection_step = 'choose_type';
-      delete data.clinic_list;
-      delete data.clinic_page;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_SPECIFIC_DATE,
-        data: JSON.stringify(data)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.handleBookSpecificDate(updatedSession, '');
-    }
-    if (data.selection_step === 'choose_physio' && ['0', 'menu', 'back'].includes(text)) {
-      data.selection_step = 'choose_type';
-      delete data.physio_list;
-      delete data.physio_page;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_SPECIFIC_DATE,
-        data: JSON.stringify(data)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.handleBookSpecificDate(updatedSession, '');
-    }
-    // Go up from choose_type or choose_date to booking method menu
-    if (
-      ['0', 'menu', 'back'].includes(text) &&
-      (data.selection_step === 'choose_type' || data.selection_step === 'choose_date')
-    ) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
-        data: null
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.goToInteractiveMenu(updatedSession);
+    // One-up "back" navigation
+    if (['0', 'menu', 'back'].includes(text)) {
+      if (data.selection_step === 'choose_clinic' || data.selection_step === 'choose_physio') {
+        data.selection_step = 'choose_type';
+        delete data.clinic_list;
+        delete data.clinic_page;
+        delete data.physio_list;
+        delete data.physio_page;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOK_SPECIFIC_DATE,
+          data: JSON.stringify(data)
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return await this.handleBookSpecificDate(updatedSession, '');
+      }
+      if (data.selection_step === 'choose_type' || data.selection_step === 'choose_date') {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+          data: null
+        });
+        const updatedSession = await this.sessionManager.getSession(session.id);
+        return await this.goToInteractiveMenu(updatedSession);
+      }
     }
 
     // ---- Date selection and pagination ----
@@ -1172,7 +1287,7 @@ class ChatbotEngine {
           const updatedSession = await this.sessionManager.getSession(session.id);
           const reply = formatPaginatedList({
             items: slots,
-            formatFn: formatSlotItem,
+            formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitClinic: true }),
             page: 0,
             pageSize: MAX_SLOT_ITEMS,
             moreLabel: 'M. More slots',
@@ -1247,7 +1362,7 @@ class ChatbotEngine {
           const updatedSession = await this.sessionManager.getSession(session.id);
           const reply = formatPaginatedList({
             items: slots,
-            formatFn: formatSlotItem,
+            formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitPhysio: true }),
             page: 0,
             pageSize: MAX_SLOT_ITEMS,
             moreLabel: 'M. More slots',
@@ -1275,55 +1390,20 @@ class ChatbotEngine {
     // Final fallback
     return "Please reply with a valid option.";
   }
-  
 
   /**
-   * Book by picking a physio directly, then optionally clinic if physio is at multiple clinics.
+   * Book by picking a physio directly, with up-one-step navigation and slot display cosmetics.
    * @param {object} session
    * @param {string} message
+   * @returns {Promise<string>}
    */
   async handleBookSpecificPhysio(session, message) {
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     let text = (message || '').trim().toLowerCase();
 
-    // Handle "0"/"back" at the physio list level (returns to booking method options if not in clinic subflow)
-    if (
-      ['0', 'menu', 'back'].includes((message || '').trim().toLowerCase())
-      && !(data.selected_physio && data.clinics_for_physio)
-    ) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
-        data: null
-      });
-      return await this.goToInteractiveMenu(session);
-    }
-
-    // 1. Paging for physio list (when not in a clinic selection subflow)
-    if (data.physio_list && !data.selected_physio && (text === 'm' || text === 'more')) {
-      data.physio_page = (data.physio_page || 0) + 1;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
-        data: JSON.stringify(data)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.handleBookSpecificPhysio(updatedSession, '');
-    }
-
-    // 2. Paging for clinic list (when in clinic selection subflow)
-    if (data.selected_physio && data.clinics_for_physio && (text === 'm' || text === 'more')) {
-      data.clinic_page = (data.clinic_page || 0) + 1;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
-        data: JSON.stringify(data)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.handleBookSpecificPhysio(updatedSession, '');
-    }
-
-    // 3. Clinic selection for the selected physio (must handle before physio selection)
-    if (data.selected_physio && data.clinics_for_physio) {
-      
-      if (['0', 'menu', 'back'].includes(text)) {
+    // One-up navigation: If in clinic selection, go up to physio selection; else, up to booking options
+    if (['0', 'menu', 'back'].includes(text)) {
+      if (data.selected_physio && data.clinics_for_physio) {
         // Remove clinic selection state, go back to physio list
         delete data.selected_physio;
         delete data.clinics_for_physio;
@@ -1344,8 +1424,40 @@ class ChatbotEngine {
           header: 'Select a physiotherapist:'
         }) + `\n\nReply with number.`;
         return reply;
+      } else {
+        // Already at physio list: go to booking options menu
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+          data: null
+        });
+        return await this.goToInteractiveMenu(session);
       }
+    }
 
+    // Paging for physio list (when not in a clinic selection subflow)
+    if (data.physio_list && !data.selected_physio && (text === 'm' || text === 'more')) {
+      data.physio_page = (data.physio_page || 0) + 1;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
+        data: JSON.stringify(data)
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return await this.handleBookSpecificPhysio(updatedSession, '');
+    }
+
+    // Paging for clinic list (when in clinic selection subflow)
+    if (data.selected_physio && data.clinics_for_physio && (text === 'm' || text === 'more')) {
+      data.clinic_page = (data.clinic_page || 0) + 1;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
+        data: JSON.stringify(data)
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return await this.handleBookSpecificPhysio(updatedSession, '');
+    }
+
+    // Clinic selection for the selected physio (must handle before physio selection)
+    if (data.selected_physio && data.clinics_for_physio) {
       const clinicsForPhysio = data.clinics_for_physio;
       const page = data.clinic_page || 0;
       if (!isNaN(text) && text !== '') {
@@ -1373,7 +1485,7 @@ class ChatbotEngine {
         });
         const reply = formatPaginatedList({
           items: slots,
-          formatFn: formatSlotItem,
+          formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitPhysio: true, omitClinic: true }),
           page: 0,
           pageSize: MAX_SLOT_ITEMS,
           moreLabel: 'M. More slots',
@@ -1393,7 +1505,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // 4. Initial physio list (unique physios only)
+    // Initial physio list (unique physios only)
     if (!data.physio_list) {
       // Build a unique physio list
       const physiosByClinic = await this.clinikoAPI.getPractitionersByClinic();
@@ -1427,7 +1539,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // 5. Physio selection
+    // Physio selection
     const physios = data.physio_list;
     const page = data.physio_page || 0;
     if (!isNaN(text) && text !== '') {
@@ -1487,7 +1599,7 @@ class ChatbotEngine {
       });
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: formatSlotItem,
+        formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitPhysio: true, omitClinic: !!chosenClinic }),
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -1496,7 +1608,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // 6. Show current physio page
+    // Show current physio page
     const reply = formatPaginatedList({
       items: physios,
       formatFn: formatPhysioItem,
@@ -1509,20 +1621,34 @@ class ChatbotEngine {
   }
   
   /**
-   * Book by picking a clinic directly.
+   * Book by picking a clinic directly, with up-one-step navigation and slot display cosmetics.
    * @param {object} session
    * @param {string} message
+   * @returns {Promise<string>}
    */
   async handleBookSpecificClinic(session, message) {
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     let text = (message || '').trim().toLowerCase();
-    if (['0', 'menu', 'back'].includes((message || '').trim().toLowerCase())) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
-        data: null
-      });
-      return await this.goToInteractiveMenu(session);
+
+    // One-up navigation: if paging, go up; else, go to booking options menu
+    if (['0', 'menu', 'back'].includes(text)) {
+      if (data.clinic_list) {
+        // Go up one step (clear clinic list, return to booking options)
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+          data: null
+        });
+        return await this.goToInteractiveMenu(session);
+      } else {
+        // At top: go to booking options
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+          data: null
+        });
+        return await this.goToInteractiveMenu(session);
+      }
     }
+
     // Paging for clinic list
     if (data.clinic_list && (text === 'm' || text === 'more')) {
       data.clinic_page = (data.clinic_page || 0) + 1;
@@ -1573,7 +1699,7 @@ class ChatbotEngine {
       });
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: formatSlotItem,
+        formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitClinic: true }),
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -1593,10 +1719,10 @@ class ChatbotEngine {
     return reply;
   }
 
-  // ==== SLOT SELECTION & CONFIRMATION (RE-USE YOUR EXISTING LOGIC) ====
-
   /**
    * Handles user selection of an appointment slot in any workflow leading to SELECT_SLOT state.
+   * "Back" always returns to Booking Options menu.
+   * Slot display omits physio/clinic if already selected, based on previous data.
    * @param {object} session - The user session object.
    * @param {string} message - The user's input (expected: slot number).
    * @returns {Promise<string>} Message to send to the user.
@@ -1605,8 +1731,7 @@ class ChatbotEngine {
     let data;
     try {
       data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
-    } catch (e) {
-    }
+    } catch (e) {}
     const slots = Array.isArray(data.slot_list) ? data.slot_list : [];
     let text = (message || '').trim().toLowerCase();
 
@@ -1622,6 +1747,7 @@ class ChatbotEngine {
       return await this.handleSelectSlotState(updatedSession, '');
     }
 
+    // "Back" returns to booking options menu
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
@@ -1659,10 +1785,14 @@ class ChatbotEngine {
         `Reply YES to confirm, or 0️⃣ to cancel.`
       );
     }
+    // Slot display: Determine what to omit
+    let omitPhysio = false, omitClinic = false;
+    if (data.selected_physio) omitPhysio = true;
+    if (data.selected_clinic) omitClinic = true;
     // Show paginated slot list
     const reply = formatPaginatedList({
       items: slots,
-      formatFn: formatSlotItem,
+      formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitPhysio, omitClinic }),
       page,
       pageSize: MAX_SLOT_ITEMS,
       moreLabel: 'M. More slots',
@@ -1670,47 +1800,6 @@ class ChatbotEngine {
     }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
     return reply;
   }
-
-  /**
-   * Handle confirmation of booking slot.
-   * @param {object} session
-   * @param {string} message
-   */
-  /*
-  async handleConfirmBookingState(session, message) {
-    const text = message.trim().toLowerCase();
-    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
-    if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
-        data: null
-      });
-      return 'How would you like to book?\n\n1️⃣ Based on your last physio visit\n2️⃣ Soonest available\n3️⃣ At specific date\n4️⃣ Pick a specific physio\n5️⃣ Pick a specific clinic\n\nReply with number or keyword.';
-    }
-    if (text === 'yes') {
-      const patient_id = session.patient_id;
-      const slot = data.selected_slot;
-      if (!patient_id || !slot) {
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, verified: false });
-        return 'Cannot proceed with booking. Please start again.\n\n' + await this.renderMainMenu(session);
-      }
-      const result = await this.clinikoAPI.bookAppointment({
-        patient_id,
-        practitioner_id: slot.practitioner_id,
-        business_id: slot.business_id,
-        appointment_type_id: slot.appointment_type_id,
-        starts_at: slot.slot
-      });
-      if (result.success) {
-        return `✅ Your appointment is booked for:\n${slot.practitioner_name} — ${slot.appointment_type_name}\n${new Date(slot.slot).toLocaleString()}\n\n` + await this.goToInteractiveMenu(session);
-      } else {
-        return `❌ Could not book your appointment. ${result.message || ''}\n\n` + await this.goToInteractiveMenu(session);
-      }
-    }
-    return 'Please type "yes" to confirm booking, or "0" to go back.';
-  }
-  }
-  */
 
   /**
    * Handle confirmation of booking slot.
