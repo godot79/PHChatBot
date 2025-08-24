@@ -1407,10 +1407,10 @@ class ChatbotEngine {
           conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
           data: JSON.stringify(data)
         });
-        const physios = data.physio_list;
+        const physioList = data.physio_list;
         const physioPage = data.physio_page || 0;
         const reply = formatPaginatedList({
-          items: physios,
+          items: physioList,
           formatFn: formatPhysioItem,
           page: physioPage,
           pageSize: MAX_SLOT_ITEMS,
@@ -1426,10 +1426,10 @@ class ChatbotEngine {
           conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
           data: JSON.stringify(data)
         });
-        const physios = data.physio_list;
+        const physioList = data.physio_list;
         const physioPage = data.physio_page || 0;
         const reply = formatPaginatedList({
-          items: physios,
+          items: physioList,
           formatFn: formatPhysioItem,
           page: physioPage,
           pageSize: MAX_SLOT_ITEMS,
@@ -1482,7 +1482,7 @@ class ChatbotEngine {
     // Clinic selection for the selected physio
     if (data.selection_step === 'choose_clinic' && data.selected_physio && data.clinics_for_physio) {
       const clinicsForPhysio = data.clinics_for_physio;
-      const page = data.clinic_page || 0;
+      const clinicPage = data.clinic_page || 0;
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
         if (isNaN(idx) || idx < 0 || idx >= clinicsForPhysio.length) {
@@ -1519,7 +1519,7 @@ class ChatbotEngine {
       const reply = formatPaginatedList({
         items: clinicsForPhysio,
         formatFn: (c, idx) => `${idx}. ${c.clinic_name}`,
-        page,
+        page: clinicPage,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More clinics',
         header: `Select a clinic for ${data.selected_physio.display_name || data.selected_physio.first_name}:`
@@ -1609,14 +1609,14 @@ class ChatbotEngine {
 
     // Physio selection
     if (data.selection_step === 'choose_physio') {
-      const physios = data.physio_list;
-      const page = data.physio_page || 0;
+      const physioList = data.physio_list;
+      const physioPage = data.physio_page || 0;
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= physios.length) {
+        if (isNaN(idx) || idx < 0 || idx >= physioList.length) {
           return 'Invalid physiotherapist selection. Reply with a number from the list.';
         }
-        const selectedPhysio = physios[idx];
+        const selectedPhysio = physioList[idx];
         const physiosByClinic = data.physios_by_clinic;
         const clinicsForPhysio = [];
         const seenClinicIds = new Set();
@@ -1706,11 +1706,10 @@ class ChatbotEngine {
         }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
         return reply;
       }
-      const physios = data.physio_list;
       const reply = formatPaginatedList({
-        items: physios,
+        items: physioList,
         formatFn: formatPhysioItem,
-        page,
+        page: physioPage,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More physios',
         header: 'Select a physiotherapist:'
@@ -1718,10 +1717,11 @@ class ChatbotEngine {
       return reply;
     }
 
-    const physios = data.physio_list;
+    // Fallback
+    const physioList = data.physio_list;
     const physioPage = data.physio_page || 0;
     const reply = formatPaginatedList({
-      items: physios,
+      items: physioList,
       formatFn: formatPhysioItem,
       page: physioPage,
       pageSize: MAX_SLOT_ITEMS,
@@ -1745,7 +1745,7 @@ class ChatbotEngine {
 
     // Back/step-up navigation
     if (['0', 'menu', 'back'].includes(text)) {
-      if (data.selection_step === 'choose_physio' || data.selection_step === 'choose_appt_type') {
+      if (data.selection_step === 'choose_physio' || data.selection_step === 'choose_appt_type' || data.selection_step === 'choose_next') {
         data.selection_step = 'choose_clinic';
         delete data.physio_list;
         delete data.physio_page;
@@ -1756,10 +1756,10 @@ class ChatbotEngine {
           conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
           data: JSON.stringify(data)
         });
-        const clinics = data.clinic_list;
+        const clinicsList = data.clinic_list;
         const clinicPage = data.clinic_page || 0;
         const reply = formatPaginatedList({
-          items: clinics,
+          items: clinicsList,
           formatFn: (c, idx) => `${idx}. ${c.business_name}`,
           page: clinicPage,
           pageSize: MAX_SLOT_ITEMS,
@@ -1811,8 +1811,8 @@ class ChatbotEngine {
 
     // Initial clinic list
     if (!data.clinic_list || !data.selection_step) {
-      const clinics = await this.clinikoAPI.getClinics();
-      data.clinic_list = clinics;
+      const clinicsFetched = await this.clinikoAPI.getClinics();
+      data.clinic_list = clinicsFetched;
       data.clinic_page = 0;
       data.selection_step = 'choose_clinic';
       await this.sessionManager.updateSession(session.id, {
@@ -1821,7 +1821,7 @@ class ChatbotEngine {
       });
       const page = 0;
       const reply = formatPaginatedList({
-        items: clinics,
+        items: clinicsFetched,
         formatFn: (c, idx) => `${idx}. ${c.business_name}`,
         page,
         pageSize: MAX_SLOT_ITEMS,
@@ -1833,31 +1833,31 @@ class ChatbotEngine {
 
     // Clinic selection
     if (data.selection_step === 'choose_clinic') {
-      const clinics = data.clinic_list;
+      const clinicsList = data.clinic_list;
       const page = data.clinic_page || 0;
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= clinics.length) {
+        if (isNaN(idx) || idx < 0 || idx >= clinicsList.length) {
           return 'Invalid clinic selection. Reply with a number from the list.';
         }
-        const selectedClinic = clinics[idx];
+        const selectedClinic = clinicsList[idx];
         data.selected_clinic = selectedClinic;
         // Fetch physios for this clinic
-        const physiosByClinic = await this.clinikoAPI.getPractitionersByClinic();
-        const physios = [];
-        for (const { clinic_id, practitioners } of physiosByClinic) {
+        const physiosByClinicArr = await this.clinikoAPI.getPractitionersByClinic();
+        const clinicPhysios = [];
+        for (const { clinic_id, practitioners } of physiosByClinicArr) {
           if (clinic_id == selectedClinic.id) {
-            for (const p of practitioners) physios.push(p);
+            for (const p of practitioners) clinicPhysios.push(p);
           }
         }
-        data.physio_list = physios;
+        data.physio_list = clinicPhysios;
         data.physio_page = 0;
         // Fetch appointment types for this clinic
-        let apptTypes = [];
+        let apptTypesForClinic = [];
         try {
-          apptTypes = await this.clinikoAPI.getAppointmentTypesByBusiness(selectedClinic.id);
+          apptTypesForClinic = await this.clinikoAPI.getAppointmentTypesByBusiness(selectedClinic.id);
         } catch (e) {}
-        data.appt_type_list = apptTypes;
+        data.appt_type_list = apptTypesForClinic;
         data.appt_type_page = 0;
         // Prompt for next choice
         data.selection_step = 'choose_next';
@@ -1865,7 +1865,6 @@ class ChatbotEngine {
           conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
           data: JSON.stringify(data)
         });
-        // Both lists may be empty, but show menu regardless
         return (
           `How would you like to choose?\n` +
           `1️⃣ By appointment type\n` +
@@ -1875,7 +1874,7 @@ class ChatbotEngine {
       }
       // Show current page
       const reply = formatPaginatedList({
-        items: clinics,
+        items: clinicsList,
         formatFn: (c, idx) => `${idx}. ${c.business_name}`,
         page,
         pageSize: MAX_SLOT_ITEMS,
@@ -1919,10 +1918,10 @@ class ChatbotEngine {
           conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
           data: JSON.stringify(data)
         });
-        const physios = data.physio_list;
+        const physioList = data.physio_list;
         const page = data.physio_page || 0;
         const reply = formatPaginatedList({
-          items: physios,
+          items: physioList,
           formatFn: formatPhysioItem,
           page,
           pageSize: MAX_SLOT_ITEMS,
@@ -1996,7 +1995,7 @@ class ChatbotEngine {
 
     // Physio list for this clinic
     if (data.selection_step === 'choose_physio') {
-      const physios = data.physio_list;
+      const physioList = data.physio_list;
       const page = data.physio_page || 0;
       if (text === 'm' || text === 'more') {
         data.physio_page = (data.physio_page || 0) + 1;
@@ -2009,10 +2008,10 @@ class ChatbotEngine {
       }
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= physios.length) {
+        if (isNaN(idx) || idx < 0 || idx >= physioList.length) {
           return 'Invalid physiotherapist selection. Reply with a number from the list.';
         }
-        const selectedPhysio = physios[idx];
+        const selectedPhysio = physioList[idx];
         const slots = await this.clinikoAPI.getNextAvailableSlots({
           practitioner_id: selectedPhysio.id,
           business_id: data.selected_clinic.id
@@ -2039,7 +2038,7 @@ class ChatbotEngine {
         return reply;
       }
       const reply = formatPaginatedList({
-        items: physios,
+        items: physioList,
         formatFn: formatPhysioItem,
         page,
         pageSize: MAX_SLOT_ITEMS,
@@ -2050,10 +2049,10 @@ class ChatbotEngine {
     }
 
     // Defensive fallback
-    const clinics = data.clinic_list;
+    const clinicsList = data.clinic_list;
     const clinicPage = data.clinic_page || 0;
     const reply = formatPaginatedList({
-      items: clinics,
+      items: clinicsList,
       formatFn: (c, idx) => `${idx}. ${c.business_name}`,
       page: clinicPage,
       pageSize: MAX_SLOT_ITEMS,
@@ -2062,6 +2061,7 @@ class ChatbotEngine {
     }) + `\n\nReply with number.`;
     return reply;
   }
+
 
   /**
    * Handles user selection of an appointment slot in any workflow leading to SELECT_SLOT state.
