@@ -475,20 +475,23 @@ class ChatbotEngine {
    * @returns {Promise<string>}
    */
   async goToInteractiveMenu(session) {
-    if (!session.verified) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.renderMainMenu(updatedSession);
+    // Always get the latest session state from DB
+    const updatedSession = await this.sessionManager.getSession(session.id);
+
+    if (!updatedSession.verified) {
+      await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
+      const fresh = await this.sessionManager.getSession(updatedSession.id);
+      return await this.renderMainMenu(fresh);
     }
 
-    if (session.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
-      return await this.renderBookingMethodMenu(session);
+    if (updatedSession.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
+      return await this.renderBookingMethodMenu(updatedSession);
     }
     // Add more as needed (manage, cancel, etc.)
     // Falling through here
-    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-    const updatedSession = await this.sessionManager.getSession(session.id);
-    return await this.renderMainMenu(session);
+    await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+    const fresh = await this.sessionManager.getSession(updatedSession.id);
+    return await this.renderMainMenu(fresh);
   }
   async renderBookingMethodMenu(session) {
     return (
