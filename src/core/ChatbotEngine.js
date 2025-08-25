@@ -954,7 +954,7 @@ class ChatbotEngine {
         return await this.handleBookSoonest(session, '');
       } else {
         await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
           data: null
         });
         return await this.goToInteractiveMenu(session);
@@ -1199,7 +1199,7 @@ class ChatbotEngine {
         return await this.handleBookSpecificDate(session, '');
       } else {
         await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
           data: null
         });
         return await this.goToInteractiveMenu(session);
@@ -1462,7 +1462,7 @@ class ChatbotEngine {
         return await this.handleBookSpecificPhysio(session, '');
       } else {
         await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
           data: null
         });
         return await this.goToInteractiveMenu(session);
@@ -1707,7 +1707,7 @@ class ChatbotEngine {
         return await this.handleBookSpecificClinic(session, '');
       } else {
         await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
           data: null
         });
         return await this.goToInteractiveMenu(session);
