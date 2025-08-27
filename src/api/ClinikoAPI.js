@@ -215,6 +215,13 @@ class ClinikoAPI {
    */
   async getNextAvailableSlots({ practitioner_id, business_id, maxDays, maxSlots } = {}) {
     try {
+      // Check if this business is a UWC clinic and skip if so
+      const businessObj = await this.getBusinessById(business_id);
+      if (businessObj && /UWC/i.test(businessObj.business_name)) {
+        this.logger.warn(`Skipping UWC clinic slots: ${businessObj.business_name}`);
+        return [];
+      }
+
       const results = [];
       const maxDaysToSearch = parseInt(maxDays ?? config.maxSlotDays ?? 5);
       const maxSlotsTotal = parseInt(maxSlots ?? config.maxSlotCount ?? 5);
@@ -245,15 +252,19 @@ class ClinikoAPI {
         });
         if (blocks?.length) {
           const slicedSlots = blocks.slice(0, maxSlotsTotal);
-          const tempObjects = slicedSlots.map(block => ({
-            practitioner_id,
-            business_id,
-            practitioner_name: practitionerName,
-            appointment_type_id: appointmentType.id,
-            appointment_type_name: appointmentType.name,
-            slot: block.appointment_start || block.start_time || block.starts_at
-          }));
-          results.push(...tempObjects);
+          const businessName = businessObj?.business_name || '';
+          if (!/UWC/i.test(businessName)) {
+            const tempObjects = slicedSlots.map(block => ({
+              practitioner_id,
+              business_id,
+              business_name: businessName,
+              practitioner_name: practitionerName,
+              appointment_type_id: appointmentType.id,
+              appointment_type_name: appointmentType.name,
+              slot: block.appointment_start || block.start_time || block.starts_at
+            }));
+            results.push(...tempObjects);
+          }
         }
       }
       return results;
@@ -446,9 +457,15 @@ class ClinikoAPI {
       if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) throw new Error('Invalid date format.');
       if ((toDate - fromDate) / DAY_MS > 7) throw new Error('Date range must not exceed 7 days.');
 
+      // Check if this business is a UWC clinic and skip if so
+      const businessObj = await this.getBusinessById(business_id);
+      if (businessObj && /UWC/i.test(businessObj.business_name)) {
+        this.logger.warn(`Skipping UWC clinic slots: ${businessObj.business_name}`);
+        return [];
+      }
+
       let practitioners = [];
       if (practitioner_id) {
-        // Fetch single practitioner object (for display name) if only one is specified
         const all = await this.getPractitionersForClinic(business_id);
         practitioners = all.filter(p => `${p.id}` === `${practitioner_id}`);
         if (!practitioners.length) throw new Error('Practitioner not found for this clinic.');
@@ -473,13 +490,19 @@ class ClinikoAPI {
             this.logger.error(`Slot fetch failed for practitioner ${practitioner.id} appt type ${apptType.id}: ${slotErr.message}`);
           }
           if (slots.length) {
-            allSlots.push(...slots.map(slot => ({
-              practitioner_id: practitioner.id,
-              practitioner_name: practitioner.display_name || `${practitioner.first_name} ${practitioner.last_name}`.trim(),
-              appointment_type_id: apptType.id,
-              appointment_type_name: apptType.name,
-              slot: slot.appointment_start || slot.start_time || slot.starts_at,
-            })));
+            // Add business name to each slot for filtering
+            const businessName = businessObj?.business_name || '';
+            if (!/UWC/i.test(businessName)) {
+              allSlots.push(...slots.map(slot => ({
+                practitioner_id: practitioner.id,
+                practitioner_name: practitioner.display_name || `${practitioner.first_name} ${practitioner.last_name}`.trim(),
+                appointment_type_id: apptType.id,
+                appointment_type_name: apptType.name,
+                business_id: business_id,
+                business_name: businessName,
+                slot: slot.appointment_start || slot.start_time || slot.starts_at,
+              })));
+            }
           }
         }
       }
