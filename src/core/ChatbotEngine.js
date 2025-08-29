@@ -196,30 +196,31 @@ function getBusinessDisplayName(business) {
  * @param {ClinikoAPI} clinikoAPI
  * @returns {Promise<Array<Object>>} Enriched appointments
  */
-// This is a direct, no-abstraction, no-generics version of your function with full logging.
-
 async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
   const practitionerIds = new Set();
   const apptTypeIds = new Set();
   const businessIds = new Set();
 
-  // Log incoming appointment objects (should be output of slotToEnrichable)
-  console.log('--- ENRICH: incoming appointments ---');
-  for (const appt of appointments) {
-    console.log('APPOINTMENT:', appt);
+  // Single consolidated log for incoming appointments
+  if (appointments.length > 0) {
+    console.log(`[ENRICH] Processing ${appointments.length} appointments`);
+  }
 
+  // Collect IDs
+  for (const appt of appointments) {
     const practitionerId = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
     const apptTypeId = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
     const businessId = extractIdFromClinikoRef(appt.business, 'businesses');
-
-    console.log(`[ENRICH] Extracted practitionerId=${practitionerId}, apptTypeId=${apptTypeId}, businessId=${businessId}`);
 
     if (practitionerId) practitionerIds.add(practitionerId);
     if (apptTypeId) apptTypeIds.add(apptTypeId);
     if (businessId) businessIds.add(businessId);
   }
 
-  // Fetch all entities in parallel and log results
+  // Single log for what we're fetching
+  console.log(`[ENRICH] Fetching: ${practitionerIds.size} practitioners, ${apptTypeIds.size} types, ${businessIds.size} businesses`);
+
+  // Fetch all entities in parallel
   const [practitioners, apptTypes, businesses] = await Promise.all([
     Promise.all([...practitionerIds].map(id => clinikoAPI.getPractitionerById(id).then(obj => [id, obj]))),
     Promise.all([...apptTypeIds].map(id => clinikoAPI.getAppointmentTypeById(id).then(obj => [id, obj]))),
@@ -230,13 +231,20 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
   const apptTypeMap = Object.fromEntries(apptTypes);
   const businessMap = Object.fromEntries(businesses);
 
-  console.log('--- ENRICH: practitionerMap ---');
-  console.log(practitionerMap);
-  console.log('--- ENRICH: apptTypeMap ---');
-  console.log(apptTypeMap);
-  console.log('--- ENRICH: businessMap ---');
-  console.log(businessMap);
+  // Only log if there were fetch failures
+  const missingPractitioners = [...practitionerIds].filter(id => !practitionerMap[id]);
+  const missingTypes = [...apptTypeIds].filter(id => !apptTypeMap[id]);
+  const missingBusinesses = [...businessIds].filter(id => !businessMap[id]);
+  
+  if (missingPractitioners.length > 0 || missingTypes.length > 0 || missingBusinesses.length > 0) {
+    console.warn('[ENRICH] Missing entities:', {
+      practitioners: missingPractitioners,
+      types: missingTypes,
+      businesses: missingBusinesses
+    });
+  }
 
+  // Enrich appointments
   for (const appt of appointments) {
     const practitionerId = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
     const apptTypeId = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
@@ -246,36 +254,17 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
     const apptTypeObj = apptTypeMap[apptTypeId] || null;
     const businessObj = businessMap[businessId] || null;
 
-    // Log the final objects and IDs for this appointment
-  console.log('BUSINESS OBJ FOR', businessId, ':', businessObj);
-    console.log(`--- ENRICH: Final lookup for appointment ---`);
-    console.log({
-      appt,
-      practitionerId,
-      apptTypeId,
-      businessId,
-      practitionerObj,
-      apptTypeObj,
-      businessObj
-    });
-
-    // Your original display assignment logic (unchanged)
     appt._practitioner_display = getPractitionerDisplayName(practitionerObj);
     appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj);
     appt._business_display = getBusinessDisplayName(businessObj);
     appt._display_dt = new Date(appt.starts_at).toLocaleString();
-
-    // Log the final display fields
-    console.log('ENRICHED DISPLAY FIELDS:', {
-      _practitioner_display: appt._practitioner_display,
-      _appointment_type_display: appt._appointment_type_display,
-      _business_display: appt._business_display,
-      _display_dt: appt._display_dt
-    });
   }
+
+  // Single summary log at the end
+  console.log(`[ENRICH] Completed enrichment for ${appointments.length} appointments`);
+  
   return appointments;
 }
-
 
 /**
  * Paginate and format a list of options for WhatsApp reply.
@@ -2263,19 +2252,101 @@ class ChatbotEngine {
           data: JSON.stringify(data)
         });
         
-        // Auto-advance if only one
+        // Auto-advance if only one - directly process instead of recursive call
         if (filteredClinics.length === 1) {
-          // Push current state to navigation chain before auto-advancing
+          const selectedClinic = filteredClinics[0];
+          data.selected_clinic = selectedClinic;
+          
+          // Push to navigation chain BEFORE auto-advancing
           data.navigation_chain.push({
             selection_step: 'choose_clinic',
             had_multiple_options: false
           });
-          await this.sessionManager.updateSession(session.id, {
-            data: JSON.stringify(data)
-          });
-          return await this.handleBookSpecificClinic(session, "1");
+          
+          try {
+            const physios = await this.clinikoAPI.getPractitionersForClinic(selectedClinic.id);
+            
+            if (!physios || !physios.length) {
+              return "No physiotherapists found for this clinic. Please try another booking method.";
+            }
+            
+            data.physio_list = physios;
+            data.physio_page = 0;
+            
+            // Check if only one physio
+            if (physios.length === 1) {
+              // Push to navigation chain
+              data.navigation_chain.push({
+                selection_step: 'choose_physio',
+                had_multiple_options: false
+              });
+              
+              data.selected_physio = physios[0];
+              let apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physios[0].id });
+              
+              // Filter out UWC and deduplicate by NAME
+              const uniqueTypesByName = new Map();
+              for (const type of apptTypes) {
+                if (!/UWC/i.test(type.name)) {
+                  if (!uniqueTypesByName.has(type.name)) {
+                    uniqueTypesByName.set(type.name, type);
+                  }
+                }
+              }
+              apptTypes = Array.from(uniqueTypesByName.values());
+              
+              if (!apptTypes.length) {
+                return "This practitioner has no available appointment types. Please try another booking method.";
+              }
+              
+              data.appt_types_for_physio = apptTypes;
+              data.appt_type_page = 0;
+              data.selection_step = 'choose_appt_type';
+              
+              // Save state
+              await this.sessionManager.updateSession(session.id, {
+                conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
+                data: JSON.stringify(data)
+              });
+              
+              // Show appointment types
+              const replyText = `Only one clinic (${selectedClinic.business_name}) and one physiotherapist (${physios[0].display_name || physios[0].first_name}) available. Proceeding to appointment type selection.\n\n`;
+              const reply = replyText + formatPaginatedList({
+                items: apptTypes,
+                formatFn: (a, idx) => `${idx}. ${a.name}`,
+                page: 0,
+                pageSize: MAX_SLOT_ITEMS,
+                moreLabel: 'M. More types',
+                header: `Appointment types:`
+              }) + `\n\nReply with number. (0️⃣ Back)`;
+              return reply;
+            }
+            
+            // Multiple physios - show selection
+            data.selection_step = 'choose_physio';
+            await this.sessionManager.updateSession(session.id, {
+              conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
+              data: JSON.stringify(data)
+            });
+            
+            const replyText = `Only one clinic available: ${selectedClinic.business_name}\n\n`;
+            const reply = replyText + formatPaginatedList({
+              items: physios,
+              formatFn: formatPhysioItem,
+              page: 0,
+              pageSize: MAX_SLOT_ITEMS,
+              moreLabel: 'M. More physios',
+              header: `Select a physiotherapist:`
+            }) + `\n\nReply with number. (0️⃣ Back)`;
+            return reply;
+            
+          } catch (error) {
+            this.logger.error('Error fetching practitioners:', error);
+            return "Error loading practitioners. Please try another booking method.";
+          }
         }
         
+        // Multiple clinics - show list
         const reply = formatPaginatedList({
           items: filteredClinics,
           formatFn: (c, idx) => `${idx}. ${c.business_name}`,
@@ -2285,6 +2356,7 @@ class ChatbotEngine {
           header: 'Select a clinic:'
         }) + `\n\nReply with number. (0️⃣ Back)`;
         return reply;
+        
       } catch (error) {
         this.logger.error('Error fetching clinics:', error);
         await this.sessionManager.updateSession(session.id, {
@@ -2295,6 +2367,7 @@ class ChatbotEngine {
       }
     }
 
+    // Rest of the function remains the same as before...
     // Clinic selection
     if (data.selection_step === 'choose_clinic') {
       const clinicsList = data.clinic_list;
