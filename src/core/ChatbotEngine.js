@@ -656,12 +656,16 @@ class ChatbotEngine {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
           await this.sessionManager.updateSession(session.id, { context });
+          // Return main menu immediately after setting region
+          return await this.renderMainMenu(session);
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
         await this.sessionManager.updateSession(session.id, { context });
+        // Return main menu immediately after setting region
+        return await this.renderMainMenu(session);
       }
 
       if (!context.region || context.awaiting_region_selection) {
@@ -710,7 +714,7 @@ class ChatbotEngine {
     }
     return `Sorry, I didn't understand that.\n\n` +
       await this.renderMainMenu(session);
-  } 
+  }
 
   /**
    * Handle fallback for any unknown state or invalid input.
@@ -1908,9 +1912,15 @@ class ChatbotEngine {
           
           data.selected_clinic = clinics[0];
           let apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: selectedPhysio.id });
-          apptTypes = apptTypes.filter(
-            (t, i, arr) => arr.findIndex(tt => tt.id === t.id) === i
-          );
+          // Filter out UWC appointment types AND deduplicate properly
+          const uniqueTypes = new Map();
+          for (const type of apptTypes) {
+            if (!/UWC/i.test(type.name) && !uniqueTypes.has(type.id)) {
+              uniqueTypes.set(type.id, type);
+            }
+          }
+          apptTypes = Array.from(uniqueTypes.values());
+          
           data.appt_types_for_physio = apptTypes;
           data.appt_type_page = 0;
           data.selection_step = 'choose_appt_type';
@@ -1987,9 +1997,15 @@ class ChatbotEngine {
         const selectedClinic = clinicsList[idx];
         data.selected_clinic = selectedClinic;
         let apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: data.selected_physio.id });
-        apptTypes = apptTypes.filter(
-          (t, i, arr) => arr.findIndex(tt => tt.id === t.id) === i
-        );
+        // Filter out UWC appointment types AND deduplicate properly
+        const uniqueTypes = new Map();
+        for (const type of apptTypes) {
+          if (!/UWC/i.test(type.name) && !uniqueTypes.has(type.id)) {
+            uniqueTypes.set(type.id, type);
+          }
+        }
+        apptTypes = Array.from(uniqueTypes.values());
+        
         data.appt_types_for_physio = apptTypes;
         data.appt_type_page = 0;
         data.selection_step = 'choose_appt_type';
@@ -2028,9 +2044,15 @@ class ChatbotEngine {
     // Appointment type selection
     if (data.selection_step === 'choose_appt_type') {
       let apptTypes = data.appt_types_for_physio || [];
-      apptTypes = apptTypes.filter(
-        (t, i, arr) => arr.findIndex(tt => tt.id === t.id) === i
-      );
+      // Filter out UWC appointment types AND deduplicate properly
+      const uniqueTypes = new Map();
+      for (const type of apptTypes) {
+        if (!/UWC/i.test(type.name) && !uniqueTypes.has(type.id)) {
+          uniqueTypes.set(type.id, type);
+        }
+      }
+      apptTypes = Array.from(uniqueTypes.values());
+      
       const page = data.appt_type_page || 0;
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
@@ -2207,7 +2229,9 @@ class ChatbotEngine {
     // Initial clinic list
     if (!data.clinic_list || !data.selection_step) {
       const clinicsFetched = await this.clinikoAPI.getClinics();
-      data.clinic_list = clinicsFetched;
+      // FILTER OUT UWC CLINICS from the initial list
+      const filteredClinics = clinicsFetched.filter(c => !/UWC/i.test(c.business_name));
+      data.clinic_list = filteredClinics;
       data.clinic_page = 0;
       data.selection_step = 'choose_clinic';
       data.navigation_chain = []; // Reset chain at start
@@ -2218,7 +2242,7 @@ class ChatbotEngine {
       });
       
       // Auto-advance if only one
-      if (clinicsFetched.length === 1) {
+      if (filteredClinics.length === 1) {
         // Push current state to navigation chain before auto-advancing
         data.navigation_chain.push({
           selection_step: 'choose_clinic',
@@ -2231,7 +2255,7 @@ class ChatbotEngine {
       }
       
       const reply = formatPaginatedList({
-        items: clinicsFetched,
+        items: filteredClinics,
         formatFn: (c, idx) => `${idx}. ${c.business_name}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
@@ -2279,9 +2303,15 @@ class ChatbotEngine {
           
           data.selected_physio = physios[0];
           let apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physios[0].id });
-          apptTypes = apptTypes.filter(
-            (t, i, arr) => arr.findIndex(tt => tt.id === t.id) === i
-          );
+          // Filter out UWC appointment types AND deduplicate properly
+          const uniqueTypes = new Map();
+          for (const type of apptTypes) {
+            if (!/UWC/i.test(type.name) && !uniqueTypes.has(type.id)) {
+              uniqueTypes.set(type.id, type);
+            }
+          }
+          apptTypes = Array.from(uniqueTypes.values());
+          
           data.appt_types_for_physio = apptTypes;
           data.appt_type_page = 0;
           data.selection_step = 'choose_appt_type';
@@ -2358,9 +2388,15 @@ class ChatbotEngine {
         const selectedPhysio = physioList[idx];
         data.selected_physio = selectedPhysio;
         let apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: selectedPhysio.id });
-        apptTypes = apptTypes.filter(
-          (t, i, arr) => arr.findIndex(tt => tt.id === t.id) === i
-        );
+        // Filter out UWC appointment types AND deduplicate properly
+        const uniqueTypes = new Map();
+        for (const type of apptTypes) {
+          if (!/UWC/i.test(type.name) && !uniqueTypes.has(type.id)) {
+            uniqueTypes.set(type.id, type);
+          }
+        }
+        apptTypes = Array.from(uniqueTypes.values());
+        
         data.appt_types_for_physio = apptTypes;
         data.appt_type_page = 0;
         data.selection_step = 'choose_appt_type';
@@ -2399,9 +2435,15 @@ class ChatbotEngine {
     // Appointment type selection
     if (data.selection_step === 'choose_appt_type') {
       let apptTypes = data.appt_types_for_physio || [];
-      apptTypes = apptTypes.filter(
-        (t, i, arr) => arr.findIndex(tt => tt.id === t.id) === i
-      );
+      // Filter out UWC appointment types AND deduplicate properly
+      const uniqueTypes = new Map();
+      for (const type of apptTypes) {
+        if (!/UWC/i.test(type.name) && !uniqueTypes.has(type.id)) {
+          uniqueTypes.set(type.id, type);
+        }
+      }
+      apptTypes = Array.from(uniqueTypes.values());
+      
       const page = data.appt_type_page || 0;
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
