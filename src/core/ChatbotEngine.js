@@ -918,11 +918,14 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
       return "No available slots for your previous physio. Please choose another booking method." + await this.goToInteractiveMenu(session);
     }
-    let data = {};
-    data.slot_list = slots;
-    data.slot_page = 0;
-    data.selected_physio = { id: practitioner_id };
-    data.selected_clinic = { id: business_id };
+    let data = {
+      slot_list: slots,
+      slot_page: 0,
+      selected_physio: { id: practitioner_id },
+      selected_clinic: { id: business_id },
+      last_selection_flow: 'history',
+      prev_state_data: null // No previous state for history flow
+    };
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.SELECT_SLOT,
       data: JSON.stringify(data)
@@ -1912,27 +1915,17 @@ class ChatbotEngine {
           data.appt_type_page = 0;
           data.selection_step = 'choose_appt_type';
           
+          if (!apptTypes.length) {
+            return "This physiotherapist has no available appointment types at this clinic. Please try another clinic.";
+          }
+          
+          // Save state before checking for auto-advance
           await this.sessionManager.updateSession(session.id, {
             conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
             data: JSON.stringify(data)
           });
           
-          if (!apptTypes.length) {
-            return "This physiotherapist has no available appointment types at this clinic. Please try another clinic.";
-          }
-          
-          // Auto-advance if only one appointment type
-          if (apptTypes.length === 1) {
-            data.navigation_chain.push({
-              selection_step: 'choose_appt_type',
-              had_multiple_options: false
-            });
-            await this.sessionManager.updateSession(session.id, {
-              data: JSON.stringify(data)
-            });
-            return await this.handleBookSpecificPhysio(session, "1");
-          }
-          
+          // Now display the appointment types menu
           const replyText = `Only one clinic (${clinics[0].business_name}) is available for ${selectedPhysio.display_name || selectedPhysio.first_name}. Proceeding to appointment type selection.\n\n`;
           const reply = replyText + formatPaginatedList({
             items: apptTypes,
@@ -2001,26 +1994,14 @@ class ChatbotEngine {
         data.appt_type_page = 0;
         data.selection_step = 'choose_appt_type';
         
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
-          data: JSON.stringify(data)
-        });
-
         if (!apptTypes.length) {
           return "This physiotherapist has no available appointment types at this clinic. Please try another clinic.";
         }
         
-        // Auto-advance if only one appointment type
-        if (apptTypes.length === 1) {
-          data.navigation_chain.push({
-            selection_step: 'choose_appt_type',
-            had_multiple_options: false
-          });
-          await this.sessionManager.updateSession(session.id, {
-            data: JSON.stringify(data)
-          });
-          return await this.handleBookSpecificPhysio(session, "1");
-        }
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
+          data: JSON.stringify(data)
+        });
         
         const reply = formatPaginatedList({
           items: apptTypes,
@@ -2151,34 +2132,40 @@ class ChatbotEngine {
     if (['0', 'menu', 'back'].includes(text)) {
       // Pop from navigation chain
       if (data.navigation_chain && data.navigation_chain.length > 0) {
-        const previousState = data.navigation_chain.pop();
+        let previousState = data.navigation_chain.pop();
         
-        // Restore the previous state
-        data.selection_step = previousState.selection_step;
-        
-        // Clear forward selections based on what step we're going back to
-        if (previousState.selection_step === 'choose_clinic') {
-          delete data.selected_clinic;
-          delete data.physio_list;
-          delete data.physio_page;
-          delete data.selected_physio;
-          delete data.appt_types_for_physio;
-          delete data.appt_type_page;
-          delete data.selected_appt_type;
-        } else if (previousState.selection_step === 'choose_physio') {
-          delete data.selected_physio;
-          delete data.appt_types_for_physio;
-          delete data.appt_type_page;
-          delete data.selected_appt_type;
-        } else if (previousState.selection_step === 'choose_appt_type') {
-          delete data.selected_appt_type;
+        // Skip auto-advanced states
+        while (data.navigation_chain.length > 0 && !previousState.had_multiple_options) {
+          previousState = data.navigation_chain.pop();
         }
         
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
-          data: JSON.stringify(data)
-        });
-        return await this.handleBookSpecificClinic(session, '');
+        if (previousState && previousState.had_multiple_options) {
+          data.selection_step = previousState.selection_step;
+          
+          // Clear forward selections based on what step we're going back to
+          if (previousState.selection_step === 'choose_clinic') {
+            delete data.selected_clinic;
+            delete data.physio_list;
+            delete data.physio_page;
+            delete data.selected_physio;
+            delete data.appt_types_for_physio;
+            delete data.appt_type_page;
+            delete data.selected_appt_type;
+          } else if (previousState.selection_step === 'choose_physio') {
+            delete data.selected_physio;
+            delete data.appt_types_for_physio;
+            delete data.appt_type_page;
+            delete data.selected_appt_type;
+          } else if (previousState.selection_step === 'choose_appt_type') {
+            delete data.selected_appt_type;
+          }
+          
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
+            data: JSON.stringify(data)
+          });
+          return await this.handleBookSpecificClinic(session, '');
+        }
       }
       
       // No more items in chain, go to booking method options
@@ -2186,8 +2173,7 @@ class ChatbotEngine {
         conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
         data: null
       });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.goToInteractiveMenu(updatedSession);
+      return await this.goToInteractiveMenu(session);
     }
 
     // Paging logic
@@ -2300,15 +2286,17 @@ class ChatbotEngine {
           data.appt_type_page = 0;
           data.selection_step = 'choose_appt_type';
           
+          if (!apptTypes.length) {
+            return "This practitioner has no available appointment types. Please try another physiotherapist.";
+          }
+          
+          // Save state before displaying menu
           await this.sessionManager.updateSession(session.id, {
             conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
             data: JSON.stringify(data)
           });
           
-          if (!apptTypes.length) {
-            return "This practitioner has no available appointment types. Please try another physiotherapist.";
-          }
-          
+          // Display the appointment types menu (DON'T AUTO-ADVANCE)
           const replyText = `Only one physiotherapist (${physios[0].display_name || physios[0].first_name}) is available at ${selectedClinic.business_name}. Proceeding to appointment type selection.\n\n`;
           const reply = replyText + formatPaginatedList({
             items: apptTypes,
@@ -2377,14 +2365,14 @@ class ChatbotEngine {
         data.appt_type_page = 0;
         data.selection_step = 'choose_appt_type';
         
+        if (!apptTypes.length) {
+          return "This practitioner has no available appointment types. Please try another physiotherapist.";
+        }
+        
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
           data: JSON.stringify(data)
         });
-        
-        if (!apptTypes.length) {
-          return "This practitioner has no available appointment types. Please try another physiotherapist.";
-        }
         
         const reply = formatPaginatedList({
           items: apptTypes,
@@ -2421,6 +2409,14 @@ class ChatbotEngine {
           return 'Invalid appointment type selection. Reply with a number from the list.';
         }
         
+        // Record in navigation chain if this was a real choice
+        if (apptTypes.length > 1) {
+          data.navigation_chain.push({
+            selection_step: 'choose_appt_type',
+            had_multiple_options: true
+          });
+        }
+        
         const selectedApptType = apptTypes[idx];
         const today = new Date();
         const from = new Date(today.setDate(today.getDate() + 1)).toISOString().split('T')[0] + "T00:00:00Z";
@@ -2432,15 +2428,18 @@ class ChatbotEngine {
           practitioner_id: data.selected_physio.id
         });
         
-        if (!slots.length) {
+        // Filter for selected appointment type
+        const filteredSlots = slots.filter(s => s.appointment_type_id === selectedApptType.id);
+        
+        if (!filteredSlots.length) {
           return "No available slots for that appointment type and physio at this clinic. Please try another.";
         }
         
         const slotData = {
-          slot_list: slots,
+          slot_list: filteredSlots,
           slot_page: 0,
           last_selection_flow: 'clinic',
-          navigation_chain: data.navigation_chain // Preserve the chain
+          prev_state_data: data // Store the entire state
         };
         
         await this.sessionManager.updateSession(session.id, {
@@ -2449,7 +2448,7 @@ class ChatbotEngine {
         });
         
         const reply = formatPaginatedList({
-          items: slots,
+          items: filteredSlots,
           formatFn: (slot, idx) => formatSlotItem(slot, idx, { omitClinic: true, omitPhysio: true }),
           page: 0,
           pageSize: MAX_SLOT_ITEMS,
