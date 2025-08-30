@@ -34,18 +34,20 @@ const REGION_SUPPORT_INFO = {
 };
 
 /**
-  Validates and normalizes a date search window enforcing:
-  bookings start from next day (not today),
-  max 7 days span (inclusive),
-  ISO strings in 'YYYY-MM-DDTHH:mm:ssZ' or 'YYYY-MM-DD' interpreted as UTC.
-  If input is missing, constructs from next-day start up to next-day + 6 (7-day window).
-  If provided 'from'/'to' violate constraints, clamps within the valid window.
-  @param {string|undefined} fromISO - optional 'YYYY-MM-DDTHH:mm:ssZ' or 'YYYY-MM-DD'
-  @param {string|undefined} toISO - optional 'YYYY-MM-DDTHH:mm:ssZ' or 'YYYY-MM-DD'
-  @param {number} maxSpanDays - maximum span (default 7)
-  @returns {{ from: string, to: string }}
-  */
-function normalizeDateWindow(fromISO, toISO, maxSpanDays = 6) {
+ * Validates and normalizes a date search window enforcing:
+ * - bookings start from next day (not today),
+ * - max 7 days span (inclusive),
+ * - ISO strings in 'YYYY-MM-DDTHH:mm:ssZ' or 'YYYY-MM-DD' interpreted as UTC.
+ *
+ * If input is missing, constructs from next-day start up to next-day + 6 (7-day window).
+ * If provided 'from'/'to' violate constraints, clamps within the valid window.
+ *
+ * @param {string|undefined} fromISO - optional 'YYYY-MM-DDTHH:mm:ssZ' or 'YYYY-MM-DD'
+ * @param {string|undefined} toISO   - optional 'YYYY-MM-DDTHH:mm:ssZ' or 'YYYY-MM-DD'
+ * @param {number} maxSpanDays       - maximum span (default 7)
+ * @returns {{ from: string, to: string }}
+ */
+function normalizeDateWindow(fromISO, toISO, maxSpanDays = 7) {
   // Compute next-day window
   const base = new Date();
   base.setUTCHours(0, 0, 0, 0);
@@ -54,17 +56,18 @@ function normalizeDateWindow(fromISO, toISO, maxSpanDays = 6) {
   const lastDay = new Date(nextDay);
   // Inclusive span of maxSpanDays => last day is nextDay + (maxSpanDays - 1)
   lastDay.setUTCDate(nextDay.getUTCDate() + (maxSpanDays - 1));
+
   // parse helper that accepts 'YYYY-MM-DD' or ISO with time
   const parseDate = (s, endOfDay = false) => {
-  if (!s) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-  const d = new Date(${s}T00:00:00Z);
-  if (endOfDay) d.setUTCHours(23, 59, 59, 999);
-  return d;
-  }
-  const d = new Date(s);
-  if (isNaN(d.getTime())) return null;
-  return d;
+    if (!s) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const d = new Date(`${s}T00:00:00Z`);
+      if (endOfDay) d.setUTCHours(23, 59, 59, 999);
+      return d;
+    }
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return null;
+    return d;
   };
 
   // Build initial from/to
@@ -86,16 +89,14 @@ function normalizeDateWindow(fromISO, toISO, maxSpanDays = 6) {
   if (to > lastDay) to = new Date(lastDay);
 
   const toISODate = d => {
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(d.getUTCDate()).padStart(2, '0');
-  // Return midnight/23:59:59Z? Callers can append time as needed; here we provide full-day bounds.
-  return ${yyyy}-${mm}-${dd};
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   };
 
-  // Return day-bounded ISO strings with full times for Cliniko usage
-  const fromOut = ${toISODate(from)}T00:00:00Z;
-  const toOut = ${toISODate(to)}T23:59:59Z;
+  const fromOut = `${toISODate(from)}T00:00:00Z`;
+  const toOut = `${toISODate(to)}T23:59:59Z`;
   return { from: fromOut, to: toOut };
 }
 
