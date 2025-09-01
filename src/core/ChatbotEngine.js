@@ -33,7 +33,7 @@ const REGION_SUPPORT_INFO = {
   }
 };
 
-// ====== NAVIGATION HELPERS (non-breaking, minimal) ======
+// ====== NAVIGATION HELPERS ======
 
 /**
  * Push a step entry into navigation_chain.
@@ -256,6 +256,11 @@ function getSupportInfo(region) {
   return `Need help? Call us at ${info.phone} or email ${info.email}`;
 }
 
+function formatSlotItem(slot, idx, opts = {}) {
+  const dt = new Date(slot.slot);
+  return `${idx}. ${dt.toLocaleString()}`;
+}
+
 /**
  * Extracts the Cliniko ID from a reference object.
  * @param {object} obj - Cliniko reference object.
@@ -451,6 +456,7 @@ function formatPaginatedList({
  * @param {Object} [opts] - { omitPhysio, omitClinic }
  * @returns {string}
  */
+/*
 function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
   let main = [];
@@ -459,6 +465,7 @@ function formatSlotItem(slot, idx, opts = {}) {
   if (slot.appointment_type_name) main.push(slot.appointment_type_name);
   return `${idx}. ${main.join(' — ')}\n   ${dt.toLocaleString()}`;
 }
+*/
 
 /**
  * Format a physiotherapist for display in physio lists.
@@ -863,6 +870,8 @@ class ChatbotEngine {
 
   /**
    * Handle user identity verification state.
+   * - Allows user to go back to Intro menu with "0/menu/back".
+   * - On verification failure, returns region-specific support info.
    * @param {object} session
    * @param {string} message
    */
@@ -875,20 +884,39 @@ class ChatbotEngine {
     } catch (e) {
       data = {};
     }
+
+    const textRaw = message || '';
+    const text = textRaw.trim().toLowerCase();
+
+    // Allow user to go back to Intro menu at any time
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.INTRO
+      });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.renderMainMenu(updated);
+    }
+
+    // First prompt: ask for email
     if (!data.awaiting_email) {
       const updatedData = { ...data, awaiting_email: true };
       await this.sessionManager.updateSession(session.id, {
         data: JSON.stringify(updatedData)
       });
-      return 'To verify your identity, please enter the email address you used to register with us.';
+      return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
     }
-    const email = message.trim().toLowerCase();
+
+    // Validate email input
+    const email = textRaw.trim().toLowerCase();
     if (!email.includes('@') || !email.includes('.')) {
-      return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.';
+      return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
     }
+
+    // Attempt verification
     const patient = await this.clinikoAPI.findPatientByEmail(email);
     const clearedData = { ...data };
     delete clearedData.awaiting_email;
+
     if (patient) {
       await this.sessionManager.updateSession(session.id, {
         verified: true,
@@ -898,16 +926,18 @@ class ChatbotEngine {
       });
       return 'Verification successful!\n\nWhat would you like to do?\n\n1️⃣ Book Appointment\n2️⃣ Cancel Appointment\n3️⃣ Reschedule Appointment\n\nReply with the number or a keyword.';
     } else {
+      // Verification failed: go back to Intro, show region-specific support info
       await this.sessionManager.updateSession(session.id, {
         verified: false,
         conversation_state: this.STATES.INTRO,
         data: JSON.stringify(clearedData)
       });
+      const region = this._getSessionRegion(session);
+      const support = getSupportInfo(region);
       return (
-        "We encountered an unexpected error processing your request. " +
-        "You can continue using the menu below, or contact support if the issue persists.\n\n" +
-        await this.renderMainMenu(session) +
-        "\n\n" + getSupportInfo(this._getSessionRegion(session))
+        "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
+        support + "\n\n" +
+        await this.renderMainMenu(session)
       );
     }
   }
@@ -918,7 +948,21 @@ class ChatbotEngine {
    * @param {string} message
    */
   async handleBookManageOptions(session, message) {
-    const text = message.trim().toLowerCase();
+    const text = (message || '').trim().toLowerCase();
+
+    // Support region change from the verified main menu
+    if (text === 'region' || text === 'change region') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_region_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'region');
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
       const updatedSession = await this.sessionManager.getSession(session.id);
@@ -956,7 +1000,21 @@ class ChatbotEngine {
    * @param {string} message
    */
   async handleBookingMethodOptions(session, message) {
-    const text = message.trim().toLowerCase();
+    const text = (message || '').trim().toLowerCase();
+
+    // Support region change while at booking method menu
+    if (text === 'region' || text === 'change region') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_region_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'region');
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
       return 'What would you like to do?\n\n' + (await this.goToInteractiveMenu(session));
@@ -1032,6 +1090,87 @@ class ChatbotEngine {
     }
   }
 
+  async _handleNoSlotsDecision(session, data, stateConst, backHandler, incomingText) {
+    const text = (incomingText || '').trim().toLowerCase();
+    if (!data.no_slots_prompt) return null;
+
+    if (text === '1') {
+      delete data.no_slots_prompt;
+      const { step, popped } = navBack(data);
+      if (step) {
+        clearForwardStateForPopped(data, popped);
+        data.selection_step = step;
+        data.suppress_auto_advance = true;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: stateConst,
+          data: JSON.stringify(data)
+        });
+        return await backHandler.call(this, session, '');
+      }
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+        data: null
+      });
+      return await this.goToInteractiveMenu(session);
+    }
+
+    if (text === '2') {
+      // Region-specific support email
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      const region = (context && context.region) || 'SG';
+      const support = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+      const toEmail = support.email;
+
+      // Patient info (best effort)
+      const patient_id = session.patient_id || null;
+      let patientEmail = null;
+      let patientName = null;
+      try {
+        if (patient_id && this.clinikoAPI.getPatientById) {
+          const patient = await this.clinikoAPI.getPatientById(patient_id);
+          if (patient) {
+            patientEmail = patient.email || null;
+            patientName = [patient.first_name, patient.last_name].filter(Boolean).join(' ') || null;
+          }
+        }
+      } catch (e) {}
+
+      const phone = session.phone_number || session.phoneNumber || '';
+
+      // Log the outreach request for staff to action via the region email
+      this.logger.info('[NoSlots] Outreach requested for manual email', {
+        to: toEmail,
+        sessionId: session.id,
+        patient_id,
+        patientEmail,
+        patientName,
+        phone,
+        region
+      });
+
+      delete data.no_slots_prompt;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+        data: JSON.stringify(data)
+      });
+      return `Thanks! Our ${region} support team (${toEmail}) will reach out to you at ${patientEmail || phone || 'your contact'} shortly.\n\n` + await this.renderMainMenu(session);
+    }
+
+    if (text === '3') {
+      delete data.no_slots_prompt;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+        data: JSON.stringify(data)
+      });
+      return await this.renderMainMenu(session);
+    }
+
+    return null;
+  }
+
   /**
    * Book based on patient history:
    * - Shows previous practitioner and clinic.
@@ -1049,7 +1188,13 @@ class ChatbotEngine {
 
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    // Back/menu: go up one logical step (skip auto-advanced frames). At top -> booking methods.
+    // If awaiting no-slots decision
+    const incomingText = message || '';
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_HISTORY, this.handleBookHistory, incomingText);
+      if (ret) return ret;
+    }
+
     if (['0', 'back', 'menu'].includes(text)) {
       const { step, popped } = navBack(data);
       if (step) {
@@ -1071,9 +1216,7 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Load previous context (unchanged logic from your flow)
     if (!data.history_context) {
-      // Keep using your existing API call as in golden source
       const patient_id = session.patient_id;
       if (!patient_id) {
         await this.sessionManager.updateSession(session.id, {
@@ -1084,7 +1227,7 @@ class ChatbotEngine {
 
       const lastAppts = await this.clinikoAPI.getBookingsByPatientId(patient_id);
       const previous = (lastAppts || [])
-        .filter(a => new Date(a.starts_at) <= new Date()) // past or now
+        .filter(a => new Date(a.starts_at) <= new Date())
         .sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at))[0];
 
       if (!previous) {
@@ -1095,7 +1238,6 @@ class ChatbotEngine {
         return "No previous appointments found. Please use another booking method.\n\n" + await this.goToInteractiveMenu(session);
       }
 
-      // Store minimal context; preserve your object shapes
       data.history_context = {
         practitioner: previous.practitioner,
         clinic: previous.business
@@ -1111,7 +1253,6 @@ class ChatbotEngine {
     const practitioner = data.history_context.practitioner;
     const clinic = data.history_context.clinic;
 
-    // Pagination for types
     if (data.selection_step === 'choose_appt_type' && data.appt_types_for_physio && (text === 'm' || text === 'more')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1122,7 +1263,6 @@ class ChatbotEngine {
       return await this.handleBookHistory(session, '');
     }
 
-    // Step: choose_appt_type (show list; filter out Initial/New for returning clients as in your flow)
     if (data.selection_step === 'choose_appt_type') {
       if (!data.appt_types_for_physio) {
         let apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: practitioner.id });
@@ -1134,7 +1274,6 @@ class ChatbotEngine {
           data: JSON.stringify(data)
         });
 
-        // If only one option, auto-advance and mark frame as auto
         if (apptTypes.length === 1) {
           navPush(data, 'choose_appt_type', { had_multiple_options: false, auto: true });
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -1166,7 +1305,6 @@ class ChatbotEngine {
           conversation_state: this.STATES.BOOK_HISTORY,
           data: JSON.stringify(data)
         });
-        // fall-through to select_slot below
       } else {
         const list = formatPaginatedList({
           items: apptTypes,
@@ -1179,7 +1317,6 @@ class ChatbotEngine {
       }
     }
 
-    // Step: select_slot (unchanged functionality; only navigation context handed off)
     if (data.selection_step === 'select_slot') {
       const { from, to } = normalizeDateWindow(undefined, undefined, 7);
       const slots = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
@@ -1196,7 +1333,14 @@ class ChatbotEngine {
           appt_type_id: data.selected_appt_type.id,
           from, to
         });
-        return "No available slots for that selection. Please try another type or method. (0️⃣ Back)";
+        data.no_slots_prompt = true;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOK_HISTORY,
+          data: JSON.stringify(data)
+        });
+        const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_HISTORY, this.handleBookHistory, message || '');
+        if (ret) return ret;
+        return "No available slots for that selection.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
       }
 
       const slotData = {
@@ -1230,15 +1374,12 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Defensive
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
       data: null
     });
     return await this.goToInteractiveMenu(session);
-  }
-  
-  
+  } 
   
   /**
    * Book soonest available appointment.
@@ -1258,13 +1399,19 @@ class ChatbotEngine {
 
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    // Back/up one level (unified)
+    // If awaiting no-slots decision
+    const incomingText = message || '';
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SOONEST, this.handleBookSoonest, incomingText);
+      if (ret) return ret;
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       const { step, popped } = navBack(data);
       if (step) {
         clearForwardStateForPopped(data, popped);
         data.selection_step = step;
-        data.suppress_auto_advance = true; // prevent immediate re-auto-advance once
+        data.suppress_auto_advance = true;
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.BOOK_SOONEST,
           data: JSON.stringify(data)
@@ -1280,10 +1427,17 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Step: choose_type (initialize flow)
     if (!data.selection_step) {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
-      const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+      let allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+      // Dedupe by name and exclude UWC
+      const byName = new Map();
+      for (const t of allTypes || []) {
+        if (/UWC/i.test(t.name)) continue;
+        if (!byName.has(t.name)) byName.set(t.name, t);
+      }
+      allTypes = Array.from(byName.values());
+
       data.appointment_type_list = allTypes;
       data.appt_type_page = 0;
       data.selection_step = 'choose_type';
@@ -1304,7 +1458,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Paging: types
     if (data.selection_step === 'choose_type' && data.appointment_type_list && (text === 'm' || text === 'more')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1315,7 +1468,6 @@ class ChatbotEngine {
       return await this.handleBookSoonest(session, '');
     }
 
-    // Choose type
     if (data.selection_step === 'choose_type') {
       const apptTypes = data.appointment_type_list;
       const page = data.appt_type_page || 0;
@@ -1342,7 +1494,6 @@ class ChatbotEngine {
         if (!practitioners.length) {
           return "No practitioners found for that appointment type.";
         }
-        // Auto-advance single option (record as auto frame)
         if (practitioners.length === 1) {
           navPush(data, 'choose_physio', { had_multiple_options: false, auto: true });
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -1369,7 +1520,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Paging: practitioners
     if (data.selection_step === 'choose_physio' && data.practitioner_list && (text === 'm' || text === 'more')) {
       data.practitioner_page = (data.practitioner_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1380,7 +1530,6 @@ class ChatbotEngine {
       return await this.handleBookSoonest(session, '');
     }
 
-    // Choose practitioner
     if (data.selection_step === 'choose_physio') {
       const practitionerList = data.practitioner_list;
       const page = data.practitioner_page || 0;
@@ -1395,7 +1544,6 @@ class ChatbotEngine {
         const selectedPhysio = practitionerList[idx];
         data.selected_physio = selectedPhysio;
         const groups = await this.clinikoAPI.getPractitionersByClinic();
-        // FILTER OUT UWC
         const clinics = groups
           .filter(g => g.practitioners.some(p => p.id === selectedPhysio.id))
           .filter(g => !/UWC/i.test(g.clinic_name))
@@ -1409,7 +1557,6 @@ class ChatbotEngine {
         });
         log.info('Physio chosen', { physio_id: selectedPhysio.id, clinics: clinics.length });
         if (!clinics.length) return "No clinics found for this practitioner.";
-        // Auto-advance single option (record as auto frame)
         if (clinics.length === 1) {
           navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -1436,7 +1583,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Paging: clinics
     if (data.selection_step === 'choose_clinic' && data.clinic_list && (text === 'm' || text === 'more')) {
       data.clinic_page = (data.clinic_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1447,7 +1593,6 @@ class ChatbotEngine {
       return await this.handleBookSoonest(session, '');
     }
 
-    // Choose clinic -> fetch slots
     if (data.selection_step === 'choose_clinic') {
       const clinicsList = data.clinic_list;
       const page = data.clinic_page || 0;
@@ -1478,7 +1623,14 @@ class ChatbotEngine {
             appt_type_id: data.selected_appt_type.id,
             from, to
           });
-          return "No available slots for that combination. Please try another.";
+          data.no_slots_prompt = true;
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.BOOK_SOONEST,
+            data: JSON.stringify(data)
+          });
+          const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SOONEST, this.handleBookSoonest, message || '');
+          if (ret) return ret;
+          return "No available slots for that combination.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
         }
 
         const slotData = {
@@ -1515,7 +1667,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Defensive default -> show appointment types again
     const apptTypes = data.appointment_type_list;
     const apptTypePage = data.appt_type_page || 0;
     const reply = formatPaginatedList({
@@ -1547,7 +1698,13 @@ class ChatbotEngine {
 
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    // Back one level (unified)
+    // If awaiting no-slots decision
+    const incomingText = message || '';
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate, incomingText);
+      if (ret) return ret;
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       const { step, popped } = navBack(data);
       if (step) {
@@ -1569,20 +1726,16 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Step 1: choose_date (now shows a paginated list of next available dates, excluding Sundays)
     if (!data.selection_step) {
       data.selection_step = 'choose_date';
       data.navigation_chain = [];
-      // Build and store a rolling window of date options:
-      // - 5 items per page (MAX_DATE_ITEMS)
-      // - 2 pages total (MAX_DATE_PAGES) => up to 10 business days (excluding Sundays)
-      const startFrom = new Date(); // today; getNextAvailableDates starts from next day by increment
+      const startFrom = new Date();
       const page0 = getNextAvailableDates(new Date(startFrom.getTime() + 24*60*60*1000), MAX_DATE_ITEMS, 14);
       const page1Start = page0.length ? new Date(page0[page0.length - 1].getTime() + 24*60*60*1000) : new Date(startFrom.getTime() + 24*60*60*1000);
       const page1 = getNextAvailableDates(page1Start, MAX_DATE_ITEMS, 14);
       const dateOptions = [...page0, ...page1].slice(0, MAX_DATE_ITEMS * MAX_DATE_PAGES);
 
-      data.date_options = dateOptions.map(d => d.toISOString().split('T')[0]); // YYYY-MM-DD
+      data.date_options = dateOptions.map(d => d.toISOString().split('T')[0]);
       data.date_page = 0;
 
       await this.sessionManager.updateSession(session.id, {
@@ -1591,25 +1744,21 @@ class ChatbotEngine {
       });
       log.info('Init choose_date', { total_dates: data.date_options.length });
 
-      // Render date list page 0
-      const renderDateList = () => {
-        const items = data.date_options.map((iso) => ({ iso }));
-        return formatPaginatedList({
-          items,
-          formatFn: (item, i) => {
-            const dt = new Date(`${item.iso}T00:00:00Z`);
-            return `${i}. ${dt.toDateString().replace(/^.{3}\s/, '')} (${item.iso})`;
-          },
-          page: data.date_page || 0,
-          pageSize: MAX_DATE_ITEMS,
-          moreLabel: 'M. More dates',
-          header: 'Choose an appointment date:'
-        }) + `\n\nReply with number. (0️⃣ Back)`;
-      };
-      return renderDateList();
+      const items = data.date_options.map((iso) => ({ iso }));
+      const reply = formatPaginatedList({
+        items,
+        formatFn: (item, i) => {
+          const dt = new Date(`${item.iso}T00:00:00Z`);
+          return `${i}. ${dt.toDateString().replace(/^.{3}\s/, '')} (${item.iso})`;
+        },
+        page: data.date_page || 0,
+        pageSize: MAX_DATE_ITEMS,
+        moreLabel: 'M. More dates',
+        header: 'Choose an appointment date:'
+      }) + `\n\nReply with number. (0️⃣ Back)`;
+      return reply;
     }
 
-    // Paging: dates
     if (data.selection_step === 'choose_date' && (text === 'm' || text === 'more')) {
       data.date_page = Math.min((data.date_page || 0) + 1, MAX_DATE_PAGES - 1);
       await this.sessionManager.updateSession(session.id, {
@@ -1631,13 +1780,11 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Step 2: process selected date index and present types (existing logic retained)
     if (data.selection_step === 'choose_date') {
       const dates = data.date_options || [];
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
         if (isNaN(idx) || idx < 0 || idx >= dates.length) {
-          // Re-render current page
           const items = dates.map((iso) => ({ iso }));
           const reply = formatPaginatedList({
             items,
@@ -1653,7 +1800,6 @@ class ChatbotEngine {
           return reply;
         }
 
-        // Record that choose_date is a real branching step
         navPush(data, 'choose_date', { had_multiple_options: true });
 
         const selectedDate = dates[idx];
@@ -1687,7 +1833,6 @@ class ChatbotEngine {
         return reply;
       }
 
-      // If invalid input, re-render current date page
       const items = (data.date_options || []).map((iso) => ({ iso }));
       const reply = formatPaginatedList({
         items,
@@ -1703,8 +1848,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // The rest of the function remains unchanged (choose_type -> choose_physio -> choose_clinic -> slots)
-    // Paging: types
     if (data.selection_step === 'choose_type' && data.appointment_type_list && (text === 'm' || text === 'more')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1715,7 +1858,6 @@ class ChatbotEngine {
       return await this.handleBookSpecificDate(session, '');
     }
 
-    // Step 3: select type -> practitioners with availability that day (exclude UWC)
     if (data.selection_step === 'choose_type') {
       const apptTypes = data.appointment_type_list;
       const page = data.appt_type_page || 0;
@@ -1800,7 +1942,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Paging: practitioners
     if (data.selection_step === 'choose_physio' && data.practitioner_list && (text === 'm' || text === 'more')) {
       data.practitioner_page = (data.practitioner_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1811,7 +1952,6 @@ class ChatbotEngine {
       return await this.handleBookSpecificDate(session, '');
     }
 
-    // Step 4: choose practitioner -> clinics with availability on that date (exclude UWC)
     if (data.selection_step === 'choose_physio') {
       const practitionerList = data.practitioner_list;
       const page = data.practitioner_page || 0;
@@ -1889,7 +2029,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Paging: clinics
     if (data.selection_step === 'choose_clinic' && data.clinic_list && (text === 'm' || text === 'more')) {
       data.clinic_page = (data.clinic_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -1900,7 +2039,6 @@ class ChatbotEngine {
       return await this.handleBookSpecificDate(session, '');
     }
 
-    // Step 5: choose clinic -> fetch slots (one-day window)
     if (data.selection_step === 'choose_clinic') {
       const clinicsList = data.clinic_list;
       const page = data.clinic_page || 0;
@@ -1931,7 +2069,14 @@ class ChatbotEngine {
             appt_type_id: data.selected_appt_type.id,
             from, to
           });
-          return "No slots available for that selection. Please try another option. (0️⃣ Back)";
+          data.no_slots_prompt = true;
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.BOOK_SPECIFIC_DATE,
+            data: JSON.stringify(data)
+          });
+          const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate, message || '');
+          if (ret) return ret;
+          return "No slots available for that selection.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
         }
 
         const slotData = {
@@ -1968,7 +2113,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Fallback -> show date list again
     const items = (data.date_options || []).map((iso) => ({ iso }));
     const reply = formatPaginatedList({
       items,
@@ -1982,7 +2126,7 @@ class ChatbotEngine {
       header: 'Choose an appointment date:'
     }) + `\n\nReply with number. (0️⃣ Back)`;
     return reply;
-  }
+  } 
 
   /**
    * Book by picking a physio directly with consistent back navigation and auto-advance semantics.
@@ -2000,7 +2144,13 @@ class ChatbotEngine {
 
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    // Back one level (unified)
+    // If awaiting no-slots decision
+    const incomingText = message || '';
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, this.handleBookSpecificPhysio, incomingText);
+      if (ret) return ret;
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       const { step, popped } = navBack(data);
       if (step) {
@@ -2022,7 +2172,6 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Paging branches
     if (data.selection_step === 'choose_physio' && data.physio_list && (text === 'm' || text === 'more')) {
       data.physio_page = (data.physio_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
@@ -2051,7 +2200,6 @@ class ChatbotEngine {
       return await this.handleBookSpecificPhysio(session, '');
     }
 
-    // Initial physio list
     if (!data.physio_list || !data.selection_step) {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
       const physiosFetched = uniquePractitionersFromGroups(groups);
@@ -2082,7 +2230,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Physio selection
     if (data.selection_step === 'choose_physio') {
       const physioList = data.physio_list;
       const page = data.physio_page || 0;
@@ -2113,7 +2260,6 @@ class ChatbotEngine {
 
         if (!clinics.length) return "No clinics found for this physiotherapist.";
 
-        // Auto-advance single clinic
         if (clinics.length === 1) {
           navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
           data.selected_clinic = clinics[0];
@@ -2171,7 +2317,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Clinic selection
     if (data.selection_step === 'choose_clinic') {
       const clinicsList = data.clinic_list;
       const page = data.clinic_page || 0;
@@ -2226,7 +2371,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Appointment type selection -> fetch slots
     if (data.selection_step === 'choose_appt_type') {
       let apptTypes = data.appt_types_for_physio || [];
       const uniqueTypesByName = new Map();
@@ -2264,7 +2408,14 @@ class ChatbotEngine {
             appt_type_id: selectedApptType.id,
             from, to
           });
-          return "No available slots for that appointment type and physio at this clinic. Please try another.";
+          data.no_slots_prompt = true;
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
+            data: JSON.stringify(data)
+          });
+          const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, this.handleBookSpecificPhysio, message || '');
+          if (ret) return ret;
+          return "No available slots for that selection.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
         }
 
         const slotData = {
@@ -2301,7 +2452,6 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Defensive fallback
     const physioList = data.physio_list;
     const physioPage = data.physio_page || 0;
     const reply = formatPaginatedList({
@@ -2313,7 +2463,7 @@ class ChatbotEngine {
       header: 'Select a physiotherapist:'
     }) + `\n\nReply with number. (0️⃣ Back)`;
     return reply;
-  }
+  } 
 
   /**
    * Book by picking a clinic directly with consistent back navigation and auto-advance semantics.
@@ -2331,6 +2481,13 @@ class ChatbotEngine {
 
     if (!data.navigation_chain) data.navigation_chain = [];
     if (typeof data.suppress_auto_advance === 'undefined') data.suppress_auto_advance = false;
+
+    // Handle pending "no slots" decision (3 options)
+    const incomingText = message || '';
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, this.handleBookSpecificClinic, incomingText);
+      if (ret) return ret;
+    }
 
     // Back handling (unified)
     if (['0', 'menu', 'back'].includes(text)) {
@@ -2637,7 +2794,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // choose_appt_type -> fetch slots
+    // choose_appt_type -> fetch slots (time-only lines; 3-option no-slots prompt)
     if (data.selection_step === 'choose_appt_type') {
       let apptTypes = data.appt_types_for_physio || [];
       const uniqueTypesByName = new Map();
@@ -2675,7 +2832,14 @@ class ChatbotEngine {
             appt_type_id: selectedApptType.id,
             from, to
           });
-          return "No available slots for that appointment type and physio at this clinic. Please try another.";
+          data.no_slots_prompt = true;
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC,
+            data: JSON.stringify(data)
+          });
+          const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, this.handleBookSpecificClinic, message || '');
+          if (ret) return ret;
+          return "No available slots for that appointment type and physio at this clinic.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
         }
 
         const slotData = {
@@ -2729,12 +2893,16 @@ class ChatbotEngine {
       header: 'Select a clinic:'
     }) + `\n\nReply with number. (0️⃣ Back)`;
     return reply;
-  }
+  } 
 
   /**
    * Handles user selection of an appointment slot in any workflow leading to SELECT_SLOT state.
-   * "Back" always returns to Booking Options menu.
-   * Slot display omits physio/clinic if already selected, based on previous data.
+   * - Adds consistent 3-option no-slots handling:
+   *   1. Go back one level
+   *   2. Have someone reach out (region-specific support email is logged)
+   *   3. Go to main menu
+   * - Keeps time-only slot lines (header shows context).
+   * - "Back" returns to the originating flow via last_selection_flow.
    * @param {object} session - The user session object.
    * @param {string} message - The user's input (expected: slot number).
    * @returns {Promise<string>} Message to send to the user.
@@ -2747,6 +2915,23 @@ class ChatbotEngine {
     } catch (e) { data = {}; }
     const slots = Array.isArray(data.slot_list) ? data.slot_list : [];
     let text = (message || '').trim().toLowerCase();
+
+    // If awaiting no-slots decision (3 options), process it first
+    if (data.no_slots_prompt) {
+      // SELECT_SLOT can be reached from multiple flows; route back using last_selection_flow
+      // We choose the appropriate backHandler below based on prev flow
+      let stateConst = this.STATES.BOOKING_METHOD_OPTIONS;
+      let backHandler = async (sess) => this.goToInteractiveMenu(sess);
+      if (data.last_selection_flow === 'physio') { stateConst = this.STATES.BOOK_SPECIFIC_PHYSIO; backHandler = this.handleBookSpecificPhysio; }
+      else if (data.last_selection_flow === 'clinic') { stateConst = this.STATES.BOOK_SPECIFIC_CLINIC; backHandler = this.handleBookSpecificClinic; }
+      else if (data.last_selection_flow === 'date') { stateConst = this.STATES.BOOK_SPECIFIC_DATE; backHandler = this.handleBookSpecificDate; }
+      else if (data.last_selection_flow === 'soonest') { stateConst = this.STATES.BOOK_SOONEST; backHandler = this.handleBookSoonest; }
+      else if (data.last_selection_flow === 'history') { stateConst = this.STATES.BOOK_HISTORY; backHandler = this.handleBookHistory; }
+
+      const ret = await this._handleNoSlotsDecision(session, data, stateConst, backHandler, message || '');
+      if (ret) return ret;
+      // If user typed something else, fall through to render the prompt again
+    }
 
     if (text === 'm' || text === 'more') {
       data.slot_page = (data.slot_page || 0) + 1;
@@ -2792,6 +2977,13 @@ class ChatbotEngine {
           });
           return await this.handleBookSoonest(session, '');
         }
+        if (step === 'history') {
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.BOOK_HISTORY,
+            data: JSON.stringify(prevData)
+          });
+          return await this.handleBookHistory(session, '');
+        }
       }
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
@@ -2801,13 +2993,15 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
+    // When no slots are present in this state (edge case), offer 3-option prompt
     if (!slots.length) {
+      // Prepare no-slots prompt and let helper process next user reply
+      data.no_slots_prompt = true;
       await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: null
+        conversation_state: this.STATES.SELECT_SLOT,
+        data: JSON.stringify(data)
       });
-      log.info('No slots available on entry');
-      return "Sorry, I couldn't find any available appointment slots. Please try again.";
+      return "No available slots to show.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
     }
 
     const page = data.slot_page || 0;
@@ -2830,12 +3024,12 @@ class ChatbotEngine {
         slot: selectedSlot.slot
       });
 
-      // Render confirmation with full context once
+      // Build concise confirmation with context in header
       const headerParts = [];
       if (data.prev_state_data?.selected_appt_type?.name) headerParts.push(`${data.prev_state_data.selected_appt_type.name}`);
       if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) headerParts.push(`${data.prev_state_data.selected_physio.display_name || data.prev_state_data.selected_physio.first_name}`);
       if (data.prev_state_data?.selected_clinic?.business_name) headerParts.push(`${data.prev_state_data.selected_clinic.business_name}`);
-      const header = headerParts.length ? headerParts.join(' • ') : selectedSlot.practitioner_name;
+      const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || 'Appointment');
 
       return (
         `You have selected:\n\n` +
@@ -2857,11 +3051,10 @@ class ChatbotEngine {
       header = parts.join(' • ');
     }
 
-    // Omit clinic/physio/type in each line; show only time
+    // Time-only listing per line
     const compactFormat = (slot, idx) => {
       const dt = new Date(slot.slot);
-      const timeStr = dt.toLocaleString();
-      return `${idx}. ${timeStr}`;
+      return `${idx}. ${dt.toLocaleString()}`;
     };
 
     const reply = formatPaginatedList({
