@@ -1745,20 +1745,20 @@ class ChatbotEngine {
 
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    // No-slots decision
+    // If awaiting the 3-option "no slots" decision, handle it first
     const incomingText = message || '';
     if (data.no_slots_prompt) {
       const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate, incomingText);
       if (ret) return ret;
     }
 
-    // Back/menu
+    // Back/menu: unified for the entire flow
     if (['0', 'menu', 'back'].includes(text)) {
       const { step, popped } = navBack(data);
       if (step) {
         clearForwardStateForPopped(data, popped);
         data.selection_step = step;
-        data.suppress_auto_advance = true;
+        data.suppress_auto_advance = true; // prevent immediate re-advance on re-render
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.BOOK_SPECIFIC_DATE,
           data: JSON.stringify(data)
@@ -1789,7 +1789,7 @@ class ChatbotEngine {
         .slice(0, MAX_DATE_ITEMS * MAX_DATE_PAGES)
         .map(d => d.toISOString().split('T')[0]);
 
-      // Defensive dedupe of dates by ISO (stable order)
+      // Defensive: dedupe ISO dates, stable order
       const seenDates = new Set();
       dateOptions = dateOptions.filter(iso => {
         if (seenDates.has(iso)) return false;
@@ -1864,12 +1864,13 @@ class ChatbotEngine {
           return reply;
         }
 
+        // Record this multi-choice step so "0" at next level returns here
         navPush(data, 'choose_date', { had_multiple_options: true });
 
         const selectedDate = dates[idx];
         data.selected_date = selectedDate;
 
-        // Build full appointment types for all practitioners once, exclude UWC, dedupe by name (stable), and persist
+        // Build full appointment types once; exclude UWC; dedupe by name; persist for stable indexing
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         let allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
         const byName = new Map();
@@ -1890,7 +1891,6 @@ class ChatbotEngine {
 
         if (allTypes.length === 1) {
           navPush(data, 'choose_type', { had_multiple_options: false, auto: true });
-          // Do NOT recurse; just render the (single) type list
         }
 
         const reply = formatPaginatedList({
@@ -1930,12 +1930,12 @@ class ChatbotEngine {
       return await this.handleBookSpecificDate(session, '');
     }
 
-    // choose_type with deterministic guard for next step
+    // choose_type
     if (data.selection_step === 'choose_type') {
       const apptTypes = data.appointment_type_list || [];
       const page = data.appt_type_page || 0;
 
-      // Guard: if we already computed practitioner_list (auto) then render choose_physio
+      // Deterministic guard: if practitioner_list already computed (possibly via auto-advance), just render it
       const last = Array.isArray(data.navigation_chain) ? data.navigation_chain[data.navigation_chain.length - 1] : null;
       const hasAutoPhysio = last && last.selection_step === 'choose_physio' && last.auto === true;
       if ((hasAutoPhysio || Array.isArray(data.practitioner_list)) && (data.practitioner_list || []).length) {
@@ -1958,10 +1958,11 @@ class ChatbotEngine {
         if (apptTypes.length > 1) {
           navPush(data, 'choose_type', { had_multiple_options: true });
         }
+
         const selectedApptType = apptTypes[idx];
         data.selected_appt_type = selectedApptType;
 
-        // Build practitioners that actually have slots for that date (persist for stable indexing)
+        // Build practitioners that actually have slots on the chosen date, excluding UWC clinics
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const allPractitioners = await getPractitionersForType(groups, this.clinikoAPI, selectedApptType.id);
 
@@ -2042,11 +2043,12 @@ class ChatbotEngine {
       return await this.handleBookSpecificDate(session, '');
     }
 
-    // choose_physio with deterministic guard for clinics
+    // choose_physio
     if (data.selection_step === 'choose_physio') {
       const practitionerList = data.practitioner_list || [];
       const page = data.practitioner_page || 0;
 
+      // Deterministic guard: if clinic_list already computed (possibly via auto-advance), just render it
       const last = Array.isArray(data.navigation_chain) ? data.navigation_chain[data.navigation_chain.length - 1] : null;
       const hasAutoClinic = last && last.selection_step === 'choose_clinic' && last.auto === true;
       if ((hasAutoClinic || Array.isArray(data.clinic_list)) && (data.clinic_list || []).length) {
@@ -2069,10 +2071,11 @@ class ChatbotEngine {
         if (practitionerList.length > 1) {
           navPush(data, 'choose_physio', { had_multiple_options: true });
         }
+
         const selectedPhysio = practitionerList[idx];
         data.selected_physio = selectedPhysio;
 
-        // Build available clinics (persist for stable indexing), exclude UWC, dedupe by id
+        // Build available clinics, exclude UWC, dedupe by id
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const { from, to } = normalizeDateWindow(`${data.selected_date}T00:00:00Z`, `${data.selected_date}T23:59:59Z`, 7);
         const availableClinics = [];
@@ -2100,7 +2103,7 @@ class ChatbotEngine {
           return `No clinics available for ${selectedPhysio.display_name || selectedPhysio.first_name} on ${data.selected_date}. (0️⃣ Back)`;
         }
 
-        // Deduplicate clinics by id (stable)
+        // Deduplicate by clinic id
         const seenClinicIds = new Set();
         const dedupClinics = [];
         for (const c of availableClinics) {
@@ -2169,6 +2172,7 @@ class ChatbotEngine {
         if (clinicsList.length > 1) {
           navPush(data, 'choose_clinic', { had_multiple_options: true });
         }
+
         const selectedClinic = clinicsList[idx];
         data.selected_clinic = selectedClinic;
 
@@ -2233,7 +2237,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Fallback -> show date list
+    // Fallback -> show date list again
     const items = (data.date_options || []).map((iso) => ({ iso }));
     const reply = formatPaginatedList({
       items,
