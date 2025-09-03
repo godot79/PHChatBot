@@ -736,7 +736,7 @@ class ChatbotEngine {
       this.logger.error('handleMessage error', { stack: error.stack, message: error.message, error });
       let session;
       try {
-        session = await this.sessionManager.getSessionByPhoneNumber?.(phoneNumber);
+        session = await this.sessionManager.getSessionByPhone?.(phoneNumber);
       } catch {}
       if (session) {
         return await this.renderErrorWithMenu(session);
@@ -1821,7 +1821,7 @@ class ChatbotEngine {
         items,
         formatFn: (item, i) => {
           const dt = new Date(`${item.iso}T00:00:00Z`);
-          return `${i}. ${dt.toDateString().replace/^.{3}\s/, '')} (${item.iso})`;
+          return `${i}. ${dt.toDateString().replace(/^.{3}\s/, '')} (${item.iso})`;
         },
         page: data.date_page || 0,
         pageSize: MAX_DATE_ITEMS,
