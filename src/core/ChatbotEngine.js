@@ -1780,12 +1780,24 @@ class ChatbotEngine {
       data.navigation_chain = [];
 
       const startFrom = new Date();
-      const page0 = getNextAvailableDates(new Date(startFrom.getTime() + 24*60*60*1000), MAX_DATE_ITEMS, 14);
-      const page1Start = page0.length ? new Date(page0[page0.length - 1].getTime() + 24*60*60*1000) : new Date(startFrom.getTime() + 24*60*60*1000);
+      const nextDay = new Date(startFrom.getTime() + 24 * 60 * 60 * 1000);
+      const page0 = getNextAvailableDates(nextDay, MAX_DATE_ITEMS, 14);
+      const page1Start = page0.length ? new Date(page0[page0.length - 1].getTime() + 24 * 60 * 60 * 1000) : nextDay;
       const page1 = getNextAvailableDates(page1Start, MAX_DATE_ITEMS, 14);
-      const dateOptions = [...page0, ...page1].slice(0, MAX_DATE_ITEMS * MAX_DATE_PAGES);
 
-      data.date_options = dateOptions.map(d => d.toISOString().split('T')[0]);
+      let dateOptions = [...page0, ...page1]
+        .slice(0, MAX_DATE_ITEMS * MAX_DATE_PAGES)
+        .map(d => d.toISOString().split('T')[0]);
+
+      // Defensive dedupe of dates by ISO (stable order)
+      const seenDates = new Set();
+      dateOptions = dateOptions.filter(iso => {
+        if (seenDates.has(iso)) return false;
+        seenDates.add(iso);
+        return true;
+      });
+
+      data.date_options = dateOptions;
       data.date_page = 0;
 
       await this.sessionManager.updateSession(session.id, {
@@ -1857,9 +1869,16 @@ class ChatbotEngine {
         const selectedDate = dates[idx];
         data.selected_date = selectedDate;
 
-        // Build full appointment types for all practitioners once and persist
+        // Build full appointment types for all practitioners once, exclude UWC, dedupe by name (stable), and persist
         const groups = await this.clinikoAPI.getPractitionersByClinic();
-        const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+        let allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+        const byName = new Map();
+        for (const t of allTypes || []) {
+          if (/UWC/i.test(t.name)) continue;
+          if (!byName.has(t.name)) byName.set(t.name, t);
+        }
+        allTypes = Array.from(byName.values());
+
         data.appointment_type_list = allTypes;
         data.appt_type_page = 0;
         data.selection_step = 'choose_type';
@@ -1871,7 +1890,7 @@ class ChatbotEngine {
 
         if (allTypes.length === 1) {
           navPush(data, 'choose_type', { had_multiple_options: false, auto: true });
-          // Do NOT recurse; render the one-type list
+          // Do NOT recurse; just render the (single) type list
         }
 
         const reply = formatPaginatedList({
@@ -2053,7 +2072,7 @@ class ChatbotEngine {
         const selectedPhysio = practitionerList[idx];
         data.selected_physio = selectedPhysio;
 
-        // Build available clinics (persist for stable indexing)
+        // Build available clinics (persist for stable indexing), exclude UWC, dedupe by id
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const { from, to } = normalizeDateWindow(`${data.selected_date}T00:00:00Z`, `${data.selected_date}T23:59:59Z`, 7);
         const availableClinics = [];
@@ -2081,21 +2100,31 @@ class ChatbotEngine {
           return `No clinics available for ${selectedPhysio.display_name || selectedPhysio.first_name} on ${data.selected_date}. (0️⃣ Back)`;
         }
 
-        data.clinic_list = availableClinics;
+        // Deduplicate clinics by id (stable)
+        const seenClinicIds = new Set();
+        const dedupClinics = [];
+        for (const c of availableClinics) {
+          if (!seenClinicIds.has(c.id)) {
+            seenClinicIds.add(c.id);
+            dedupClinics.push(c);
+          }
+        }
+
+        data.clinic_list = dedupClinics;
         data.clinic_page = 0;
         data.selection_step = 'choose_clinic';
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.BOOK_SPECIFIC_DATE,
           data: JSON.stringify(data)
         });
-        log.info('Physio chosen', { physio_id: selectedPhysio.id, clinics: availableClinics.length });
+        log.info('Physio chosen', { physio_id: selectedPhysio.id, clinics: dedupClinics.length });
 
-        if (availableClinics.length === 1) {
+        if (dedupClinics.length === 1) {
           navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
         }
 
         const reply = formatPaginatedList({
-          items: availableClinics,
+          items: dedupClinics,
           formatFn: (c, idx2) => `${idx2}. ${c.business_name}`,
           page: 0,
           pageSize: MAX_SLOT_ITEMS,
