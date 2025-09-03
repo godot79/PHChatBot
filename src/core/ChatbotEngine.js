@@ -1533,6 +1533,20 @@ class ChatbotEngine {
     if (data.selection_step === 'choose_physio') {
       const practitionerList = data.practitioner_list;
       const page = data.practitioner_page || 0;
+
+      // Idempotency guard: if we just advanced from this step and already have clinics, render clinics instead of reprocessing duplicate invocations.
+      if (data._advanced_from_physio && (Date.now() - data._advanced_from_physio) < 1500 && Array.isArray(data.clinic_list) && data.clinic_list.length) {
+        const reply = formatPaginatedList({
+          items: data.clinic_list,
+          formatFn: (c, idx) => `${idx}. ${c.business_name}`,
+          page: data.clinic_page || 0,
+          pageSize: MAX_SLOT_ITEMS,
+          moreLabel: 'M. More clinics',
+          header: `Select a clinic for ${data.selected_physio?.display_name || data.selected_physio?.first_name || 'the selected practitioner'}:`
+        }) + `\n\nReply with number. (0️⃣ Back)`;
+        return reply;
+      }
+
       if (!isNaN(text) && text !== '') {
         const idx = parseInt(text, 10) - 1;
         if (isNaN(idx) || idx < 0 || idx >= practitionerList.length) {
@@ -1551,6 +1565,7 @@ class ChatbotEngine {
         data.clinic_list = clinics;
         data.clinic_page = 0;
         data.selection_step = 'choose_clinic';
+        data._advanced_from_physio = Date.now(); // Mark we advanced from physio -> clinic (prevents duplicate re-entry)
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.BOOK_SOONEST,
           data: JSON.stringify(data)
@@ -1559,6 +1574,7 @@ class ChatbotEngine {
         if (!clinics.length) return "No clinics found for this practitioner.";
         if (clinics.length === 1) {
           navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
+          data.selected_clinic = clinics[0]; // ensure selected clinic is set before auto-advance
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
           return await this.handleBookSoonest(session, "1");
         }

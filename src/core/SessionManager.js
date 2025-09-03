@@ -50,62 +50,119 @@ class SessionManager {
         }
     }
 
-    /**
-     * Create or get existing session for a phone number - FIXED
+    /** 
+     * Create or get existing session for a phone number D
+     * Minimal additions:
+     * - When a new session is created (because none active), seed region and verification from the most recent prior session for that phone (even if expired).
+     * - No change to flows or endpoints; uses existing DB and context JSON.
      */
     async getOrCreateSession(phoneNumber, forceNew = false) {
-        try {
-            // Normalize phone number
-            const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
-            
-            if (!normalizedPhone) {
-                throw new Error('Invalid phone number provided');
-            }
-            
-            if (!forceNew) {
-                // Try to get existing active session
-                const existingSession = await this.db.getSessionByPhone(normalizedPhone);
-                if (existingSession && !this.isSessionExpired(existingSession)) {
-                    if (existingSession && existingSession.conversation_state === 'initial') {
-                        await this.updateSession(existingSession.id, { conversation_state: 'INTRO' });
-                        existingSession.conversation_state = 'INTRO';
-                    }
-                    // Update last activity safely - but don't fail if it doesn't work
-                    await this.updateSessionActivity(existingSession.id);
-                    this.logger.debug(`Retrieved existing session ${existingSession.id} for ${normalizedPhone}`);
-                    return this.parseSession(existingSession);
-                }
-            }
-
-            // Create new session
-            const sessionId = await this.db.createSession(
-                normalizedPhone, 
-                null, 
-                this.defaultSessionDuration
-            );
-
-            // Verify the session was created before trying to retrieve it
-            if (!sessionId) {
-                throw new Error('Failed to create session - no session ID returned');
-            }
-
-            // Add a small delay to ensure database consistency
-            await new Promise(resolve => setTimeout(resolve, 10));
-
-            const session = await this.db.getSession(sessionId);
-            if (!session) {
-                throw new Error(`Session ${sessionId} was created but cannot be retrieved`);
-            }
-
-            this.logger.info(`Created new session ${sessionId} for ${normalizedPhone}`);
-            
-            // Don't call updateSessionActivity immediately after creation
-            // as the session was just created with current timestamp
-            return this.parseSession(session);
-        } catch (error) {
-            this.logger.error('Failed to get or create session:', error);
-            throw new Error('Session creation failed: ' + error.message);
+      try {
+        // Normalize phone number
+        const normalizedPhone = this.normalizePhoneNumber(phoneNumber);
+        if (!normalizedPhone) {
+          throw new Error('Invalid phone number provided');
         }
+
+        if (!forceNew) {
+          // Try to get existing active session
+          const existingSession = await this.db.getSessionByPhone(normalizedPhone);
+          if (existingSession && !this.isSessionExpired(existingSession)) {
+            if (existingSession && existingSession.conversation_state === 'initial') {
+              await this.updateSession(existingSession.id, { conversation_state: 'INTRO' });
+              existingSession.conversation_state = 'INTRO';
+            }
+            // Update last activity safely - but don't fail if it doesn't work
+            await this.updateSessionActivity(existingSession.id);
+            this.logger.debug(`Retrieved existing session ${existingSession.id} for ${normalizedPhone}`);
+            return this.parseSession(existingSession);
+          }
+        }
+
+        // No active session: create new
+        const sessionId = await this.db.createSession(
+          normalizedPhone,
+          null,
+          this.defaultSessionDuration
+        );
+        if (!sessionId) {
+          throw new Error('Failed to create session - no session ID returned');
+        }
+
+        // Small delay to ensure DB consistency
+        await new Promise(resolve => setTimeout(resolve, 10));
+        let session = await this.db.getSession(sessionId);
+        if (!session) {
+          throw new Error(`Session ${sessionId} was created but cannot be retrieved`);
+        }
+
+        this.logger.info(`Created new session ${sessionId} for ${normalizedPhone}`);
+
+        // Seed new session with persistent attributes from the latest prior session (even if expired)
+        try {
+          const priorRows = await this.db.query(
+            `SELECT * FROM sessions WHERE phone_number = ? ORDER BY last_activity DESC, created_at DESC LIMIT 1`,
+            [normalizedPhone]
+          );
+          const prior = Array.isArray(priorRows) ? priorRows[0] : null;
+
+          if (prior && prior.id !== sessionId) {
+            // Parse prior context JSON
+            let priorContext = {};
+            try {
+              priorContext = prior.context && typeof prior.context === 'string'
+                ? JSON.parse(prior.context)
+                : (prior.context || {});
+            } catch {
+              priorContext = {};
+            }
+
+            // Build seed updates
+            const seedUpdates = {};
+            const newContext = {};
+
+            // Preserve region if available
+            if (priorContext && priorContext.region) {
+              newContext.region = priorContext.region;
+            }
+
+            // If prior was verified, carry over verification flags
+            // We consider both the boolean 'verified' and the 'verification_status'
+            const wasVerified = (prior.verified === 1) || prior.verification_status === 'verified';
+            if (wasVerified) {
+              seedUpdates.verified = 1;
+              seedUpdates.verification_status = 'verified';
+            }
+
+            // Carry patient_id if present
+            if (prior.patient_id) {
+              seedUpdates.patient_id = prior.patient_id;
+            }
+
+            // Only write context if we actually have additions
+            if (Object.keys(newContext).length > 0) {
+              seedUpdates.context = {
+                ...(session.context && typeof session.context !== 'string' ? session.context : {}),
+                ...newContext
+              };
+            }
+
+            if (Object.keys(seedUpdates).length > 0) {
+              await this.updateSession(sessionId, seedUpdates);
+              // re-fetch the session row for accurate parse
+              session = await this.db.getSession(sessionId);
+            }
+          }
+        } catch (seedErr) {
+          this.logger.warn('Seeding new session from prior session failed (non-fatal):', seedErr?.message || seedErr);
+        }
+
+        // Return parsed session
+        return this.parseSession(session);
+      } catch (error) {
+        this.logger.error('Failed to get or create session:', error);
+        throw new Error('Session creation failed: ' + error.message);
+      }
     }
 
     /**
@@ -650,14 +707,6 @@ class SessionManager {
         return session;
     }
     
-
-    async updateSessionActivity(sessionId) {
-    try {
-        await this.db.updateSession(sessionId, { last_activity: new Date().toISOString() });
-    } catch (err) {
-        this.logger.error(`Failed to update activity for session ${sessionId}:`, err);
-    }
-}   
     /**
      * Normalize phone number to consistent format
      */
