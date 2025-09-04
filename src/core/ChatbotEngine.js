@@ -2053,10 +2053,11 @@ class ChatbotEngine {
   }
 
   /**
-   * Book by picking a physio first. Navigation-only fixes.
+   * Book by picking a physio first. Navigation-only fixes + clear stale type.
    * - Stable indices: persist lists and page offsets.
-   * - Auto-advance on single option, but back skips auto frames.
-   * - "0" goes back to last step that had multiple options, else main menu.
+   * - Auto-advance recorded and skipped on back.
+   * - "0" goes back to last multi-option step, else main menu.
+   * - IMPORTANT: when physio changes, clear any previously selected appointment type and its cached list.
    *
    * Steps: choose_physio -> choose_clinic -> choose_appt_type -> SELECT_SLOT
    *
@@ -2097,13 +2098,9 @@ class ChatbotEngine {
     if (!data.selection_step) {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
       const physios = [];
-      for (const g of groups || []) {
-        for (const p of g.practitioners || []) physios.push(p);
-      }
+      for (const g of groups || []) for (const p of g.practitioners || []) physios.push(p);
       const seen = new Set();
-      data.physio_list = physios.filter(p => {
-        if (seen.has(p.id)) return false; seen.add(p.id); return true;
-      });
+      data.physio_list = physios.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
       data.physio_page = 0;
       data.selection_step = 'choose_physio';
       data.navigation_chain = [];
@@ -2113,6 +2110,11 @@ class ChatbotEngine {
       if (!data.suppress_auto_advance && data.physio_list.length === 1) {
         navPush(data, 'choose_physio', { had_multiple_options: false, auto: true });
         data.selected_physio = data.physio_list[0];
+        // Clear any stale type from previous runs when physio changes
+        delete data.selected_appt_type;
+        delete data.appt_types_for_physio;
+        data.appt_type_page = 0;
+        data.no_slots_prompt = null;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         data.selection_step = 'choose_clinic';
       } else if (data.physio_list.length > 1) {
@@ -2137,6 +2139,11 @@ class ChatbotEngine {
         const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
         if (idx >= 0 && idx < physioList.length) {
           data.selected_physio = physioList[idx];
+          // Clear any stale type from previous runs when physio changes
+          delete data.selected_appt_type;
+          delete data.appt_types_for_physio;
+          data.appt_type_page = 0;
+          data.no_slots_prompt = null;
           data.selection_step = 'choose_clinic';
           await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO, data: JSON.stringify(data) });
         }
@@ -2176,8 +2183,8 @@ class ChatbotEngine {
         if (clinics.length === 1 && !data.suppress_auto_advance) {
           navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
           data.selected_clinic = clinics[0];
-          data.selection_step = 'choose_appt_type';
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+          data.selection_step = 'choose_appt_type';
         } else if (clinics.length > 1) {
           navPush(data, 'choose_clinic', { had_multiple_options: true });
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -2291,11 +2298,12 @@ class ChatbotEngine {
     return await this.goToInteractiveMenu(session);
   }
 
-   /**
-   * Book by picking a clinic first. Navigation-only fixes.
+  /**
+   * Book by picking a clinic first. Navigation-only fixes + clear stale type when physio changes.
    * - Stable indices via persisted lists and pages.
    * - Auto-advance recorded and skipped on back.
    * - "0" returns to last multi-option step, else main menu.
+   * - IMPORTANT: when physio changes, clear any previously selected appointment type and its cached list.
    *
    * Steps: choose_clinic -> choose_physio -> choose_appt_type -> SELECT_SLOT
    *
@@ -2406,8 +2414,13 @@ class ChatbotEngine {
         if (data.physio_list.length === 1 && !data.suppress_auto_advance) {
           navPush(data, 'choose_physio', { had_multiple_options: false, auto: true });
           data.selected_physio = data.physio_list[0];
-          data.selection_step = 'choose_appt_type';
+          // Clear any stale type from previous runs when physio changes
+          delete data.selected_appt_type;
+          delete data.appt_types_for_clinic_physio;
+          data.appt_type_page = 0;
+          data.no_slots_prompt = null;
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+          data.selection_step = 'choose_appt_type';
         } else if (data.physio_list.length > 1) {
           navPush(data, 'choose_physio', { had_multiple_options: true });
           await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -2421,6 +2434,11 @@ class ChatbotEngine {
         const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
         if (idx >= 0 && idx < physios.length) {
           data.selected_physio = physios[idx];
+          // Clear any stale type from previous runs when physio changes
+          delete data.selected_appt_type;
+          delete data.appt_types_for_clinic_physio;
+          data.appt_type_page = 0;
+          data.no_slots_prompt = null;
           data.selection_step = 'choose_appt_type';
           await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: JSON.stringify(data) });
         }
