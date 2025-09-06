@@ -1442,7 +1442,7 @@ class ChatbotEngine {
    * @param {string} message
    * @returns {Promise<string>}
    */
-  async function handleBookSoonest(session, message) {
+  async handleBookSoonest(session, message) {
     const log = this.logger.child({ component: 'BookSoonest', sessionId: session?.id });
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     let text = (message || '').trim().toLowerCase();
