@@ -36,6 +36,26 @@ const REGION_SUPPORT_INFO = {
 // ====== NAVIGATION HELPERS ======
 
 /**
+ * Normalize appointment type names for consistent matching and dedupe.
+ * - Collapses repeated whitespace
+ * - Ensures a single space before '(' and no extra space before ')'
+ * - Normalizes Unicode dashes to '-'
+ * - Lowercases and trims
+ *
+ * @param {string} s
+ * @returns {string}
+ */
+function normalizeTypeName(s) {
+  return String(s || '')
+    .replace(/\s+/g, ' ')           // collapse multiple spaces
+    .replace(/([A-Za-z])\(/g, '$1 (') // add space before '('
+    .replace(/\s+\)/g, ')')        // remove space before ')'
+    .replace(/[\u2010-\u2015]/g, '-') // normalize dashes
+    .toLowerCase()
+    .trim();
+}
+
+/**
  * Push a step entry into navigation_chain.
  * - had_multiple_options: true if user had multiple options (a real branching choice)
  * - auto: true if we auto-advanced due to a single option
@@ -280,6 +300,39 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
       if (seen.has(p.id)) continue;
       const types = await clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
       if ((types || []).some(t => String(t.id) === targetId)) {
+        seen.add(p.id);
+        result.push(p);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Return all practitioners who offer an appointment type by NAME.
+ * Why: Type IDs differ per practitioner for the same label, so ID match is insufficient.
+ *
+ * @param {Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>} groups
+ * @param {ClinikoAPI} clinikoAPI
+ * @param {string} apptTypeName
+ * @returns {Promise<Array<Object>>}
+ */
+async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
+  const normalize = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/[\u2010-\u2015]/g, '-') // normalize dashes
+    .replace(/\s+/g, ' ')              // collapse spaces
+    .trim();
+
+  const target = normalize(apptTypeName);
+  const seen = new Set();
+  const result = [];
+
+  for (const group of groups || []) {
+    for (const p of group.practitioners || []) {
+      if (seen.has(p.id)) continue;
+      const types = await clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
+      if ((types || []).some(t => normalize(t.name) === target)) {
         seen.add(p.id);
         result.push(p);
       }
@@ -1446,78 +1499,98 @@ class ChatbotEngine {
     const log = this.logger.child({ component: 'BookSoonest', sessionId: session?.id });
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     let text = (message || '').trim().toLowerCase();
-
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    // Pending no-slots decisions
+    // prefer shared helper if present; fallback inline
+    const _norm = (s) => (typeof normalizeTypeName === 'function'
+      ? normalizeTypeName(s)
+      : String(s || '')
+          .replace(/\s+/g, ' ')
+          .replace(/([A-Za-z])\(/g, '$1 (')
+          .replace(/\s+\)/g, ')')
+          .replace(/[\u2010-\u2015]/g, '-')
+          .toLowerCase()
+          .trim());
+
+    const syncLocal = async (stateOverride) => {
+      if (stateOverride && stateOverride.conversation_state) session.conversation_state = stateOverride.conversation_state;
+      session.data = JSON.stringify(data);
+      if (stateOverride) await this.sessionManager.updateSession(session.id, { ...stateOverride, data: session.data });
+      else await this.sessionManager.updateSession(session.id, { data: session.data });
+    };
+
+    // Handle pending no-slots decision
     const incomingText = message || '';
     if (data.no_slots_prompt) {
       const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SOONEST, this.handleBookSoonest, incomingText);
       if (ret) return ret;
     }
 
-    // Back/menu — top-level guard first
-    if (['0', 'menu', 'back'].includes(text)) {
+    // Back/menu
+    if (["0", "menu", "back"].includes(text)) {
       if (!data.selection_step || data.selection_step === 'choose_type') {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-        log.info('Back from top of Soonest -> Booking Options');
         return await this.goToInteractiveMenu(session);
       }
-
       const { step, popped } = navBack(data);
       if (step) {
         clearForwardStateForPopped(data, popped);
         data.selection_step = step;
         data.suppress_auto_advance = true;
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-        log.info('Back one level', { to_step: data.selection_step });
+        await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
         return await this.handleBookSoonest(session, '');
       }
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-      log.info('Back fallback -> Booking Options');
       return await this.goToInteractiveMenu(session);
     }
 
     // ===== Init → choose_type =====
     if (!data.selection_step) {
-      // Reset cross-flow state
-      delete data.selected_appt_type;
-      delete data.practitioner_list;
-      delete data.practitioner_page;
-      delete data.selected_physio;
-      delete data.clinic_list;
-      delete data.clinic_page;
-      delete data.selected_clinic;
+      delete data.selected_appt_type; delete data.appointment_type_list; delete data.appt_type_page; delete data.appt_type_name_to_ids_norm;
+      delete data.selected_physio; delete data.practitioner_list; delete data.practitioner_page;
+      delete data.selected_clinic; delete data.clinic_list; delete data.clinic_page;
       delete data.no_slots_prompt;
       data.navigation_chain = [];
 
       const groups = await this.clinikoAPI.getPractitionersByClinic();
-      let allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+      const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
 
-      // Dedup by name for display; exclude UWC
-      const byName = new Map();
+      const buckets = new Map(); // norm -> { displayName, ids:Set }
       for (const t of allTypes || []) {
+        if (!t || !t.name) continue;
         if (/UWC/i.test(t.name)) continue;
-        if (!byName.has(t.name)) byName.set(t.name, t);
+        const display = String(t.name)
+          .replace(/\s+/g, ' ')
+          .replace(/([A-Za-z])\(/g, '$1 (')
+          .replace(/\s+\)/g, ')')
+          .trim();
+        const norm = _norm(display);
+        if (!buckets.has(norm)) buckets.set(norm, { displayName: display, ids: new Set() });
+        buckets.get(norm).ids.add(String(t.id));
       }
-      allTypes = Array.from(byName.values());
 
-      data.appointment_type_list = allTypes;
+      const typeList = Array.from(buckets.values())
+        .map(b => ({ name: b.displayName, id: Array.from(b.ids)[0], norm_name: _norm(b.displayName) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const nameToIdsNorm = {}; for (const [norm, b] of buckets.entries()) nameToIdsNorm[norm] = Array.from(b.ids);
+
+      data.appointment_type_list = typeList;
       data.appt_type_page = 0;
+      data.appt_type_name_to_ids_norm = nameToIdsNorm;
       data.selection_step = 'choose_type';
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-      log.info('Init choose_type', { total_types: allTypes.length });
+      await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
 
-      if (allTypes.length > 1) navPush(data, 'choose_type', { had_multiple_options: true });
-      else if (allTypes.length === 1) navPush(data, 'choose_type', { had_multiple_options: false, auto: true });
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      if (typeList.length > 1) navPush(data, 'choose_type', { had_multiple_options: true, auto: false });
+      else if (typeList.length === 1) navPush(data, 'choose_type', { had_multiple_options: false, auto: true });
+      await syncLocal();
     }
 
     // Paging in choose_type
     if (data.selection_step === 'choose_type' && (text === 'm' || text === 'more')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-      text = '';
+      await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
+      return await this.handleBookSoonest(session, '');
     }
 
     // ===== choose_type =====
@@ -1525,38 +1598,16 @@ class ChatbotEngine {
       const apptTypes = data.appointment_type_list || [];
       const page = data.appt_type_page || 0;
 
-      if (/^\d+$/.test(text)) {
+      const { advanced } = planForward(data, 'choose_type', apptTypes.length, () => { data.selected_appt_type = apptTypes[0]; });
+
+      if (!advanced && /^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
         if (idx < 0 || idx >= apptTypes.length) return 'Invalid appointment type selection. Reply with a number from the list.';
-        const selected = apptTypes[idx];
-
-        // Build practitioners by matching TYPE NAME across all practitioners
-        const groups = await this.clinikoAPI.getPractitionersByClinic();
-        const practitioners = [];
-        const seen = new Set();
-        for (const g of groups || []) {
-          for (const p of g.practitioners || []) {
-            if (seen.has(p.id)) continue;
-            const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
-            if ((types || []).some(t => String(t.name).trim() === String(selected.name).trim())) {
-              seen.add(p.id);
-              practitioners.push(p);
-            }
-          }
-        }
-
-        data.selected_appt_type = selected;
-        data.practitioner_list = practitioners;
-        data.practitioner_page = 0;
-        data.selection_step = 'choose_physio';
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-
-        if (practitioners.length > 1) navPush(data, 'choose_physio', { had_multiple_options: true });
-        else navPush(data, 'choose_physio', { had_multiple_options: false, auto: true });
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        data.selected_appt_type = apptTypes[idx];
+        await syncLocal();
       }
 
-      if (data.selection_step === 'choose_type') {
+      if (!data.selected_appt_type) {
         const reply = formatPaginatedList({
           items: apptTypes,
           formatFn: (a, i) => `${i}. ${a.name}`,
@@ -1567,13 +1618,56 @@ class ChatbotEngine {
         }) + `\n\nReply with number. (0️⃣ Back)`;
         return reply;
       }
+
+      // Build practitioners by normalized TYPE NAME
+      const groups = await this.clinikoAPI.getPractitionersByClinic();
+      const targetNorm = data.selected_appt_type.norm_name || _norm(data.selected_appt_type.name);
+      const practitioners = [];
+      const seen = new Set();
+      for (const g of groups || []) {
+        for (const p of g.practitioners || []) {
+          if (seen.has(p.id)) continue;
+          const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
+          if ((types || []).some(t => _norm(t.name) === targetNorm)) {
+            seen.add(p.id);
+            practitioners.push(p);
+          }
+        }
+      }
+
+      data.practitioner_list = practitioners;
+      data.practitioner_page = 0;
+      data.selection_step = 'choose_physio';
+      await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
+
+      navPush(data, 'choose_physio', { had_multiple_options: practitioners.length > 1, auto: practitioners.length === 1 });
+      await syncLocal();
+
+      if (practitioners.length > 1) {
+        const reply = formatPaginatedList({
+          items: practitioners,
+          formatFn: formatPhysioItem,
+          page: 0,
+          pageSize: MAX_SLOT_ITEMS,
+          moreLabel: 'M. More practitioners',
+          header: `Select a practitioner for ${data.selected_appt_type.name}:`
+        }) + `\n\nReply with number. (0️⃣ Back)`;
+        return reply;
+      }
+
+      if (practitioners.length === 1) {
+        data.selected_physio = practitioners[0];
+        data.selection_step = 'choose_clinic';
+        await syncLocal();
+        return await this.handleBookSoonest(session, '');
+      }
     }
 
     // Paging in choose_physio
     if (data.selection_step === 'choose_physio' && (text === 'm' || text === 'more')) {
       data.practitioner_page = (data.practitioner_page || 0) + 1;
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-      text = '';
+      await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
+      return await this.handleBookSoonest(session, '');
     }
 
     // ===== choose_physio =====
@@ -1586,27 +1680,26 @@ class ChatbotEngine {
         if (idx < 0 || idx >= practitionerList.length) return 'Invalid practitioner selection. Reply with a number from the list.';
         data.selected_physio = practitionerList[idx];
         data.selection_step = 'choose_clinic';
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
+        await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
+        return await this.handleBookSoonest(session, '');
       }
 
-      if (data.selection_step === 'choose_physio') {
-        const reply = formatPaginatedList({
-          items: practitionerList,
-          formatFn: formatPhysioItem,
-          page,
-          pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More practitioners',
-          header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
-        }) + `\n\nReply with number. (0️⃣ Back)`;
-        return reply;
-      }
+      const reply = formatPaginatedList({
+        items: practitionerList,
+        formatFn: formatPhysioItem,
+        page,
+        pageSize: MAX_SLOT_ITEMS,
+        moreLabel: 'M. More practitioners',
+        header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
+      }) + `\n\nReply with number. (0️⃣ Back)`;
+      return reply;
     }
 
     // Paging in choose_clinic
     if (data.selection_step === 'choose_clinic' && (text === 'm' || text === 'more')) {
       data.clinic_page = (data.clinic_page || 0) + 1;
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-      text = '';
+      await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
+      return await this.handleBookSoonest(session, '');
     }
 
     // ===== choose_clinic → SELECT_SLOT =====
@@ -1621,54 +1714,15 @@ class ChatbotEngine {
         }
         data.clinic_list = clinics;
         data.clinic_page = 0;
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
+        await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
 
-        // NAV-only: auto-advance if exactly one clinic
         if (clinics.length === 1) {
-          if (clinics.length > 1) navPush(data, 'choose_clinic', { had_multiple_options: true });
-          else navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
+          navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
           data.selected_clinic = clinics[0];
-          await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-
-          const { from, to } = normalizeDateWindow();
-          const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
-            business_id: String(data.selected_clinic.id),
-            practitioner_id: String(data.selected_physio.id),
-            from,
-            to
-          });
-          const filtered = deduplicateSlots((raw || []).filter(s => String(s.appointment_type_id) === String(data.selected_appt_type.id)));
-
-          if (!filtered.length) {
-            data.no_slots_prompt = { context: 'soonest' };
-            await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-            return `No slots found for ${data.selected_appt_type?.name}.\n1. Try another clinic\n2. Try another physio\n3. Try another type\n\nReply 1, 2 or 3. (0️⃣ Back)`;
-          }
-
-          const slotData = {
-            slot_list: filtered,
-            slot_page: 0,
-            last_selection_flow: 'soonest',
-            prev_state_data: { selected_physio: data.selected_physio, selected_clinic: data.selected_clinic, selected_appt_type: data.selected_appt_type }
-          };
-          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
-
-          const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-          const reply = formatPaginatedList({
-            items: slotData.slot_list,
-            formatFn: (s, i) => { const dt = new Date(s.slot); return `${i}. ${dt.toLocaleString()}`; },
-            page: 0,
-            pageSize: MAX_SLOT_ITEMS,
-            moreLabel: 'M. More slots',
-            header
-          }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-          return reply;
-        }
-
-        // Record frame only when user will choose among multiple clinics
-        if (clinics.length > 1) {
-          navPush(data, 'choose_clinic', { had_multiple_options: true });
-          await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+          await syncLocal();
+        } else if (clinics.length > 1) {
+          navPush(data, 'choose_clinic', { had_multiple_options: true, auto: false });
+          await syncLocal();
         }
       }
 
@@ -1678,57 +1732,76 @@ class ChatbotEngine {
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
         if (idx < 0 || idx >= clinics.length) return 'Invalid clinic selection. Reply with a number from the list.';
-
         data.selected_clinic = clinics[idx];
-        const { from, to } = normalizeDateWindow();
-        const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
-          business_id: String(data.selected_clinic.id),
-          practitioner_id: String(data.selected_physio.id),
-          from,
-          to
-        });
-        const filtered = deduplicateSlots((raw || []).filter(s => String(s.appointment_type_id) === String(data.selected_appt_type.id)));
+        await syncLocal();
+      }
 
-        if (!filtered.length) {
-          data.no_slots_prompt = { context: 'soonest' };
-          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: JSON.stringify(data) });
-          return `No slots found for ${data.selected_appt_type?.name}.\n1. Try another clinic\n2. Try another physio\n3. Try another type\n\nReply 1, 2 or 3. (0️⃣ Back)`;
-        }
-
-        const slotData = {
-          slot_list: filtered,
-          slot_page: 0,
-          last_selection_flow: 'soonest',
-          prev_state_data: { selected_physio: data.selected_physio, selected_clinic: data.selected_clinic, selected_appt_type: data.selected_appt_type }
-        };
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
-
-        const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
+      if (!data.selected_clinic) {
         const reply = formatPaginatedList({
-          items: slotData.slot_list,
-          formatFn: (s, i) => { const dt = new Date(s.slot); return `${i}. ${dt.toLocaleString()}`; },
-          page: 0,
+          items: clinics,
+          formatFn: (c, i) => `${i}. ${c.business_name}`,
+          page,
           pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More slots',
-          header
-        }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
+          moreLabel: 'M. More clinics',
+          header: `Clinics for ${getPractitionerDisplayName(data.selected_physio)}:`
+        }) + `\n\nReply with number. (0️⃣ Back)`;
         return reply;
       }
 
+      const { from, to } = normalizeDateWindow();
+      const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+        business_id: String(data.selected_clinic.id),
+        practitioner_id: String(data.selected_physio.id),
+        from,
+        to
+      });
+
+      const targetNorm = data.selected_appt_type.norm_name || _norm(data.selected_appt_type.name);
+      const filtered = deduplicateSlots((raw || []).filter(s => _norm(s.appointment_type_name) === targetNorm));
+
+      if (!filtered.length) {
+        data.no_slots_prompt = { context: 'soonest' };
+        await syncLocal({ conversation_state: this.STATES.BOOK_SOONEST });
+        return `No slots found for ${data.selected_appt_type?.name}.\n1. Try another type\n2. Try another physio\n3. Try another clinic\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+      }
+
+      const slotData = {
+        slot_list: filtered,
+        slot_page: 0,
+        last_selection_flow: 'soonest',
+        prev_state_data: {
+          selected_physio: data.selected_physio,
+          selected_clinic: data.selected_clinic,
+          selected_appt_type: data.selected_appt_type
+        }
+      };
+
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
+
+      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply = formatPaginatedList({
-        items: clinics,
-        formatFn: (c, i) => `${i}. ${c.business_name}`,
-        page,
+        items: filtered,
+        formatFn: (s, i) => { const dt = new Date(s.slot); return `${i}. ${dt.toLocaleString()}`; },
+        page: 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More clinics',
-        header: `Clinics for ${getPractitionerDisplayName(data.selected_physio)}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+        moreLabel: 'M. More slots',
+        header
+      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
       return reply;
     }
 
-    // Fallback to main menu
-    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-    return await this.goToInteractiveMenu(session);
+    // Fallback → show type list again
+    const apptTypes = data.appointment_type_list || [];
+    const apptTypePage = data.appt_type_page || 0;
+    const reply = formatPaginatedList({
+      items: apptTypes,
+      formatFn: (a, i) => `${i}. ${a.name}`,
+      page: apptTypePage,
+      pageSize: MAX_SLOT_ITEMS,
+      moreLabel: 'M. More types',
+      header: 'Choose appointment type:'
+    }) + `\n\nReply with number. (0️⃣ Back)`;
+    return reply;
   }
 
   /**
