@@ -1314,6 +1314,7 @@ class ChatbotEngine {
     const text = incoming.toLowerCase();
     if (!data.navigation_chain) data.navigation_chain = [];
 
+    // Helpers already defined in this module
     const normName = (s) => (typeof normalizeTypeName === 'function'
       ? normalizeTypeName(s)
       : String(s || '')
@@ -1331,7 +1332,13 @@ class ChatbotEngine {
       else await this.sessionManager.updateSession(session.id, { data: session.data });
     };
 
-    // Back/Menu -> last multi-choice, else main menu
+    // Handle generic no-slots branching
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_HISTORY, this.handleBookHistory, incoming || '');
+      if (ret) return ret;
+    }
+
+    // Back/menu support to last multi-choice frame
     if (["0", "back", "menu"].includes(text)) {
       const { step, popped } = navBack(data);
       if (step) {
@@ -1345,18 +1352,19 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // ===== bootstrap from history (PAST ONLY, statusMode='both') =====
+    // ===== INIT: pull past bookings (statusMode='both') and build physio set =====
     if (!data.selection_step) {
       const patientId = session?.patient_id || data?.patient_id;
       if (!patientId) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: null });
         return 'Verify your details before booking from history.';
       }
-      // use same window the test relies on: past bookings, statusMode='both'
-      const nowISO = new Date().toISOString();
-      const fromISO = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString();
 
-      const past = await this.clinikoAPI.getBookingsByPatientId(String(patientId), {
+      const nowISO = new Date().toISOString();
+      const fromISO = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString(); // last ~120 days
+
+      // Critical: request PAST + BOTH statuses so true history works
+      const pastRows = await this.clinikoAPI.getBookingsByPatientId(String(patientId), {
         when: 'past',
         fromISO,
         toISO: nowISO,
@@ -1364,24 +1372,27 @@ class ChatbotEngine {
         statusMode: 'both'
       });
 
-      // Build distinct physios by most recent encounter
-      const byPrac = new Map(); // id -> { id, first_name, last_name, last_seen, last_clinic_id }
-      for (const a of past || []) {
+      // Collapse to distinct physios sorted by most recent seen
+      const byPrac = new Map(); // id -> { id, first_name, last_name, display_name, last_seen, last_clinic_id }
+      for (const a of pastRows || []) {
         const p = a.practitioner || {};
         const id = String(p.id || a.practitioner_id || '');
         if (!id) continue;
         const seen = a.starts_at || a.created_at || a.updated_at || new Date(0).toISOString();
         const businessId = String(a.business_id || a.business?.id || '');
-        if (!byPrac.has(id) || new Date(seen) > new Date(byPrac.get(id).last_seen)) {
+        const entry = byPrac.get(id);
+        if (!entry || new Date(seen) > new Date(entry.last_seen)) {
           byPrac.set(id, {
             id,
             first_name: p.first_name,
             last_name: p.last_name,
+            display_name: p.display_name,
             last_seen: seen,
             last_clinic_id: businessId
           });
         }
       }
+
       const physios = Array.from(byPrac.values()).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen));
       if (!physios.length) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
@@ -1390,6 +1401,7 @@ class ChatbotEngine {
 
       data.history_physio_list = physios;
       data.selection_step = 'choose_physio_from_history';
+
       const fwd = planForward(data, 'choose_physio_from_history', physios.length, () => {
         data.selected_physio = physios[0];
         data.selection_step = 'choose_type';
@@ -1410,6 +1422,7 @@ class ChatbotEngine {
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         return await this.handleBookHistory(session, '');
       }
+
       const reply = formatPaginatedList({
         items: list,
         formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p)}\n   Last seen: ${new Date(p.last_seen).toLocaleString()}`,
@@ -1421,22 +1434,23 @@ class ChatbotEngine {
       return reply;
     }
 
-    // ===== choose_type (unique names; exclude Initial/New) =====
+    // ===== choose_type (unique names for that physio; exclude Initial/New; name->ids mapping) =====
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.appointment_type_list)) {
-        const groups = await this.clinikoAPI.getPractitionersByClinic();
-        const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+        const physioId = String(data.selected_physio?.id || data.selected_physio);
+        const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physioId });
+
         const buckets = new Map(); // norm -> { displayName, ids:Set }
-        for (const t of allTypes || []) {
+        for (const t of types || []) {
           if (!t || !t.name) continue;
-          if (/UWC/i.test(t.name)) continue;
+          if (/UWC/i.test(t.name)) continue; // never show UWC
           const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
-          // exclude New/Initial types when booking from history
-          if (/\b(initial|new\s*clients?)\b/i.test(display)) continue;
+          if (/\b(initial|new\s*clients?)\b/i.test(display)) continue; // no "New/Initial" in history
           const n = normName(display);
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
           buckets.get(n).ids.add(String(t.id));
         }
+
         data.appointment_type_list = Array.from(buckets.values())
           .map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
           .sort((a, b) => a.name.localeCompare(b.name));
@@ -1474,7 +1488,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // ===== choose_clinic (exclude UWC; prefer last clinic used) =====
+    // ===== choose_clinic (clinics for that physio; exclude UWC; prefer last clinic) =====
     if (data.selection_step === 'choose_clinic') {
       if (!Array.isArray(data.clinic_list)) {
         const physioId = String(data.selected_physio?.id || data.selected_physio);
@@ -1483,7 +1497,7 @@ class ChatbotEngine {
         const clinics = [];
         for (const g of (groups || [])) {
           if (/UWC/i.test(g.clinic_name)) continue;
-          const found = (g.practitioners || []).some(p => `${p.id}` === physioId);
+          const found = (g.practitioners || []).some(p => String(p.id) === physioId);
           if (found) clinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
         clinics.sort((a, b) => (String(a.id) === lastClinicId ? -1 : String(b.id) === lastClinicId ? 1 : a.business_name.localeCompare(b.business_name)));
@@ -1526,7 +1540,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // ===== view_slots → SELECT_SLOT =====
+    // ===== view_slots -> SELECT_SLOT =====
     if (data.selection_step === 'view_slots') {
       const physioId = String(data.selected_physio?.id || data.selected_physio);
       const clinic = data.selected_clinic;
@@ -1542,13 +1556,11 @@ class ChatbotEngine {
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
 
       if (!slots.length) {
-        // No-slots options consistent with Soonest
         data.no_slots_prompt = { context: 'history' };
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         return `No available slots for that combination.\n\n1. Try another type\n2. Pick another physio\n3. Choose another clinic\n0. Back`;
       }
 
-      // Save and hand over to SELECT_SLOT
       const slotData = {
         slot_list: slots,
         slot_page: 0,
