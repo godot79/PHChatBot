@@ -355,7 +355,7 @@ class ClinikoAPI {
    * @param {string} patientId
    * @returns {Promise<Array>}
    */
-  async getBookingsByPatientId(patientId) {
+  async getBookingsByPatientIdOld(patientId) {
     try {
       const params = new URLSearchParams();
       params.append('q[]', `patient_id:=${patientId}`);
@@ -365,6 +365,111 @@ class ClinikoAPI {
       return data.individual_appointments || [];
     } catch (error) {
       this.logger.error(`getBookingsByPatientId failed for ${patientId}`);
+      return [];
+    }
+  }
+
+  /**
+   * List individual appointments for a patient with optional time window.
+   * Includes BOTH active and cancelled by default so true "history" works.
+   *
+   * Backward compatible inputs, but improved defaults:
+   *  - when: 'future' | 'past' | 'all' (default 'future')
+   *  - fromISO / toISO: optional ISO bounds (inclusive lower, exclusive upper)
+   *  - perPage: default 100
+   *  - statusMode: 'active' | 'cancelled' | 'both' | 'none' (default 'both')
+   *      'both' performs two queries (active + cancelled) and merges results.
+   *
+   * Examples:
+   *   // Past 60 days, ALL statuses, latest first
+   *   getBookingsByPatientId(pid, {
+   *     when: 'past',
+   *     fromISO: new Date(Date.now() - 60*24*60*60*1000).toISOString(),
+   *     toISO: new Date().toISOString(),
+   *     perPage: 100,
+   *   })
+   *
+   * @param {string} patientId
+   * @param {Object} [opts]
+   * @param {'future'|'past'|'all'} [opts.when='future']
+   * @param {string} [opts.fromISO]
+   * @param {string} [opts.toISO]
+   * @param {number} [opts.perPage=100]
+   * @param {'active'|'cancelled'|'both'|'none'} [opts.statusMode='both']
+   * @returns {Promise<Array>} individual_appointments
+   */
+  async getBookingsByPatientId(patientId, opts = {}) {
+    try {
+      const when = opts.when || 'future';
+      const perPage = Number.isFinite(opts.perPage) ? opts.perPage : 100;
+      const statusMode = (opts.statusMode || 'both').toLowerCase();
+
+      const nowISO = new Date().toISOString();
+
+      const buildParams = (cancelMode) => {
+        const p = new URLSearchParams();
+        p.append('q[]', `patient_id:=${patientId}`);
+
+        if (when === 'past') {
+          const toISO = opts.toISO || nowISO;
+          const fromISO = opts.fromISO || new Date(Date.now() - 90*24*60*60*1000).toISOString();
+          p.append('q[]', `starts_at:>=${fromISO}`);
+          p.append('q[]', `starts_at:<${toISO}`);
+          p.append('sort', 'starts_at:desc');
+        } else if (when === 'future') {
+          const fromISO = opts.fromISO || nowISO;
+          p.append('q[]', `starts_at:>=${fromISO}`);
+          p.append('sort', 'starts_at:asc');
+        } else {
+          if (opts.fromISO) p.append('q[]', `starts_at:>=${opts.fromISO}`);
+          if (opts.toISO)   p.append('q[]', `starts_at:<${opts.toISO}`);
+          p.append('sort', 'starts_at:asc');
+        }
+
+        // cancelled filter per Cliniko: use cancelled_at:? or cancelled_at:!?
+        if (cancelMode === 'cancelled') p.append('q[]', 'cancelled_at:?');
+        if (cancelMode === 'active')    p.append('q[]', 'cancelled_at:!?');
+
+        p.append('per_page', perPage);
+        return p;
+      };
+
+      const fetchOne = async (cancelMode) => {
+        const params = buildParams(cancelMode);
+        const url = `/individual_appointments?${params.toString()}`;
+        this.logger.debug(`GET ${url}`);
+        const data = await new SendMessage(url, {}).get();
+        return data.individual_appointments || [];
+      };
+
+      let rows = [];
+      if (statusMode === 'both') {
+        const [active, cancelled] = await Promise.all([
+          fetchOne('active'),
+          fetchOne('cancelled')
+        ]);
+        const map = new Map();
+        for (const r of [...active, ...cancelled]) map.set(r.id, r);
+        rows = Array.from(map.values());
+      } else if (statusMode === 'active') {
+        rows = await fetchOne('active');
+      } else if (statusMode === 'cancelled') {
+        rows = await fetchOne('cancelled');
+      } else {
+        // 'none' → whatever Cliniko defaults to
+        rows = await fetchOne('none');
+      }
+
+      // Ensure deterministic sort after merge
+      rows.sort((a, b) => {
+        const da = new Date(a.starts_at).getTime();
+        const db = new Date(b.starts_at).getTime();
+        return (when === 'past') ? (db - da) : (da - db);
+      });
+
+      return rows;
+    } catch (error) {
+      this.logger.error(`getBookingsByPatientId failed for ${patientId}`, { error: error?.response?.status || error?.message });
       return [];
     }
   }
