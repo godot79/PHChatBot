@@ -3424,44 +3424,57 @@ class ChatbotEngine {
   // ========== CANCEL WORKFLOW  ==========
 
   /**
-   * Handle appointment cancellation flow.
+   * List appointments eligible for cancellation.
+   * Only FUTURE + ACTIVE appointments are shown. Cancelled are excluded.
+   * Uses only uploaded helpers and ClinikoAPI.
+   *
    * @param {object} session
    * @param {string} message
+   * @returns {Promise<string>}
    */
   async handleCancelAppointmentState(session, message) {
     const patient_id = session.patient_id;
     if (!patient_id) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.VERIFY
-      });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY });
       return 'You need to be a registered patient to cancel appointments. Enter your email to verify your details first.';
     }
 
-    // Fetch and enrich all future appointments
-    let appts = await this.clinikoAPI.getBookingsByPatientId(patient_id);
-    let futureAppts = appts.filter(a => new Date(a.starts_at) > new Date());
+    // Fetch future ACTIVE appts only; defensive local filter
+    let appts = await this.clinikoAPI.getBookingsByPatientId(patient_id.toString(), {
+      when: 'future',
+      statusMode: 'active',
+      perPage: 100,
+    });
+    const now = new Date();
+    let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
       return 'No upcoming appointments found to cancel.\n\n' + await this.goToInteractiveMenu(session);
     }
+
     futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI);
+
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.cancel_appt_list = futureAppts;
+    data.selected_cancel_appt = undefined;
+    data.selected_cancel_appt_idx = undefined;
+    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
     if (futureAppts.length === 1) {
       data.selected_cancel_appt = futureAppts[0];
       data.selected_cancel_appt_idx = 0;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this._cancelPresentConfirmation(session, data, true);
-    } else {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.SELECT_APPOINTMENT_TO_CANCEL,
-        data: JSON.stringify(data)
-      });
-      const listText = futureAppts.map((appt, idx) =>
-        `${idx + 1}. ${appt._practitioner_display} — ${appt._appointment_type_display}\n   ${appt._display_dt}`
-      ).join('\n');
-      return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to cancel, or "0" to go back.`;
     }
+
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_APPOINTMENT_TO_CANCEL,
+      data: JSON.stringify(data)
+    });
+
+    const listText = futureAppts.map((appt, idx) =>
+      `${idx + 1}. ${appt._practitioner_display} — ${appt._appointment_type_display}\n   ${appt._display_dt}`
+    ).join('\n');
+    return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to cancel, or "0" to go back.`;
   }
 
   /**
@@ -3534,94 +3547,90 @@ class ChatbotEngine {
     const text = (message || '').trim().toLowerCase();
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
 
-    // Back or menu: drop selection and go back to menu
+    // Back/menu
     if (["0", "menu", "back"].includes(text)) {
-      delete data.cancel_appt_list;
-      delete data.selected_cancel_appt;
-      delete data.selected_cancel_appt_idx;
+      delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
 
-    // Require an explicit yes to proceed
+    // Require explicit yes
     if (text !== 'yes') {
       const appt = data.selected_cancel_appt;
-      const intro = appt
-        ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-        : '';
+      const intro = appt ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '';
       return `${intro}\nType "yes" to confirm cancellation, or "0" to go back.`;
     }
 
-    // Execute cancellation
     const appt = data.selected_cancel_appt;
     if (!appt || !appt.id) {
-      delete data.cancel_appt_list;
-      delete data.selected_cancel_appt;
-      delete data.selected_cancel_appt_idx;
+      delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
     }
 
-    const apptId = appt.id.toString();
-    const result = await this.clinikoAPI.cancelSpecificAppointment(apptId);
+    const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
 
-    // Clean state regardless of outcome
-    delete data.cancel_appt_list;
-    delete data.selected_cancel_appt;
-    delete data.selected_cancel_appt_idx;
+    delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
-    if (result && result.success) {
-      return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
-    }
-    return `❌ Could not cancel your appointment. ${result?.message || ''}` + `\n\n` + await this.goToInteractiveMenu(session);
+    if (result && result.success) return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
+    return `❌ Could not cancel your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
   }
 
   // ========== RESCHEDULE WORKFLOW  ==========
   /**
-   * Handle rescheduling flow: user selects which appointment to reschedule.
+   * List appointments eligible for rescheduling.
+   * Only FUTURE + ACTIVE appointments are shown. Cancelled are excluded.
+   * Uses only uploaded helpers and ClinikoAPI.
+   *
    * @param {object} session
    * @param {string} message
+   * @returns {Promise<string>}
    */
   async handleRescheduleAppointmentState(session, message) {
     const patient_id = session.patient_id;
     if (!patient_id) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.VERIFY
-      });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY });
       return 'You need to be a registered patient to reschedule appointments. Enter your email to verify your details first.';
     }
 
-    // Fetch and enrich all future appointments
-    let appts = await this.clinikoAPI.getBookingsByPatientId(patient_id);
-    let futureAppts = appts.filter(a => new Date(a.starts_at) > new Date());
+    // Fetch future ACTIVE appts only; defensive local filter
+    let appts = await this.clinikoAPI.getBookingsByPatientId(patient_id.toString(), {
+      when: 'future',
+      statusMode: 'active',
+      perPage: 100,
+    });
+    const now = new Date();
+    let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
       return 'No upcoming appointments found to reschedule.\n\n' + await this.goToInteractiveMenu(session);
     }
+
     futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI);
+
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.reschedule_appt_list = futureAppts;
+    data.selected_reschedule_appt = undefined;
+    data.selected_reschedule_appt_idx = undefined;
+    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
     if (futureAppts.length === 1) {
-      // Set selection in data and jump to downstream logic
       data.selected_reschedule_appt = futureAppts[0];
       data.selected_reschedule_appt_idx = 0;
-      await this.sessionManager.updateSession(session.id, {
-        data: JSON.stringify(data)
-      });
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this._reschedulePresentSlots(session, data, true);
-    } else {
-      // Multiple: show list and prompt for selection
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
-        data: JSON.stringify(data)
-      });
-      const listText = futureAppts.map((appt, idx) =>
-        `${idx + 1}. ${appt._practitioner_display} — ${appt._appointment_type_display}\n   ${appt._display_dt}`
-      ).join('\n');
-      return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to reschedule, or "0" to go back.`;
     }
-  } 
+
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
+      data: JSON.stringify(data)
+    });
+
+    const listText = futureAppts.map((appt, idx) =>
+      `${idx + 1}. ${appt._practitioner_display} — ${appt._appointment_type_display}\n   ${appt._display_dt}`
+    ).join('\n');
+    return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to reschedule, or "0" to go back.`;
+  }
 
   /**
    * Handle selection of which appointment to reschedule.
@@ -3719,11 +3728,9 @@ class ChatbotEngine {
   }
 
   /**
-   * Reschedule confirmation and PATCH execution.
-   * Mirrors existing flow. Fixes payload coercion and slot end time.
-   * - Coerces all ID fields to strings (Cliniko expects strings as used in bookAppointment).
-   * - Derives ends_at if slot does not provide it (defaults to +30min from starts_at).
-   * - Leaves prompts and navigation unchanged.
+   * Confirm new slot and execute reschedule (PATCH existing appointment).
+   * Coerces IDs to strings and guarantees ends_at when slot end is missing.
+   * Uses only uploaded helpers and ClinikoAPI.
    *
    * @param {object} session
    * @param {string} message
@@ -3736,14 +3743,11 @@ class ChatbotEngine {
     const availableTimes = data.available_times || [];
     let slot_page = data.slot_page || 0;
 
-    // Pagination for slots
+    // Pagination
     if (['m', 'more'].includes(text.toLowerCase())) {
       slot_page = slot_page + 1;
       data.slot_page = slot_page;
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.CONFIRM_RESCHEDULE,
-        data: JSON.stringify(data)
-      });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const slotList = formatPaginatedList({
         items: availableTimes,
         formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
@@ -3752,24 +3756,18 @@ class ChatbotEngine {
         moreLabel: 'M. More slots',
         header: 'Please choose a new slot:'
       });
-      const intro = appt
-        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`
-        : '';
+      const intro = appt ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n` : '';
       return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with the number of your chosen slot, "M" for more, or "0" to go back.`;
     }
 
     // Back
     if (['0', 'menu', 'back'].includes(text.toLowerCase())) {
-      delete data.reschedule_appt_list;
-      delete data.selected_reschedule_appt;
-      delete data.selected_reschedule_appt_idx;
-      delete data.available_times;
-      delete data.slot_page;
+      delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
 
-    // Parse slot selection
+    // Parse selection
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || !availableTimes[idx]) {
       return 'Invalid slot selection. Please reply with the number of your chosen slot, "M" for more, or "0" to go back.' +
@@ -3777,24 +3775,16 @@ class ChatbotEngine {
     }
 
     const slot = availableTimes[idx];
-
-    // Build payload using only existing helpers
     const appointment_type_id = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
     const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
     const patient_id = session.patient_id;
     const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
     const starts_at = slot.starts_at || slot.appointment_start || slot.slot;
     let ends_at = slot.ends_at || slot.appointment_end;
-    if (!ends_at && starts_at) {
-      ends_at = new Date(new Date(starts_at).getTime() + 30 * 60000).toISOString();
-    }
+    if (!ends_at && starts_at) ends_at = new Date(new Date(starts_at).getTime() + 30 * 60000).toISOString();
 
     if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
-      delete data.reschedule_appt_list;
-      delete data.selected_reschedule_appt;
-      delete data.selected_reschedule_appt_idx;
-      delete data.available_times;
-      delete data.slot_page;
+      delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.';
     }
@@ -3805,23 +3795,16 @@ class ChatbotEngine {
       patient_id: patient_id.toString(),
       practitioner_id: practitioner_id.toString(),
       starts_at,
-      ends_at
+      ends_at,
     };
 
-    const result = await this.clinikoAPI.updateIndividualAppointment(appt.id, payload);
+    const result = await this.clinikoAPI.updateIndividualAppointment(appt.id.toString(), payload);
 
-    // Clean state
-    delete data.reschedule_appt_list;
-    delete data.selected_reschedule_appt;
-    delete data.selected_reschedule_appt_idx;
-    delete data.available_times;
-    delete data.slot_page;
+    delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
-    if (result.success) {
-      return `✅ Your appointment has been rescheduled to:\n${new Date(starts_at).toLocaleString()}\n\n` + await this.goToInteractiveMenu(session);
-    }
-    return `❌ Could not reschedule your appointment. ${result.message || ''}\n\n` + await this.goToInteractiveMenu(session);
+    if (result && result.success) return `✅ Your appointment has been rescheduled to:\n${new Date(starts_at).toLocaleString()}\n\n` + await this.goToInteractiveMenu(session);
+    return `❌ Could not reschedule your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
   }
 
 
