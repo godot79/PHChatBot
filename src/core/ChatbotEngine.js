@@ -2088,7 +2088,6 @@ class ChatbotEngine {
    * @param {string} message
    * @returns {Promise<string>}
    */
-
   async handleBookSpecificDate(session, message) {
     const log = this.logger.child({ component: 'BookSpecificDate', sessionId: session?.id });
 
@@ -2099,14 +2098,15 @@ class ChatbotEngine {
     if (!data || typeof data !== 'object') data = {};
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    const incoming = String(message || '');
-    const text = incoming.trim().toLowerCase();
+    const textRaw = String(message || '');
+    const text = textRaw.trim().toLowerCase();
 
-    const sync = async (patch = {}) => {
-      await this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
-    };
+    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
 
-    // Normalizer used elsewhere in engine
+    // Local constants to avoid touching global config
+    const MAX_DATE_ITEMS = 5;   // per page
+    const MAX_DATE_PAGES = 2;   // total pages → 10 dates
+
     const normName = (s) => (typeof normalizeTypeName === 'function'
       ? normalizeTypeName(s)
       : String(s || '')
@@ -2117,7 +2117,7 @@ class ChatbotEngine {
           .toLowerCase()
           .trim());
 
-    // Back/Menu handling mirrors BookSoonest
+    // Back/menu mirrors BookSoonest
     if (text === '0' || text === 'back' || text === 'menu') {
       const { step, popped } = navBack(data);
       if (step) {
@@ -2131,17 +2131,15 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // ===== INIT → choose_date =====
+    // Init
     if (!data.selection_step) {
       data.selection_step = 'choose_date';
-      data.date_page = 0; // 0..(MAX_DATE_PAGES-1)
+      data.date_page = 0;
       await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
     }
 
-    // ===== choose_date (10 forward dates, 5 per page, exclude Sundays) =====
+    // ===== choose_date =====
     if (data.selection_step === 'choose_date') {
-      const page = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-
       // Build 10 forward date candidates from tomorrow, skipping Sundays
       const MAX_TOTAL = MAX_DATE_ITEMS * MAX_DATE_PAGES; // 10
       const candidates = [];
@@ -2149,20 +2147,26 @@ class ChatbotEngine {
       d.setHours(0, 0, 0, 0);
       d.setDate(d.getDate() + 1); // start tomorrow
       while (candidates.length < MAX_TOTAL) {
-        if (d.getDay() !== 0) { // 0 = Sunday
-          candidates.push(new Date(d));
-        }
+        if (d.getDay() !== 0) candidates.push(new Date(d)); // skip Sundays
         d.setDate(d.getDate() + 1);
       }
 
+      // Handle pagination command BEFORE computing page slice
+      if (/^m(ore)?$/.test(text)) {
+        const next = Math.min((Number(data.date_page) || 0) + 1, MAX_DATE_PAGES - 1);
+        if (next !== data.date_page) {
+          data.date_page = next;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        }
+        // Re-enter so `page` is recomputed for the new state
+        return await this.handleBookSpecificDate(session, '');
+      }
+
+      const page = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
       const start = page * MAX_DATE_ITEMS;
       const pageItems = candidates.slice(start, start + MAX_DATE_ITEMS);
 
-      if (/^m(ore)?$/.test(text)) {
-        if (page < (MAX_DATE_PAGES - 1)) data.date_page = page + 1; // advance one page
-        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        // fall through to render
-      } else if (/^\d+$/.test(text)) {
+      if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
         const picked = pageItems[idx];
         if (picked) {
@@ -2178,8 +2182,8 @@ class ChatbotEngine {
       const moreLabel = page < (MAX_DATE_PAGES - 1) ? 'M. More dates' : null;
       const reply = formatPaginatedList({
         items: pageItems,
-        formatFn: (d, i) => `${i}. ${d.toLocaleDateString()}`,
-        page: 0,
+        formatFn: (dd, i) => `${i}. ${dd.toLocaleDateString()}`,
+        page: 0, // rendering a fixed 5-item slice
         pageSize: pageItems.length,
         moreLabel,
         header
@@ -2187,12 +2191,12 @@ class ChatbotEngine {
       return reply;
     }
 
-    // ===== choose_type (unique type-name buckets across practitioners) =====
+    // ===== choose_type =====
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.appointment_type_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
-        const buckets = new Map(); // norm -> { display, ids:Set }
+        const buckets = new Map();
         for (const t of allTypes || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name)) continue;
@@ -2205,7 +2209,7 @@ class ChatbotEngine {
           .map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
           .sort((a, b) => a.name.localeCompare(b.name));
         data.appt_type_name_to_ids_norm = Object.fromEntries((data.appointment_type_list || []).map(x => [x.norm_name, x.ids]));
-        await sync();
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
       if (/^\d+$/.test(text)) {
@@ -2231,7 +2235,7 @@ class ChatbotEngine {
       return replyTypes;
     }
 
-    // ===== choose_physio (offers chosen NAME somewhere) =====
+    // ===== choose_physio =====
     if (data.selection_step === 'choose_physio') {
       if (!Array.isArray(data.practitioner_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
@@ -2270,7 +2274,7 @@ class ChatbotEngine {
       return replyPhys;
     }
 
-    // ===== choose_clinic (for that physio; exclude UWC) =====
+    // ===== choose_clinic =====
     if (data.selection_step === 'choose_clinic') {
       if (!Array.isArray(data.clinic_list)) {
         const physId = String(data.selected_physio?.id || data.selected_physio);
@@ -2278,9 +2282,7 @@ class ChatbotEngine {
         const clinics = [];
         for (const g of groups || []) {
           if (/UWC/i.test(g.clinic_name)) continue;
-          if ((g.practitioners || []).some(p => `${p.id}` === physId)) {
-            clinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
-          }
+          if ((g.practitioners || []).some(p => `${p.id}` === physId)) clinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
         data.clinic_list = clinics;
         data.clinic_page = 0;
@@ -2307,7 +2309,7 @@ class ChatbotEngine {
 
       const replyClinics = formatPaginatedList({
         items: data.clinic_list || [],
-        formatFn: (c, i) => `${i}. ${c.business_name}`,
+        formatFn: (c, i) => `${i}. ${getBusinessDisplayName(c)}`,
         page: data.clinic_page || 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More clinics',
@@ -2316,7 +2318,7 @@ class ChatbotEngine {
       return replyClinics;
     }
 
-    // ===== view_slots for that exact date → SELECT_SLOT =====
+    // ===== view_slots on that date → SELECT_SLOT =====
     if (data.selection_step === 'view_slots') {
       const date = data.selected_date; // YYYY-MM-DD
       const from = `${date}T00:00:00Z`;
@@ -2344,7 +2346,7 @@ class ChatbotEngine {
       };
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic?.business_name} on ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
+      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} on ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
       const reply = formatPaginatedList({
         items: slots,
         formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
@@ -2356,7 +2358,7 @@ class ChatbotEngine {
       return reply;
     }
 
-    // Fallback to menu
+    // Fallback
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
     return await this.goToInteractiveMenu(session);
   }
