@@ -370,40 +370,23 @@ class ClinikoAPI {
   }
 
   /**
-   * List individual appointments for a patient with optional time window.
-   * Includes BOTH active and cancelled by default so true "history" works.
-   *
-   * Backward compatible inputs, but improved defaults:
-   *  - when: 'future' | 'past' | 'all' (default 'future')
-   *  - fromISO / toISO: optional ISO bounds (inclusive lower, exclusive upper)
-   *  - perPage: default 100
-   *  - statusMode: 'active' | 'cancelled' | 'both' | 'none' (default 'both')
-   *      'both' performs two queries (active + cancelled) and merges results.
-   *
-   * Examples:
-   *   // Past 60 days, ALL statuses, latest first
-   *   getBookingsByPatientId(pid, {
-   *     when: 'past',
-   *     fromISO: new Date(Date.now() - 60*24*60*60*1000).toISOString(),
-   *     toISO: new Date().toISOString(),
-   *     perPage: 100,
-   *   })
+   * List individual appointments for a patient within an optional time window.
+   * Supports active, cancelled, or both. Returns merged, de-duplicated, sorted rows.
    *
    * @param {string} patientId
    * @param {Object} [opts]
-   * @param {'future'|'past'|'all'} [opts.when='future']
-   * @param {string} [opts.fromISO]
-   * @param {string} [opts.toISO]
-   * @param {number} [opts.perPage=100]
+   * @param {'past'|'future'|'all'} [opts.when='future']
+   * @param {string} [opts.fromISO]  // inclusive
+   * @param {string} [opts.toISO]    // exclusive
+   * @param {number} [opts.perPage=100] // will be clamped to [1..100]
    * @param {'active'|'cancelled'|'both'|'none'} [opts.statusMode='both']
-   * @returns {Promise<Array>} individual_appointments
+   * @returns {Promise<Array>} individual_appointments[]
    */
   async getBookingsByPatientId(patientId, opts = {}) {
     try {
-      const when = opts.when || 'future';
-      const perPage = Number.isFinite(opts.perPage) ? opts.perPage : 100;
-      const statusMode = (opts.statusMode || 'both').toLowerCase();
-
+      const when = String(opts.when || 'future').toLowerCase();
+      const perPage = Math.max(1, Math.min(100, Number.isFinite(opts.perPage) ? opts.perPage : 100)); // Cliniko max = 100
+      const statusMode = String(opts.statusMode || 'both').toLowerCase();
       const nowISO = new Date().toISOString();
 
       const buildParams = (cancelMode) => {
@@ -412,42 +395,50 @@ class ClinikoAPI {
 
         if (when === 'past') {
           const toISO = opts.toISO || nowISO;
-          const fromISO = opts.fromISO || new Date(Date.now() - 90*24*60*60*1000).toISOString();
+          const fromISO = opts.fromISO || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
           p.append('q[]', `starts_at:>=${fromISO}`);
           p.append('q[]', `starts_at:<${toISO}`);
           p.append('sort', 'starts_at:desc');
         } else if (when === 'future') {
           const fromISO = opts.fromISO || nowISO;
+          if (opts.toISO) p.append('q[]', `starts_at:<${opts.toISO}`);
           p.append('q[]', `starts_at:>=${fromISO}`);
           p.append('sort', 'starts_at:asc');
-        } else {
+        } else { // 'all'
           if (opts.fromISO) p.append('q[]', `starts_at:>=${opts.fromISO}`);
           if (opts.toISO)   p.append('q[]', `starts_at:<${opts.toISO}`);
           p.append('sort', 'starts_at:asc');
         }
 
-        // cancelled filter per Cliniko: use cancelled_at:? or cancelled_at:!?
+        // cancelled_at operators per Cliniko:
+        //   '?'  => IS NOT NULL  (cancelled)
+        //   '!?' => IS NULL      (active)
         if (cancelMode === 'cancelled') p.append('q[]', 'cancelled_at:?');
         if (cancelMode === 'active')    p.append('q[]', 'cancelled_at:!?');
 
-        p.append('per_page', perPage);
+        p.append('per_page', String(perPage));
         return p;
       };
 
       const fetchOne = async (cancelMode) => {
         const params = buildParams(cancelMode);
         const url = `/individual_appointments?${params.toString()}`;
-        this.logger.debug(`GET ${url}`);
+        this.logger.debug(url);
         const data = await new SendMessage(url, {}).get();
-        return data.individual_appointments || [];
+        return (data && data.individual_appointments) ? data.individual_appointments : [];
       };
 
       let rows = [];
       if (statusMode === 'both') {
-        const [active, cancelled] = await Promise.all([
-          fetchOne('active'),
-          fetchOne('cancelled')
-        ]);
+        // Sequential to avoid transient 4xx surfacing as double-fail
+        const active = await fetchOne('active').catch(() => {
+          this.logger.error(`getBookingsByPatientId(active) failed for ${patientId}`);
+          return [];
+        });
+        const cancelled = await fetchOne('cancelled').catch(() => {
+          this.logger.error(`getBookingsByPatientId(cancelled) failed for ${patientId}`);
+          return [];
+        });
         const map = new Map();
         for (const r of [...active, ...cancelled]) map.set(r.id, r);
         rows = Array.from(map.values());
@@ -456,11 +447,90 @@ class ClinikoAPI {
       } else if (statusMode === 'cancelled') {
         rows = await fetchOne('cancelled');
       } else {
-        // 'none' → whatever Cliniko defaults to
+        rows = await fetchOne('none');
+      }
+      // Deterministic sort
+      rows.sort((a, b) => {
+        const da = new Date(a.starts_at).getTime();
+        const db = new Date(b.starts_at).getTime();
+        return (when === 'past') ? (db - da) : (da - db);
+      });
+
+      return rows;
+    } catch (error) {
+      this.logger.error(`getBookingsByPatientId failed for ${patientId}`, { error: error?.response?.status || error?.message });
+      return [];
+    }
+  }
+  async getBookingsByPatientId(patientId, opts = {}) {
+    try {
+      const when = String(opts.when || 'future').toLowerCase();
+      const perPage = Math.max(1, Math.min(100, Number.isFinite(opts.perPage) ? opts.perPage : 100)); // Cliniko max = 100
+      const statusMode = String(opts.statusMode || 'both').toLowerCase();
+      const nowISO = new Date().toISOString();
+
+      const buildParams = (cancelMode) => {
+        const p = new URLSearchParams();
+        p.append('q[]', `patient_id:=${patientId}`);
+
+        if (when === 'past') {
+          const toISO = opts.toISO || nowISO;
+          const fromISO = opts.fromISO || new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+          p.append('q[]', `starts_at:>=${fromISO}`);
+          p.append('q[]', `starts_at:<${toISO}`);
+          p.append('sort', 'starts_at:desc');
+        } else if (when === 'future') {
+          const fromISO = opts.fromISO || nowISO;
+          if (opts.toISO) p.append('q[]', `starts_at:<${opts.toISO}`);
+          p.append('q[]', `starts_at:>=${fromISO}`);
+          p.append('sort', 'starts_at:asc');
+        } else { // 'all'
+          if (opts.fromISO) p.append('q[]', `starts_at:>=${opts.fromISO}`);
+          if (opts.toISO)   p.append('q[]', `starts_at:<${opts.toISO}`);
+          p.append('sort', 'starts_at:asc');
+        }
+
+        // cancelled_at operators per Cliniko:
+        //   '?'  => IS NOT NULL  (cancelled)
+        //   '!?' => IS NULL      (active)
+        if (cancelMode === 'cancelled') p.append('q[]', 'cancelled_at:?');
+        if (cancelMode === 'active')    p.append('q[]', 'cancelled_at:!?');
+
+        p.append('per_page', String(perPage));
+        return p;
+      };
+
+      const fetchOne = async (cancelMode) => {
+        const params = buildParams(cancelMode);
+        const url = `/individual_appointments?${params.toString()}`;
+        this.logger.debug(url);
+        const data = await new SendMessage(url, {}).get();
+        return (data && data.individual_appointments) ? data.individual_appointments : [];
+      };
+
+      let rows = [];
+      if (statusMode === 'both') {
+        // Sequential to avoid transient 4xx surfacing as double-fail
+        const active = await fetchOne('active').catch(() => {
+          this.logger.error(`getBookingsByPatientId(active) failed for ${patientId}`);
+          return [];
+        });
+        const cancelled = await fetchOne('cancelled').catch(() => {
+          this.logger.error(`getBookingsByPatientId(cancelled) failed for ${patientId}`);
+          return [];
+        });
+        const map = new Map();
+        for (const r of [...active, ...cancelled]) map.set(r.id, r);
+        rows = Array.from(map.values());
+      } else if (statusMode === 'active') {
+        rows = await fetchOne('active');
+      } else if (statusMode === 'cancelled') {
+        rows = await fetchOne('cancelled');
+      } else {
         rows = await fetchOne('none');
       }
 
-      // Ensure deterministic sort after merge
+      // Deterministic sort
       rows.sort((a, b) => {
         const da = new Date(a.starts_at).getTime();
         const db = new Date(b.starts_at).getTime();
