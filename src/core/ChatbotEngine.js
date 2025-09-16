@@ -2890,7 +2890,7 @@ class ChatbotEngine {
         data.slot_list = slots;
         data.slot_page = 0;
 
-        const fwd = planForward(data, 'view_slots', slots.length, ()n        => { data.selected_slot = slots[0]; });
+        const fwd = planForward(data, 'view_slots', slots.length, () => { data.selected_slot = slots[0]; });
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
         if (fwd.advanced && data.selected_slot) {
           // Hand off to SELECT_SLOT like other flows
