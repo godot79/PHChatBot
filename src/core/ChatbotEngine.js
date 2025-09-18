@@ -2520,7 +2520,7 @@ class ChatbotEngine {
         data.physio_page = (data.physio_page || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       } else if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.physio_page || 0) * MAX_LIST_ITEMS);
+        const idx = parseInt(text, 10) - 1 + ((data.physio_page || 0) * MAX_SLOT_ITEMS);
         const list = data.physio_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2535,7 +2535,7 @@ class ChatbotEngine {
         items: data.physio_list || [],
         formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p)} • ${getBusinessDisplayName(p._clinic)}`,
         page: data.physio_page || 0,
-        pageSize: MAX_LIST_ITEMS,
+        pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More',
         header: 'Choose a physio:'
       }) + `\n\n0️⃣ Back`;
@@ -2560,7 +2560,7 @@ class ChatbotEngine {
         data.type_page = (data.type_page || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       } else if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.type_page || 0) * MAX_LIST_ITEMS);
+        const idx = parseInt(text, 10) - 1 + ((data.type_page || 0) * MAX_SLOT_ITEMS);
         const list = data.type_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_appt_type = list[idx];
@@ -2575,7 +2575,7 @@ class ChatbotEngine {
         items: data.type_list || [],
         formatFn: (t, i) => `${i}. ${getAppointmentTypeDisplayName(t)}`,
         page: data.type_page || 0,
-        pageSize: MAX_LIST_ITEMS,
+        pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More',
         header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}`
       }) + `\n\n0️⃣ Back`;
@@ -2607,7 +2607,7 @@ class ChatbotEngine {
         data.clinic_page = (data.clinic_page || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       } else if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_LIST_ITEMS);
+        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
         const list = data.clinic_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
@@ -2622,7 +2622,7 @@ class ChatbotEngine {
         items: data.clinic_list || [],
         formatFn: (c, i) => `${i}. ${getBusinessDisplayName(c)}`,
         page: data.clinic_page || 0,
-        pageSize: MAX_LIST_ITEMS,
+        pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More clinics',
         header: `Choose clinic for ${getPractitionerDisplayName(data.selected_physio)}`
       }) + `\n\n0️⃣ Back`;
