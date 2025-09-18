@@ -2827,11 +2827,9 @@ class ChatbotEngine {
           if (/UWC/i.test(g.clinic_name)) continue;
           clinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
-        // Region filtering, if your engine sets data.region; otherwise leave as-is
         data.clinic_list = clinics;
         data.clinic_page = 0;
 
-        // Auto-advance when only one clinic → next step must be CHOOSE_TYPE
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_clinic', clinics.length, () => {
           data.selected_clinic = clinics[0];
           data.selection_step = 'choose_type';
@@ -2840,13 +2838,11 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
-      // Pagination forward
       if (/^m(ore)?$/i.test(text)) {
         data.clinic_page = (Number(data.clinic_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
 
-      // Select clinic
       if (numStr) {
         const idx = parseInt(numStr, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
         const list = data.clinic_list || [];
@@ -2871,29 +2867,28 @@ class ChatbotEngine {
     }
 
     // =====================================================================
-    // choose_type — appointment types available at selected clinic; auto-advance
+    // choose_type — build types by scanning practitioners in the chosen clinic
     // =====================================================================
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.appointment_type_list)) {
-        // Fetch all types then filter to those available for any practitioner at the chosen clinic
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const clinicId = String(data.selected_clinic?.id || data.selected_clinic || '');
         const inClinic = (groups || []).find(g => String(g.clinic_id) === clinicId);
-        const pracIds = new Set((inClinic?.practitioners || []).map(p => String(p.id)));
-        const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+        const pracList = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
 
         const buckets = new Map(); // norm -> { display, ids:Set }
-        for (const t of allTypes || []) {
-          if (!t || !t.name) continue;
-          if (/UWC/i.test(t.name)) continue;
-          // Keep the type only if someone in this clinic offers it
-          const offeredBy = (t.practitioner_ids || t.practitioners || []).map(x => String(x.id || x)).some(id => pracIds.has(String(id)));
-          if (!offeredBy) continue;
-          const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
-          const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { display, ids: new Set() });
-          buckets.get(n).ids.add(String(t.id));
+        for (const p of pracList) {
+          const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) });
+          for (const t of types || []) {
+            if (!t || !t.name) continue;
+            if (/UWC/i.test(t.name)) continue;
+            const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
+            const n = normName(display);
+            if (!buckets.has(n)) buckets.set(n, { display, ids: new Set() });
+            buckets.get(n).ids.add(String(t.id));
+          }
         }
+
         data.appointment_type_list = Array.from(buckets.values())
           .map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
           .sort((a, b) => a.name.localeCompare(b.name));
