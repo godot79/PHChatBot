@@ -2090,21 +2090,36 @@ class ChatbotEngine {
    * @param {string} message
    * @returns {Promise<string>}
    */
-
   async handleBookSpecificDate(session, message) {
+    const log = this.logger.child({ component: 'BookSpecificDate', sessionId: session?.id });
+
     // ----- safe session data load -----
     let data;
     try { data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {}); } catch { data = {}; }
     if (!data || typeof data !== 'object') data = {};
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    const textRaw = String(message || '');
-    const text = textRaw.trim().toLowerCase();
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const textRaw = String(message || '').trim();
+    const text = textRaw.toLowerCase();
 
-    const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
+    const sync = async (state) => {
+      if (state && state.conversation_state) session.conversation_state = state.conversation_state;
+      session.data = JSON.stringify(data);
+      if (state) await this.sessionManager.updateSession(session.id, { ...state, data: session.data });
+      else await this.sessionManager.updateSession(session.id, { data: session.data });
+    };
 
-    // ----- global Back/Menu handling (mimics Soonest) -----
+    const normName = (s) => (typeof normalizeTypeName === 'function'
+      ? normalizeTypeName(s)
+      : String(s || '')
+          .replace(/\s+/g, ' ')
+          .replace(/([A-Za-z])\(/g, '$1 (')
+          .replace(/\s+\)/g, ')')
+          .replace(/[\u2010-\u2015]/g, '-')
+          .toLowerCase()
+          .trim());
+
+    // ----- Back/Menu handling aligned with Soonest -----
     if (text === 'back' || text === 'menu') {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
       return await this.goToInteractiveMenu(session);
@@ -2147,7 +2162,7 @@ class ChatbotEngine {
         d.setDate(d.getDate() + 1);
       }
 
-      // Back/menu: '0' pages back; 'back'/'menu' exits to main menu
+      // '0' pages back; on first page exits to menu
       if (text === '0') {
         const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
         if (cur > 0) {
@@ -2159,7 +2174,7 @@ class ChatbotEngine {
         }
       }
 
-      // Pagination forward, no recursion
+      // 'M' forwards a page, no recursion
       if (/^m(ore)?$/i.test(text)) {
         const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
         if (cur < (MAX_DATE_PAGES - 1)) {
@@ -2172,9 +2187,12 @@ class ChatbotEngine {
       const start = page * MAX_DATE_ITEMS;
       const pageItems = candidates.slice(start, start + MAX_DATE_ITEMS);
 
-      // Numeric choice → capture date then proceed
-      if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1; // 0..4 per page
+      // Robust numeric parse (handles stray ZWSP or punctuation)
+      const numStr = text.replace(/[^0-9]/g, '');
+      const isNumberInput = numStr.length > 0 && /^(?:[0-9]{1,2})$/.test(numStr);
+
+      if (isNumberInput) {
+        const idx = parseInt(numStr, 10) - 1; // 0..4 per page
         const picked = pageItems[idx];
         if (picked) {
           data.selected_date = picked.toISOString().slice(0, 10); // YYYY-MM-DD
@@ -2197,6 +2215,19 @@ class ChatbotEngine {
     // choose_type — unique names; exclude UWC; auto‑advance with planForward
     // =====================================================================
     if (data.selection_step === 'choose_type') {
+      if (text === '0') {
+        const { step, popped } = navBack(data);
+        if (step) {
+          clearForwardStateForPopped(data, popped);
+          data.selection_step = step;
+          data.suppress_auto_advance = true;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          return await this.handleBookSpecificDate(session, '');
+        }
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
+        return await this.goToInteractiveMenu(session);
+      }
+
       if (!Array.isArray(data.appointment_type_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
@@ -2222,8 +2253,10 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookSpecificDate(session, '');
       }
 
-      if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
+      // Robust numeric parse
+      const numStr = text.replace(/[^0-9]/g, '');
+      if (numStr) {
+        const idx = parseInt(numStr, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_appt_type = list[idx];
@@ -2249,10 +2282,23 @@ class ChatbotEngine {
     // choose_physio — auto‑advance with planForward; navPush on select
     // =====================================================================
     if (data.selection_step === 'choose_physio') {
+      if (text === '0') {
+        const { step, popped } = navBack(data);
+        if (step) {
+          clearForwardStateForPopped(data, popped);
+          data.selection_step = step;
+          data.suppress_auto_advance = true;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          return await this.handleBookSpecificDate(session, '');
+        }
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
+        return await this.goToInteractiveMenu(session);
+      }
+
       if (!Array.isArray(data.practitioner_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const practitioners = await getPractitionersForTypeName(groups || [], this.clinikoAPI, data.selected_appt_type?.name || '');
-        data.practitioner_list = practitioners.map(p => ({ id: String(p.id), ...p }));
+        data.practitioner_list = (practitioners || []).map(p => ({ id: String(p.id), ...p }));
         data.practitioner_page = 0;
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_physio', data.practitioner_list.length, () => {
@@ -2263,8 +2309,9 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookSpecificDate(session, '');
       }
 
-      if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+      const numStr = text.replace(/[^0-9]/g, '');
+      if (numStr) {
+        const idx = parseInt(numStr, 10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2290,6 +2337,19 @@ class ChatbotEngine {
     // choose_clinic — exclude UWC; auto‑advance with planForward; navPush on select
     // =====================================================================
     if (data.selection_step === 'choose_clinic') {
+      if (text === '0') {
+        const { step, popped } = navBack(data);
+        if (step) {
+          clearForwardStateForPopped(data, popped);
+          data.selection_step = step;
+          data.suppress_auto_advance = true;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          return await this.handleBookSpecificDate(session, '');
+        }
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
+        return await this.goToInteractiveMenu(session);
+      }
+
       if (!Array.isArray(data.clinic_list)) {
         const physId = String(data.selected_physio?.id || data.selected_physio);
         const groups = await this.clinikoAPI.getPractitionersByClinic();
@@ -2309,8 +2369,9 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookSpecificDate(session, '');
       }
 
-      if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+      const numStr = text.replace(/[^0-9]/g, '');
+      if (numStr) {
+        const idx = parseInt(numStr, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
         const list = data.clinic_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
@@ -2333,7 +2394,7 @@ class ChatbotEngine {
     }
 
     // =====================================================================
-    // view_slots — same as before; jumps to SELECT_SLOT
+    // view_slots — fetch slots for this date/type/clinic/physio → SELECT_SLOT
     // =====================================================================
     if (data.selection_step === 'view_slots') {
       const date = data.selected_date; // YYYY-MM-DD
