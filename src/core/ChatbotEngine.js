@@ -2985,9 +2985,7 @@ class ChatbotEngine {
     // view_slots — fetch slots for this clinic/type/physio → SELECT_SLOT
     // =====================================================================
     if (data.selection_step === 'view_slots') {
-      const date = new Date();
-      const from = new Date(date.getFullYear(), date.getMonth(), date.getDate()).toISOString();
-      const to = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59).toISOString();
+      const { from, to } = normalizeDateWindow(); // always tomorrow → tomorrow+span
 
       const businessId = String(data.selected_clinic?.id || data.selected_clinic);
       const physioId = String(data.selected_physio?.id || data.selected_physio);
