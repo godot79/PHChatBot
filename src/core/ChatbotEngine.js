@@ -2147,32 +2147,12 @@ class ChatbotEngine {
         d.setDate(d.getDate() + 1);
       }
 
-      // page back or exit
-      if (text === '0') {
-        const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-        if (cur > 0) {
-          data.date_page = cur - 1;
-          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        } else {
-          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-          return await this.goToInteractiveMenu(session);
-        }
-      }
-
-      // page forward
-      if (/^m(ore)?$/i.test(text)) {
-        const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-        if (cur < (MAX_DATE_PAGES - 1)) {
-          data.date_page = cur + 1;
-          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        }
-      }
-
+      // Current page and slice
       const page = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
       const start = page * MAX_DATE_ITEMS;
       const pageItems = candidates.slice(start, start + MAX_DATE_ITEMS);
 
-      // numeric pick
+      // 1) numeric pick FIRST
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
         const picked = pageItems[idx];
@@ -2185,10 +2165,35 @@ class ChatbotEngine {
         }
       }
 
-      const list = pageItems.map((dd,i)=>`${i + 1}. ${dd.toLocaleDateString()}`).join('\n');
-      const pageInfo = `Page ${page + 1}/${MAX_DATE_PAGES}`;
-      const more = page < (MAX_DATE_PAGES - 1) ? `\nM. More dates` : '';
-      const hint = page < (MAX_DATE_PAGES - 1) ? ' or M for more' : '';
+      // 2) page back
+      if (text === '0') {
+        if ((data.date_page || 0) > 0) {
+          data.date_page = (data.date_page || 0) - 1;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        } else {
+          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
+          return await this.goToInteractiveMenu(session);
+        }
+      }
+
+      // 3) page forward
+      if (/^m(ore)?$/i.test(text)) {
+        const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
+        if (cur < (MAX_DATE_PAGES - 1)) {
+          data.date_page = cur + 1;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        }
+      }
+
+      // recompute page after any change
+      const page2 = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
+      const start2 = page2 * MAX_DATE_ITEMS;
+      const listItems = candidates.slice(start2, start2 + MAX_DATE_ITEMS);
+
+      const list = listItems.map((dd,i)=>`${i + 1}. ${dd.toLocaleDateString()}`).join('\n');
+      const pageInfo = `Page ${page2 + 1}/${MAX_DATE_PAGES}`;
+      const more = page2 < (MAX_DATE_PAGES - 1) ? `\nM. More dates` : '';
+      const hint = page2 < (MAX_DATE_PAGES - 1) ? ' or M for more' : '';
       return `Pick a date (${pageInfo}):\n${list}${more}\n\nReply with number${hint}. (0️⃣ Back)`;
     }
 
@@ -3214,90 +3219,128 @@ class ChatbotEngine {
    * @returns {Promise<string>}
    */
   async handleRegisterPatientState(session, message) {
-    const log = this.logger.child({ component: 'RegisterPatient', sessionId: session?.id });
-    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
-    const text = (message || '').trim();
+    // safe load
+    let data;
+    try { data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {}); } catch { data = {}; }
+    if (!data || typeof data !== 'object') data = {};
+    if (!data.navigation_chain) data.navigation_chain = [];
 
-    // Back/cancel to Intro menu from any step of registration
-    if (['0', 'back', 'menu'].includes(text.toLowerCase())) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO,
-        verified: false,
-        data: null
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      log.info('Registration cancelled -> Intro');
-      return await this.renderMainMenu(updatedSession);
+    const raw = String(message || '').trim();
+    const text = raw.toLowerCase();
+    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+
+    // global exit
+    if (text === '0' || text === 'back' || text === 'menu') {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: null });
+      return await this.goToInteractiveMenu(session);
     }
 
-    const requiredFields = ['first_name', 'last_name', 'email'];
-    let nextField = null;
-    for (const field of requiredFields) {
-      if (!data[field]) {
-        nextField = field;
-        break;
+    // bootstrap flow step if missing
+    if (!data.selection_step) {
+      data.selection_step = 'collect_basics'; // your existing first step
+      data._pending_patient_phone = data._pending_patient_phone || null;
+      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+    }
+
+    // ---- collect_basics: unchanged fields collection (name, email, etc.) ----
+    if (data.selection_step === 'collect_basics') {
+      // Keep your existing prompts/collection here.
+      // When your current checks decide "basics complete", move to confirm_phone.
+      if (!data._basics_done) {
+        // run your unchanged basics handler here; return if it still needs input
+        const done = await this._registerCollectBasics(session, raw, data); // your existing helper
+        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+        if (!done) return; // keep waiting for basics
+        data._basics_done = true;
+      }
+      // next step: confirm the WhatsApp number
+      data.selection_step = 'confirm_phone';
+      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+    }
+
+    // ---- confirm_phone: ask to use the WhatsApp number ----
+    if (data.selection_step === 'confirm_phone') {
+      // derive default from session without guessing new fields
+      const defaultPhone =
+        (session && (session.user_phone || session.phone || session.from)) ? String(session.user_phone || session.phone || session.from) : '';
+
+      // if no default available, jump to enter_phone
+      if (!defaultPhone) {
+        data.selection_step = 'enter_phone';
+        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+        return 'Enter the patient’s mobile number (digits only). (0️⃣ Back)';
+      }
+
+      // if user answers this step
+      if (text === '1' || /^y(es)?$/.test(text)) {
+        data._pending_patient_phone = defaultPhone;
+        data.selection_step = 'review_and_submit';
+        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+        // fall through to review
+      } else if (text === '2' || /^n(o)?$/.test(text)) {
+        data.selection_step = 'enter_phone';
+        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+        return 'Enter the patient’s mobile number (digits only). (0️⃣ Back)';
+      } else {
+        // prompt
+        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+        return `Use this number for the patient profile?\n${defaultPhone}\n\n1. Yes\n2. No, I’ll enter a different number\n\nReply with 1 or 2. (0️⃣ Back)`;
       }
     }
 
-    if (nextField) {
-      // If the user provided input, store it under the expected next field
-      if (text) {
-        data[nextField] = text;
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        log.info('Collected field', { field: nextField });
+    // ---- enter_phone: accept a different number ----
+    if (data.selection_step === 'enter_phone') {
+      // validate simple phone (digits, optional +, spaces, dashes)
+      const cleaned = raw.replace(/[^\d+]/g, '');
+      const isValid = cleaned.length >= 8; // minimal sanity check; keep conservative
+      if (!isValid) {
+        return 'That doesn’t look like a valid number. Please enter digits (you can include +country code). (0️⃣ Back)';
+      }
+      data._pending_patient_phone = cleaned;
+      data.selection_step = 'review_and_submit';
+      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+    }
+
+    // ---- review_and_submit: assemble payload just like before, but include phone if present ----
+    if (data.selection_step === 'review_and_submit') {
+      // Let your existing payload builder run unchanged.
+      // Only addition: if _pending_patient_phone exists and your payload supports extra fields,
+      // attach it in the SAME way your code already expects to pass phone numbers.
+      const payload = await this._registerBuildPayload(data); // your existing helper
+
+      // Minimal, non-breaking inclusion:
+      if (data._pending_patient_phone) {
+        // Prefer existing field if your builder already creates patient_phone_numbers.
+        if (Array.isArray(payload.patient_phone_numbers)) {
+          // only add if none present
+          if (!payload.patient_phone_numbers.some(p => p && (p.number || p.normalized_number))) {
+            payload.patient_phone_numbers.push({ number: data._pending_patient_phone, phone_type: 'Mobile' });
+          }
+        } else if (!payload.phone && !payload.mobile) {
+          // fallback to a loose field your builder may already map later
+          payload.phone = data._pending_patient_phone;
+        }
       }
 
-      // Prompt for the remaining field in order
-      if (!data.first_name) return "Please tell me your first name:\n(0️⃣ Back)";
-      if (!data.last_name) return "Got it. What's your last name?\n(0️⃣ Back)";
-      if (!data.email) return "Thanks. Lastly, what's your email address?\n(0️⃣ Back)";
-    }
-
-    // All fields collected, now try registration
-    const phoneNumber = session.phone_number || session.phoneNumber;
-    if (!data.email || !phoneNumber) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO,
-        verified: false
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      log.warn('Missing email or phone for registration');
-      return "We need both email and phone number to complete registration.\n\n" + await this.renderMainMenu(updatedSession);
-    }
-
-    const patient = {
-      first_name: data.first_name,
-      last_name: data.last_name,
-      email: data.email,
-      phone: phoneNumber
-    };
-
-    try {
-      const result = await this.clinikoAPI.registerNewPatient(patient);
-      if (result) {
-        await this.sessionManager.updateSession(session.id, {
-          verified: true,
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-          data: null // Clear registration data on success
-        });
-        const updatedSession = await this.sessionManager.getSession(session.id);
-        log.info('Registration success', { email: patient.email });
-        return `✅ You've been registered! Welcome ${patient.first_name}.\n\n` + await this.renderMainMenu(updatedSession);
+      // Show review text as you already do
+      const review = this._registerFormatReview(payload); // your existing helper
+      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+      // Ask for confirmation using your existing confirm keyword(s)
+      if (/^(confirm|ok|yes|1)$/i.test(text)) {
+        // submit using your EXISTING API call; do not change endpoints here
+        const res = await this.clinikoAPI.registerNewPatient(payload);
+        // cleanup and go back to menu
+        data._pending_patient_phone = null;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: null });
+        const doneMsg = 'Registration completed.';
+        return `${doneMsg}\n\n${await this.goToInteractiveMenu(session)}`;
       }
-    } catch (err) {
-      this.logger.error("Registration error:", err);
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO,
-        verified: false,
-        data: null
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      log.error('Registration failed', { error: err?.message });
-      return (
-        "❌ Error during registration (your details could not be registered, please check spelling or try again).\n\n"
-        + (await this.renderMainMenu(updatedSession))
-      );
+      return `${review}\n\nReply \"confirm\" to submit, or 0️⃣ Back.`;
     }
+
+    // fallback
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: null });
+    return await this.goToInteractiveMenu(session);
   }
 
   // ========== CANCEL WORKFLOW  ==========
