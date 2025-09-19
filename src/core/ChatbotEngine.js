@@ -3573,13 +3573,13 @@ class ChatbotEngine {
         await this.goToInteractiveMenu(session)
       );
     }
-    const window = normalizeDateWindow(this.config?.defaultWindowDays || 5);
+    const { from, to } = normalizeDateWindow();
     const availableTimes = await this.clinikoAPI.getAvailableTimes({
       practitioner_id,
       business_id,
-      appt_type: appointment_type_id
-      from: window.from,
-      to: window.to
+      appt_type: appointment_type_id,
+      from,
+      to,
     });
     if (!availableTimes.length) {
       // Clean up
