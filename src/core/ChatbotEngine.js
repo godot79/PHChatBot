@@ -2091,20 +2091,19 @@ class ChatbotEngine {
    * @returns {Promise<string>}
    */
   async handleBookSpecificDate(session, message) {
-    // ---------- safe load ----------
+    // ----- safe load -----
     let data;
     try { data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {}); } catch { data = {}; }
     if (!data || typeof data !== 'object') data = {};
     if (!data.navigation_chain) data.navigation_chain = [];
 
-    const textRaw = String(message || '');
-    const text = textRaw.trim().toLowerCase();
+    const raw = String(message || '');
+    const text = raw.trim().toLowerCase();
     const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
-
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
     const ymdLocal = (d) => { const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
 
-    // ---------- global back/menu ----------
+    // ----- global back/menu -----
     if (text === 'back' || text === 'menu') {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
       return await this.goToInteractiveMenu(session);
@@ -2117,27 +2116,28 @@ class ChatbotEngine {
         data.selection_step = step;
         data.suppress_auto_advance = true;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        // no recursion
         return await this.handleBookSpecificDate(session, '');
       }
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
       return await this.goToInteractiveMenu(session);
     }
 
-    // ---------- init ----------
+    // ----- init -----
     if (!data.selection_step) {
       data.selection_step = 'choose_date';
-      data.date_page = 0; // 0..1
+      data.date_page = 0;
       await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
     }
 
     // =====================================================================
-    // choose_date — two pages of 5, exclude Sundays
+    // choose_date — 10 dates from tomorrow, skip Sundays, 5 per page
     // =====================================================================
     if (data.selection_step === 'choose_date') {
-      const MAX_DATE_ITEMS = 5; // per page
-      const MAX_DATE_PAGES = 2; // total 10
+      const MAX_DATE_ITEMS = 5;
+      const MAX_DATE_PAGES = 2;
 
-      // Build date candidates from tomorrow, skip Sundays
+      // build 10 forward dates excluding Sundays
       const candidates = [];
       let d = new Date();
       d.setHours(0,0,0,0);
@@ -2147,29 +2147,57 @@ class ChatbotEngine {
         d.setDate(d.getDate() + 1);
       }
 
-      // Current page and slice
       const page = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-      const start = page * MAX_DATE_ITEMS;
-      const pageItems = candidates.slice(start, start + MAX_DATE_ITEMS);
+      const pageItems = candidates.slice(page * MAX_DATE_ITEMS, page * MAX_DATE_ITEMS + MAX_DATE_ITEMS);
 
-      // 1) numeric pick FIRST — sanitize to digits before parse
+      // numeric pick FIRST (sanitize digits)
       const numStr = text.replace(/[^\d]/g, '');
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1;
+        const idx = parseInt(numStr, 10) - 1; // 0..4
         const picked = pageItems[idx];
         if (picked) {
-          data.selected_date = ymdLocal(picked); // avoid UTC drift
+          // advance state without recursion
+          data.selected_date = ymdLocal(picked);
           data.selection_step = 'choose_type';
           if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: true, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-          return await this.handleBookSpecificDate(session, '');
+
+          // ----- INLINE RENDER: choose_type -----
+          if (!Array.isArray(data.appointment_type_list)) {
+            const groups = await this.clinikoAPI.getPractitionersByClinic();
+            const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+            const buckets = new Map();
+            for (const t of allTypes || []) {
+              if (!t || !t.name) continue;
+              if (/UWC/i.test(t.name)) continue;
+              const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
+              const n = normName(display);
+              if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
+              buckets.get(n).ids.add(String(t.id));
+            }
+            data.appointment_type_list = Array.from(buckets.values())
+              .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+              .sort((a,b)=>a.name.localeCompare(b.name));
+            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          }
+
+          const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+          const reply = formatPaginatedList({
+            items: data.appointment_type_list || [],
+            formatFn: (a,i)=>`${i}. ${a.name}`,
+            page: 0,
+            pageSize: MAX_SLOT_ITEMS,
+            moreLabel: null,
+            header: `Select visit type for ${headerDate}:`
+          }) + `\n\nReply with number. (0️⃣ Back)`;
+          return reply;
         }
       }
 
-      // 2) page back
+      // page back
       if (text === '0') {
-        if ((data.date_page || 0) > 0) {
-          data.date_page = (data.date_page || 0) - 1;
+        if (page > 0) {
+          data.date_page = page - 1;
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
         } else {
           await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
@@ -2177,29 +2205,25 @@ class ChatbotEngine {
         }
       }
 
-      // 3) page forward
-      if (/^m(ore)?$/i.test(text)) {
-        const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-        if (cur < (MAX_DATE_PAGES - 1)) {
-          data.date_page = cur + 1;
+      // page forward
+      if (text === 'm' || text === 'more') {
+        if (page < (MAX_DATE_PAGES - 1)) {
+          data.date_page = page + 1;
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
         }
       }
 
-      // recompute page after any change
-      const page2 = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-      const start2 = page2 * MAX_DATE_ITEMS;
-      const listItems = candidates.slice(start2, start2 + MAX_DATE_ITEMS);
-
-      const list = listItems.map((dd,i)=>`${i + 1}. ${dd.toLocaleDateString()}`).join('\n');
-      const pageInfo = `Page ${page2 + 1}/${MAX_DATE_PAGES}`;
-      const more = page2 < (MAX_DATE_PAGES - 1) ? `\nM. More dates` : '';
-      const hint = page2 < (MAX_DATE_PAGES - 1) ? ' or M for more' : '';
-      return `Pick a date (${pageInfo}):\n${list}${more}\n\nReply with number${hint}. (0️⃣ Back)`;
+      // render date page
+      const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
+      const slice = candidates.slice(cur * MAX_DATE_ITEMS, cur * MAX_DATE_ITEMS + MAX_DATE_ITEMS);
+      const list = slice.map((dt, i) => `${i + 1}. ${dt.toLocaleDateString()}`).join('\n');
+      const more = cur < (MAX_DATE_PAGES - 1) ? `\nM. More dates` : '';
+      const hint = cur < (MAX_DATE_PAGES - 1) ? ' or M for more' : '';
+      return `Pick a date (Page ${cur + 1}/${MAX_DATE_PAGES}):\n${list}${more}\n\nReply with number${hint}. (0️⃣ Back)`;
     }
 
     // =====================================================================
-    // choose_type — unique type names mapped to ids
+    // choose_type
     // =====================================================================
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.appointment_type_list)) {
@@ -2214,12 +2238,15 @@ class ChatbotEngine {
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
           buckets.get(n).ids.add(String(t.id));
         }
-        data.appointment_type_list = Array.from(buckets.values()).map(v=>({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) })).sort((a,b)=>a.name.localeCompare(b.name));
+        data.appointment_type_list = Array.from(buckets.values())
+          .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+          .sort((a,b)=>a.name.localeCompare(b.name));
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
-      if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
+      const numOnly = text.replace(/[^\d]/g, '');
+      if (numOnly) {
+        const idx = parseInt(numOnly, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_appt_type = list[idx];
