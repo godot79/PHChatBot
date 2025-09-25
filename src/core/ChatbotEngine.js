@@ -3711,6 +3711,101 @@ class ChatbotEngine {
     return `❌ Could not reschedule your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
   }
 
+  /**
+   * Build the email payload for the "no slots → contact me" path.
+   * Formats a readable transcript. If bot messages are not recorded in history,
+   * it flags that limitation so support knows context is partial.
+   *
+   * @param {object} session - session row/object
+   * @param {object} data    - parsed session.data
+   * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
+   */
+  async _composeSupportEmailPayloadNoSlots(session, data) {
+    const safeParse = (v) => { try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } };
+    const s = session || {};
+    const d = (data && typeof data === 'object') ? data : safeParse(s.data);
+    const ctx = safeParse(s.context);
+
+    // Region, contact
+    const region = String(ctx.region || d.region || 'SG').trim();
+    const phone  = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    const userEmail = String(s.email || d.email || '').trim();
+
+    // Front-desk target
+    const regionDesk = (typeof REGION_SUPPORT_INFO === 'object' && REGION_SUPPORT_INFO && REGION_SUPPORT_INFO[region] && REGION_SUPPORT_INFO[region].email)
+      ? REGION_SUPPORT_INFO[region].email : null;
+    const supportEmail = regionDesk || process.env.SUPPORT_EMAIL || process.env.DEFAULT_SUPPORT_EMAIL || '';
+
+    const to = [];
+    if (supportEmail) to.push(supportEmail);
+    if (userEmail)   to.push(userEmail);
+
+    // Compose meta
+    const meta = {
+      session_id: s.id || '',
+      region,
+      phone,
+      patient_id: d.patient_id || d.patientId || '',
+      selected_clinic: d.selected_clinic || null,
+      selected_physio: d.selected_physio || null,
+      selected_appt_type: d.selected_appt_type || null,
+      selected_date: d.selected_date || null
+    };
+
+    // Build transcript, prefer getConversationTranscript(), fallback to db.getChatHistory()
+    let rows = [];
+    try {
+      if (this.sessionManager?.getConversationTranscript) {
+        const t = await this.sessionManager.getConversationTranscript(s.id);
+        if (Array.isArray(t)) rows = t;
+      }
+      if ((!rows || !rows.length) && this.sessionManager?.db?.getChatHistory) {
+        const arr = await this.sessionManager.db.getChatHistory(s.id);
+        if (Array.isArray(arr)) rows = arr;
+      }
+    } catch (_) { /* ignore */ }
+
+    // Normalize, keep last N
+    const MAX_LINES = 60; // cap for email
+    const norm = (r) => {
+      const ts  = r.timestamp || r.created_at || r.time || '';
+      const dir = r.direction || r.from || r.sender || r.role || '';
+      const who = /out/i.test(dir) || /bot|system/i.test(dir) ? 'Bot' : 'User';
+      const body = r.text || r.body || r.message || r.content || '';
+      return { ts, who, body: String(body || '').trim() };
+    };
+    const lines = (rows || []).map(norm).filter(x => x.body);
+    const hasBot = lines.some(x => x.who === 'Bot');
+    const recent = lines.slice(-MAX_LINES);
+
+    // Pretty print blocks with timestamps
+    const fmtTs = (ts) => {
+      try { return new Date(ts).toLocaleString(); } catch { return ts || ''; }
+    };
+    const transcript = recent.map(x => `[${fmtTs(x.ts)}] ${x.who}: ${x.body}`).join('\n');
+
+    // Header block
+    const headerBlock =
+      `Region: ${region}\n` +
+      `Phone: ${phone || '—'}\n` +
+      `Email: ${userEmail || '—'}\n` +
+      `Date: ${meta.selected_date || '—'}\n` +
+      (meta.selected_clinic ? `Clinic: ${meta.selected_clinic.business_name || meta.selected_clinic.name || meta.selected_clinic}\n` : '') +
+      (meta.selected_physio ? `Physio: ${meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio}\n` : '') +
+      (meta.selected_appt_type ? `Type: ${meta.selected_appt_type.name || meta.selected_appt_type}\n` : '');
+
+    const caveat = hasBot ? '' : '\nNote: Bot prompts are not recorded in this history. Transcript may include only user messages.\n';
+
+    const subject = `[No Slots] Contact request — ${region} — ${phone || (userEmail || 'unknown')}`;
+    const text =
+      `User requested a callback when no slots were available.\n` +
+      headerBlock +
+      caveat +
+      (transcript ? `\n--- Transcript (most recent ${Math.min(recent.length, MAX_LINES)} lines) ---\n${transcript}` : '');
+
+    return { to, subject, text, meta };
+  }
+
 
 } // End of Class
 
