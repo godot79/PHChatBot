@@ -3464,23 +3464,59 @@ class ChatbotEngine {
    * @returns {Promise<string>}
    */
   async handleConfirmCancelState(session, message) {
-    const text = (message || '').trim().toLowerCase();
+    const textRaw = (message || '').trim();
+    const text = textRaw.toLowerCase();
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
 
     // Back/menu
-    if (["0", "menu", "back"].includes(text)) {
+    if (text === '0' || text === 'menu' || text === 'back') {
       delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
 
+    // Failure prompt branch: allow contacting support
+    if (data.cancel_error_prompt === true) {
+      if (text === '1') {
+        // Reuse "cancelled" payload composer but annotate failure context
+        const sessionRow = await this.sessionManager.getSessionById(session.id);
+        const appt = data.selected_cancel_appt || {};
+        const payloadAppt = {
+          id: appt.id,
+          starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+          appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+          practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+          clinic: appt._business_display || appt.business_name || appt.clinic,
+          note: 'User attempted cancellation, system returned failure.'
+        };
+        try { await this._sendCancelledEmail(sessionRow, data, payloadAppt); } catch (_) {}
+        // Return to menu after sending
+        delete data.cancel_error_prompt;
+        delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
+      }
+      if (text === '0' || text === 'menu' || text === 'back') {
+        delete data.cancel_error_prompt;
+        delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return await this.goToInteractiveMenu(session);
+      }
+      // Re-prompt on any other input
+      return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
+    }
+
     // Require explicit yes
     if (text !== 'yes') {
       const appt = data.selected_cancel_appt;
-      const intro = appt ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '';
+      const practitioner = appt?._practitioner_display || appt?.practitioner_name || appt?.practitioner || 'Selected physio';
+      const type = appt?._appointment_type_display || appt?.appointment_type_name || appt?.appointment_type || 'Appointment';
+      const whenStr = appt?._display_dt || (appt?.starts_at ? new Date(appt.starts_at).toLocaleString() : '');
+      const intro = appt ? `You are cancelling:\n${practitioner} — ${type}\n${whenStr}` : '';
       return `${intro}\nType "yes" to confirm cancellation, or "0" to go back.`;
     }
 
+    // Proceed to cancel
     const appt = data.selected_cancel_appt;
     if (!appt || !appt.id) {
       delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
@@ -3490,11 +3526,30 @@ class ChatbotEngine {
 
     const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
 
+    // Clear selection regardless to avoid stale state
     delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
-    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
-    if (result && result.success) return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
-    return `❌ Could not cancel your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
+    if (result && result.success) {
+      // Send email on success
+      try {
+        const sessionRow = await this.sessionManager.getSessionById(session.id);
+        const payloadAppt = {
+          id: appt.id,
+          starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+          appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+          practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+          clinic: appt._business_display || appt.business_name || appt.clinic
+        };
+        await this._sendCancelledEmail(sessionRow, data, payloadAppt);
+      } catch (_) {}
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
+    }
+
+    // Failure: stay in this state with a support option
+    data.cancel_error_prompt = true;
+    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
   }
 
   // ========== RESCHEDULE WORKFLOW  ==========
@@ -3660,14 +3715,52 @@ class ChatbotEngine {
    * @returns {Promise<string>}
    */
   async handleConfirmRescheduleState(session, message) {
-    const text = (message || '').trim();
+    const textRaw = (message || '').trim();
+    const text = textRaw.toLowerCase();
+
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     const appt = data.selected_reschedule_appt;
     const availableTimes = data.available_times || [];
     let slot_page = data.slot_page || 0;
 
-    // Pagination
-    if (['m', 'more'].includes(text.toLowerCase())) {
+    // Back/menu from error prompt
+    if (data.resched_error_prompt === true) {
+      if (text === '1') {
+        // Contact support with context
+        try {
+          const sessionRow = await this.sessionManager.getSessionById(session.id);
+          const oldAppt = {
+            id: appt?.id,
+            starts_at: appt?.starts_at || appt?.appointment_start || appt?.slot,
+            appointment_type: appt?._appointment_type_display || appt?.appointment_type_name || appt?.appointment_type,
+            practitioner: appt?._practitioner_display || appt?.practitioner_name || appt?.practitioner,
+            clinic: appt?._business_display || appt?.business_name || appt?.clinic,
+            note: 'User attempted reschedule, system returned failure.'
+          };
+          const sel = data.selected_new_slot || {};
+          const newAppt = {
+            id: sel.id || '',
+            starts_at: sel.starts_at || sel.appointment_start || sel.slot || '',
+            appointment_type: sel.appointment_type_name || sel.appointment_type || (data._selected_type_display || ''),
+            practitioner: sel.practitioner_name || sel.practitioner || (data._selected_practitioner_display || ''),
+            clinic: sel.business_name || sel.clinic || (data._selected_business_display || '')
+          };
+          await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
+        } catch (_) {}
+        delete data.resched_error_prompt;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
+      }
+      if (text === '0' || text === 'menu' || text === 'back') {
+        delete data.resched_error_prompt;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return await this.goToInteractiveMenu(session);
+      }
+      return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
+    }
+
+    // Pagination for slot list
+    if (text === 'm' || text === 'more') {
       slot_page = slot_page + 1;
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
@@ -3676,67 +3769,186 @@ class ChatbotEngine {
         formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
         page: slot_page,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header: 'Please choose a new slot:'
-      });
-      const intro = appt ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n` : '';
-      return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with the number of your chosen slot, "M" for more, or "0" to go back.`;
+        moreLabel: (slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? 'M. More' : null,
+        header: 'Pick a new time:'
+      }) + `\n\nReply with number${(slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? ' or M for more' : ''}. (0️⃣ Back)`;
+      return slotList;
     }
 
-    // Back
-    if (['0', 'menu', 'back'].includes(text.toLowerCase())) {
-      delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    // Back/menu
+    if (text === '0' || text === 'menu' || text === 'back') {
+      // Do not clear the original selection here; user may come back
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS, data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
 
-    // Parse selection
-    const idx = parseInt(text, 10) - 1;
-    if (isNaN(idx) || !availableTimes[idx]) {
-      return 'Invalid slot selection. Please reply with the number of your chosen slot, "M" for more, or "0" to go back.' +
-        (appt ? `\n\nYou are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '');
-    }
-
-    const slot = availableTimes[idx];
-    const appointment_type_id = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
-    const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
-    const patient_id = session.patient_id;
-    const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
-    const starts_at = slot.starts_at || slot.appointment_start || slot.slot;
-    let ends_at = slot.ends_at || slot.appointment_end;
-    if (!ends_at && starts_at) ends_at = new Date(new Date(starts_at).getTime() + 30 * 60000).toISOString();
-
-    if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
-      delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
+    // Pick a slot by index
+    if (/^\d+$/.test(text)) {
+      const idx = parseInt(text, 10) - 1 + (slot_page * MAX_SLOT_ITEMS);
+      if (idx < 0 || idx >= availableTimes.length) {
+        return 'Invalid selection. Please reply with the number of the new time you want, or "0" to go back.';
+      }
+      const chosen = availableTimes[idx];
+      data.selected_new_slot = chosen;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.';
+
+      // Attempt reschedule
+      const oldId = appt && appt.id ? appt.id.toString() : null;
+      if (!oldId) {
+        return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      }
+
+      const result = await this.clinikoAPI.rescheduleAppointment(oldId, chosen);
+      if (result && result.success) {
+        // Email on success
+        try {
+          const sessionRow = await this.sessionManager.getSessionById(session.id);
+          const oldAppt = {
+            id: appt.id,
+            starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+            appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+            practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+            clinic: appt._business_display || appt.business_name || appt.clinic
+          };
+          const newAppt = {
+            id: result.new_id || chosen.id || '',
+            starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
+            appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
+            practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
+            clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
+          };
+          await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
+        } catch (_) {}
+
+        // Clear transient reschedule UI state
+        delete data.available_times; delete data.selected_new_slot; delete data.slot_page;
+        delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `✅ Your appointment has been rescheduled.\n\n` + await this.goToInteractiveMenu(session);
+      }
+
+      // Failure: keep state and offer support
+      data.resched_error_prompt = true;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
-    const payload = {
-      appointment_type_id: appointment_type_id.toString(),
-      business_id: business_id.toString(),
-      patient_id: patient_id.toString(),
-      practitioner_id: practitioner_id.toString(),
-      starts_at,
-      ends_at,
-    };
-
-    const result = await this.clinikoAPI.updateIndividualAppointment(appt.id.toString(), payload);
-
-    delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
-    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-
-    if (result && result.success) return `✅ Your appointment has been rescheduled to:\n${new Date(starts_at).toLocaleString()}\n\n` + await this.goToInteractiveMenu(session);
-    return `❌ Could not reschedule your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
+    // Initial render of slot list (or invalid input)
+    const slotList = formatPaginatedList({
+      items: availableTimes,
+      formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
+      page: slot_page,
+      pageSize: MAX_SLOT_ITEMS,
+      moreLabel: (slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? 'M. More' : null,
+      header: 'Pick a new time:'
+    }) + `\n\nReply with number${(slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? ' or M for more' : ''}. (0️⃣ Back)`;
+    return slotList;
   }
 
   /**
-   * Build the email payload for the "no slots → contact me" path.
-   * Formats a readable transcript. If bot messages are not recorded in history,
-   * it flags that limitation so support knows context is partial.
+   * Build email payload after a successful reschedule.
+   * Chronological transcript with user lines highlighted inline.
    *
-   * @param {object} session - session row/object
-   * @param {object} data    - parsed session.data
+   * @param {object} session
+   * @param {object} data
+   * @param {object} oldAppt - { id, starts_at, appointment_type, practitioner, clinic, patient_email, patient_phone }
+   * @param {object} newAppt - { id, starts_at, appointment_type, practitioner, clinic, patient_email, patient_phone }
+   * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
+   */
+  async _composeSupportEmailPayloadRescheduled(sessionRow, data = {}, oldAppt = {}, newAppt = {}) {
+    const region = (sessionRow.region || data.region || 'SG').toString().toUpperCase();
+    const phone  = sessionRow.phone_number || data.phone || '';
+    const email  = data.email || sessionRow.email || '—';
+
+    const supportDesk =
+      (this.config && (this.config.supportEmail || this.config.support_email)) ||
+      'support@prohealth.com.sg';
+
+    const subject = `[Rescheduled] Appointment — ${region} — ${phone}`;
+
+    const whenOld = oldAppt.starts_at ? new Date(oldAppt.starts_at).toLocaleString() : '—';
+    const whenNew = newAppt.starts_at ? new Date(newAppt.starts_at).toLocaleString() : '—';
+
+    const text =
+  `Appointment rescheduled.
+
+    — Context —
+    Region: ${region}
+    Phone:  ${phone}
+    Email:  ${email}
+
+    — Previous —
+    Clinic: ${oldAppt.clinic || '—'}
+    Physio: ${oldAppt.practitioner || '—'}
+    Type:   ${oldAppt.appointment_type || '—'}
+    When:   ${whenOld}
+    ID:     ${oldAppt.id || '—'}
+
+    — New —
+    Clinic: ${newAppt.clinic || '—'}
+    Physio: ${newAppt.practitioner || '—'}
+    Type:   ${newAppt.appointment_type || '—'}
+    When:   ${whenNew}
+    ID:     ${newAppt.id || '—'}`;
+
+    const to = [supportDesk];
+    const patientEmail =
+      (newAppt.patient_email || oldAppt.patient_email || '').trim();
+    if (patientEmail) to.push(patientEmail);
+
+    return { to, subject, text };
+  }
+  
+  /**
+   * Build support + user email payload for a CANCELLED appointment.
+   * No transcript. Compact context and appointment block only.
+   * @param {Object} sessionRow - row from `sessions` (expects `phone_number`, `email`, `region`)
+   * @param {Object} data       - parsed session.data or {}
+   * @param {Object} appt       - { id, starts_at, appointment_type, practitioner, clinic, patient_email, patient_phone }
+   * @returns {{to:string[], subject:string, text:string}}
+   */
+  async _composeSupportEmailPayloadCancelled(sessionRow, data = {}, appt = {}) {
+    const region = (sessionRow.region || data.region || 'SG').toString().toUpperCase();
+    const phone  = sessionRow.phone_number || data.phone || '';
+    const email  = data.email || sessionRow.email || '—';
+
+    // Support desk destination (read from config if present; fallback constant).
+    const supportDesk =
+      (this.config && (this.config.supportEmail || this.config.support_email)) ||
+      'support@prohealth.com.sg';
+
+    const subject = `[Cancelled] Appointment — ${region} — ${phone}`;
+    const whenStr = appt.starts_at ? new Date(appt.starts_at).toLocaleString() : '—';
+
+    const text =
+  `Appointment cancelled.
+
+    — Context —
+    Region: ${region}
+    Phone:  ${phone}
+    Email:  ${email}
+
+    — Appointment —
+    Clinic: ${appt.clinic || '—'}
+    Physio: ${appt.practitioner || '—'}
+    Type:   ${appt.appointment_type || '—'}
+    When:   ${whenStr}
+    ID:     ${appt.id || '—'}`;
+
+    // Intend to mail both support and the patient if we have it.
+    const to = [supportDesk];
+    const patientEmail = (appt.patient_email || '').trim();
+    if (patientEmail) to.push(patientEmail);
+
+    return { to, subject, text };
+  }
+
+  /**
+   * Build email payload for "no slots → contact me".
+   * Chronological transcript with user lines highlighted inline.
+   *
+   * @param {object} session
+   * @param {object} data
    * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
    */
   async _composeSupportEmailPayloadNoSlots(session, data) {
@@ -3745,12 +3957,10 @@ class ChatbotEngine {
     const d = (data && typeof data === 'object') ? data : safeParse(s.data);
     const ctx = safeParse(s.context);
 
-    // Region, contact
     const region = String(ctx.region || d.region || 'SG').trim();
     const phone  = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
     const userEmail = String(s.email || d.email || '').trim();
 
-    // Front-desk target
     const regionDesk = (typeof REGION_SUPPORT_INFO === 'object' && REGION_SUPPORT_INFO && REGION_SUPPORT_INFO[region] && REGION_SUPPORT_INFO[region].email)
       ? REGION_SUPPORT_INFO[region].email : null;
     const supportEmail = regionDesk || process.env.SUPPORT_EMAIL || process.env.DEFAULT_SUPPORT_EMAIL || '';
@@ -3759,7 +3969,6 @@ class ChatbotEngine {
     if (supportEmail) to.push(supportEmail);
     if (userEmail)   to.push(userEmail);
 
-    // Compose meta
     const meta = {
       session_id: s.id || '',
       region,
@@ -3771,60 +3980,98 @@ class ChatbotEngine {
       selected_date: d.selected_date || null
     };
 
-    // Build transcript, prefer getConversationTranscript(), fallback to db.getChatHistory()
-    let rows = [];
+    const fmtTs = (ts) => { try { return ts ? new Date(ts).toLocaleString() : ''; } catch { return ts || ''; } };
+    let lines = [];
     try {
-      if (this.sessionManager?.getConversationTranscript) {
-        const t = await this.sessionManager.getConversationTranscript(s.id);
-        if (Array.isArray(t)) rows = t;
+      if (this.sessionManager?.db?.getChatHistory && s.id) {
+        const rows = await this.sessionManager.db.getChatHistory(s.id);
+        if (Array.isArray(rows) && rows.length) {
+          const recent = rows.slice(-40);
+          for (const r of recent) {
+            const ts = r.timestamp || r.created_at || r.time || '';
+            const u = r.message && String(r.message).trim();
+            const b = r.response && String(r.response).trim();
+            if (u) lines.push(`[${fmtTs(ts)}] USER ▶ ${u}`);
+            if (b) lines.push(`[${fmtTs(ts)}] Bot   : ${b}`);
+          }
+        }
       }
-      if ((!rows || !rows.length) && this.sessionManager?.db?.getChatHistory) {
-        const arr = await this.sessionManager.db.getChatHistory(s.id);
-        if (Array.isArray(arr)) rows = arr;
-      }
-    } catch (_) { /* ignore */ }
+    } catch {}
 
-    // Normalize, keep last N
-    const MAX_LINES = 60; // cap for email
-    const norm = (r) => {
-      const ts  = r.timestamp || r.created_at || r.time || '';
-      const dir = r.direction || r.from || r.sender || r.role || '';
-      const who = /out/i.test(dir) || /bot|system/i.test(dir) ? 'Bot' : 'User';
-      const body = r.text || r.body || r.message || r.content || '';
-      return { ts, who, body: String(body || '').trim() };
-    };
-    const lines = (rows || []).map(norm).filter(x => x.body);
-    const hasBot = lines.some(x => x.who === 'Bot');
-    const recent = lines.slice(-MAX_LINES);
+    const header =
+  `No available slots — user requested a callback.
 
-    // Pretty print blocks with timestamps
-    const fmtTs = (ts) => {
-      try { return new Date(ts).toLocaleString(); } catch { return ts || ''; }
-    };
-    const transcript = recent.map(x => `[${fmtTs(x.ts)}] ${x.who}: ${x.body}`).join('\n');
+  — Context —
+  Region: ${region}
+  Phone:  ${phone || '—'}
+  Email:  ${userEmail || '—'}
+  Date:   ${meta.selected_date || '—'}
+  ${meta.selected_clinic ? `Clinic: ${meta.selected_clinic.business_name || meta.selected_clinic.name || meta.selected_clinic}\n` : ''}${meta.selected_physio ? `Physio: ${meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio}\n` : ''}${meta.selected_appt_type ? `Type:   ${meta.selected_appt_type.name || meta.selected_appt_type}\n` : ''}`;
 
-    // Header block
-    const headerBlock =
-      `Region: ${region}\n` +
-      `Phone: ${phone || '—'}\n` +
-      `Email: ${userEmail || '—'}\n` +
-      `Date: ${meta.selected_date || '—'}\n` +
-      (meta.selected_clinic ? `Clinic: ${meta.selected_clinic.business_name || meta.selected_clinic.name || meta.selected_clinic}\n` : '') +
-      (meta.selected_physio ? `Physio: ${meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio}\n` : '') +
-      (meta.selected_appt_type ? `Type: ${meta.selected_appt_type.name || meta.selected_appt_type}\n` : '');
-
-    const caveat = hasBot ? '' : '\nNote: Bot prompts are not recorded in this history. Transcript may include only user messages.\n';
+    const transcript = lines.length
+      ? `\n— Transcript (most recent) —\n${lines.join('\n')}\n`
+      : `\n— Transcript —\n(no history rows found)\n`;
 
     const subject = `[No Slots] Contact request — ${region} — ${phone || (userEmail || 'unknown')}`;
-    const text =
-      `User requested a callback when no slots were available.\n` +
-      headerBlock +
-      caveat +
-      (transcript ? `\n--- Transcript (most recent ${Math.min(recent.length, MAX_LINES)} lines) ---\n${transcript}` : '');
+    const text = `${header}\n${transcript}`.trim();
 
     return { to, subject, text, meta };
   }
 
+  /**
+   * Low-level POST to local mailer. Keeps runtime quiet on failures.
+   * Expects: { to: string[], subject: string, text: string }
+   */
+  async _postEmail(payload) {
+    try {
+      const http = require('http');
+      const body = JSON.stringify({
+        to: Array.isArray(payload.to) ? payload.to : [],
+        subject: String(payload.subject || 'Support message'),
+        text: String(payload.text || '')
+      });
+      await new Promise((resolve, reject) => {
+        const req = http.request(
+          { method: 'POST', host: '127.0.0.1', port: 8089, path: '/email',
+            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+          (res) => { res.resume(); res.statusCode === 200 ? resolve() : reject(new Error(`mailer ${res.statusCode}`)); }
+        );
+        req.on('error', reject);
+        req.write(body); req.end();
+      });
+    } catch (e) {
+      (this.logger || console).warn?.('mail send failed', { error: e && e.message });
+    }
+  }
+
+  /**
+   * Wrapper for “no slots” email using your existing composer.
+   * Safe to call anywhere once user requested a callback.
+   */
+  async _sendNoSlotsEmail(sessionRow, data) {
+    if (typeof this._composeSupportEmailPayloadNoSlots !== 'function') return;
+    const payload = await this._composeSupportEmailPayloadNoSlots(sessionRow, data || {});
+    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  }
+
+  /**
+   * Wrapper for “cancelled” email using your existing composer.
+   */
+  async _sendCancelledEmail(sessionRow, data, appt) {
+    if (typeof this._composeSupportEmailPayloadCancelled !== 'function') return;
+    const payload = await this._composeSupportEmailPayloadCancelled(sessionRow, data || {}, appt || {});
+    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  }
+
+  /**
+   * Wrapper for “rescheduled” email using your existing composer.
+   */
+  async _sendRescheduledEmail(sessionRow, data, oldAppt, newAppt) {
+    if (typeof this._composeSupportEmailPayloadRescheduled !== 'function') return;
+    const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data || {}, oldAppt || {}, newAppt || {});
+    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  }
+   
 
 } // End of Class
 
