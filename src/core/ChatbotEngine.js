@@ -3297,8 +3297,17 @@ class ChatbotEngine {
       first_name: data.first_name,
       last_name:  data.last_name,
       email:      data.email,
-      phone:      phoneNumber
     };
+    const phone = String(session.phoneNumber || '').trim();
+    if (phone) {
+      if (Array.isArray(patient.patient_phone_numbers)) {
+        if (!patient.patient_phone_numbers.length) {
+          patient.patient_phone_numbers.push({ number: phone, phone_type: 'Mobile' });
+        }
+      } else {
+        patient.patient_phone_numbers = [{ number: phone, phone_type: 'Mobile' }];
+      }
+    }
 
     try {
       const result = await this.clinikoAPI.registerNewPatient(patient);
