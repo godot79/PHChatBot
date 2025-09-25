@@ -763,8 +763,9 @@ class ChatbotEngine {
         IN: 'India 🇮🇳',
         PH: 'Philippines 🇵🇭'
       };
-      if (regionLabels[context.region]) {
-        region = `🌏 *Your region*: ${regionLabels[context.region]}\n`;
+      const code = String(context.region).toUpperCase();  // normalize
+      if (regionLabels[code]) {
+        region = `🌏 *Your region*: ${regionLabels[code]}\n`;
       }
     }
 
@@ -892,6 +893,15 @@ class ChatbotEngine {
       ? JSON.parse(session.context)
       : (session.context || {});
     const text = (message || '').trim().toLowerCase();
+
+    // Add this block:
+    if (text === '9' || text.includes('logout')) {
+      await this.sessionManager.deleteSessionAndData(session.id);
+      const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
+      fresh.verified = false;
+      return '✅ All your data has been deleted and you are logged out.\n\n' +
+             (await this.goToInteractiveMenu(fresh));
+    }
 
     // If region not set, try auto-detect
     if (!context.region) {
