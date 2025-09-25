@@ -3247,128 +3247,79 @@ class ChatbotEngine {
    * @returns {Promise<string>}
    */
   async handleRegisterPatientState(session, message) {
-    // safe load
-    let data;
-    try { data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {}); } catch { data = {}; }
-    if (!data || typeof data !== 'object') data = {};
-    if (!data.navigation_chain) data.navigation_chain = [];
+    const log = this.logger.child({ component: 'RegisterPatient', sessionId: session?.id });
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const text = (message || '').trim();
 
-    const raw = String(message || '').trim();
-    const text = raw.toLowerCase();
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
-
-    // global exit
-    if (text === '0' || text === 'back' || text === 'menu') {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: null });
-      return await this.goToInteractiveMenu(session);
+    // Back/cancel to Intro from any step
+    if (['0', 'back', 'menu'].includes(text.toLowerCase())) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.INTRO,
+        verified: false,
+        data: null
+      });
+      const updated = await this.sessionManager.getSession(session.id);
+      log.info('Registration cancelled -> Intro');
+      return await this.renderMainMenu(updated);
     }
 
-    // bootstrap flow step if missing
-    if (!data.selection_step) {
-      data.selection_step = 'collect_basics'; // your existing first step
-      data._pending_patient_phone = data._pending_patient_phone || null;
-      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+    // Collect required fields in order
+    const required = ['first_name', 'last_name', 'email'];
+    let next = null;
+    for (const f of required) {
+      if (!data[f]) { next = f; break; }
     }
 
-    // ---- collect_basics: unchanged fields collection (name, email, etc.) ----
-    if (data.selection_step === 'collect_basics') {
-      // Keep your existing prompts/collection here.
-      // When your current checks decide "basics complete", move to confirm_phone.
-      if (!data._basics_done) {
-        // run your unchanged basics handler here; return if it still needs input
-        const done = await this._registerCollectBasics(session, raw, data); // your existing helper
-        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
-        if (!done) return; // keep waiting for basics
-        data._basics_done = true;
+    if (next) {
+      if (text) {
+        data[next] = text;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        log.info('Collected field', { field: next });
       }
-      // next step: confirm the WhatsApp number
-      data.selection_step = 'confirm_phone';
-      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+      if (!data.first_name) return "Please tell me your first name:\n(0️⃣ Back)";
+      if (!data.last_name)  return "Got it. What's your last name?\n(0️⃣ Back)";
+      if (!data.email)      return "Thanks. Lastly, what's your email address?\n(0️⃣ Back)";
     }
 
-    // ---- confirm_phone: ask to use the WhatsApp number ----
-    if (data.selection_step === 'confirm_phone') {
-      // derive default from session without guessing new fields
-      const defaultPhone =
-        (session && (session.user_phone || session.phone || session.from)) ? String(session.user_phone || session.phone || session.from) : '';
-
-      // if no default available, jump to enter_phone
-      if (!defaultPhone) {
-        data.selection_step = 'enter_phone';
-        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
-        return 'Enter the patient’s mobile number (digits only). (0️⃣ Back)';
-      }
-
-      // if user answers this step
-      if (text === '1' || /^y(es)?$/.test(text)) {
-        data._pending_patient_phone = defaultPhone;
-        data.selection_step = 'review_and_submit';
-        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
-        // fall through to review
-      } else if (text === '2' || /^n(o)?$/.test(text)) {
-        data.selection_step = 'enter_phone';
-        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
-        return 'Enter the patient’s mobile number (digits only). (0️⃣ Back)';
-      } else {
-        // prompt
-        await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
-        return `Use this number for the patient profile?\n${defaultPhone}\n\n1. Yes\n2. No, I’ll enter a different number\n\nReply with 1 or 2. (0️⃣ Back)`;
-      }
+    // All fields collected → register
+    const phoneNumber = session.phone_number || session.phoneNumber;
+    if (!data.email || !phoneNumber) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.INTRO,
+        verified: false
+      });
+      const updated = await this.sessionManager.getSession(session.id);
+      log.warn('Missing email or phone for registration');
+      return "We need both email and phone number to complete registration.\n\n" + await this.renderMainMenu(updated);
     }
 
-    // ---- enter_phone: accept a different number ----
-    if (data.selection_step === 'enter_phone') {
-      // validate simple phone (digits, optional +, spaces, dashes)
-      const cleaned = raw.replace(/[^\d+]/g, '');
-      const isValid = cleaned.length >= 8; // minimal sanity check; keep conservative
-      if (!isValid) {
-        return 'That doesn’t look like a valid number. Please enter digits (you can include +country code). (0️⃣ Back)';
+    const patient = {
+      first_name: data.first_name,
+      last_name:  data.last_name,
+      email:      data.email,
+      phone:      phoneNumber
+    };
+
+    try {
+      const result = await this.clinikoAPI.registerNewPatient(patient);
+      if (result) {
+        await this.sessionManager.updateSession(session.id, {
+          verified: true,
+          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          data: null
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        log.info('Registration success', { email: patient.email });
+        return `✅ You've been registered!\n\n` + await this.renderMainMenu(updated);
       }
-      data._pending_patient_phone = cleaned;
-      data.selection_step = 'review_and_submit';
-      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
+      log.warn('Registration returned falsy result');
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      return "Sorry, we couldn't complete registration right now.\n\n" + await this.renderMainMenu(session);
+    } catch (e) {
+      log.error('Registration error', { err: e?.message || e });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      return "We hit an error while registering you. Please try again later.\n\n" + await this.renderMainMenu(session);
     }
-
-    // ---- review_and_submit: assemble payload just like before, but include phone if present ----
-    if (data.selection_step === 'review_and_submit') {
-      // Let your existing payload builder run unchanged.
-      // Only addition: if _pending_patient_phone exists and your payload supports extra fields,
-      // attach it in the SAME way your code already expects to pass phone numbers.
-      const payload = await this._registerBuildPayload(data); // your existing helper
-
-      // Minimal, non-breaking inclusion:
-      if (data._pending_patient_phone) {
-        // Prefer existing field if your builder already creates patient_phone_numbers.
-        if (Array.isArray(payload.patient_phone_numbers)) {
-          // only add if none present
-          if (!payload.patient_phone_numbers.some(p => p && (p.number || p.normalized_number))) {
-            payload.patient_phone_numbers.push({ number: data._pending_patient_phone, phone_type: 'Mobile' });
-          }
-        } else if (!payload.phone && !payload.mobile) {
-          // fallback to a loose field your builder may already map later
-          payload.phone = data._pending_patient_phone;
-        }
-      }
-
-      // Show review text as you already do
-      const review = this._registerFormatReview(payload); // your existing helper
-      await sync({ conversation_state: this.STATES.REGISTER_NEW_PATIENT });
-      // Ask for confirmation using your existing confirm keyword(s)
-      if (/^(confirm|ok|yes|1)$/i.test(text)) {
-        // submit using your EXISTING API call; do not change endpoints here
-        const res = await this.clinikoAPI.registerNewPatient(payload);
-        // cleanup and go back to menu
-        data._pending_patient_phone = null;
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: null });
-        const doneMsg = 'Registration completed.';
-        return `${doneMsg}\n\n${await this.goToInteractiveMenu(session)}`;
-      }
-      return `${review}\n\nReply \"confirm\" to submit, or 0️⃣ Back.`;
-    }
-
-    // fallback
-    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: null });
-    return await this.goToInteractiveMenu(session);
   }
 
   // ========== CANCEL WORKFLOW  ==========
