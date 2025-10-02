@@ -3470,67 +3470,67 @@ class ChatbotEngine {
 
     // Back/menu
     if (text === '0' || text === 'menu' || text === 'back') {
-      delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
+      delete data.cancel_appt_list;
+      delete data.selected_cancel_appt;
+      delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
 
-    // Failure prompt branch: allow contacting support
+    // Failure prompt branch: allow contacting support (unchanged)
     if (data.cancel_error_prompt === true) {
       if (text === '1') {
-        // Reuse "cancelled" payload composer but annotate failure context
-        const sessionRow = await this.sessionManager.getSessionById(session.id);
-        const appt = data.selected_cancel_appt || {};
-        const payloadAppt = {
-          id: appt.id,
-          starts_at: appt.starts_at || appt.appointment_start || appt.slot,
-          appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
-          practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
-          clinic: appt._business_display || appt.business_name || appt.clinic,
-          note: 'User attempted cancellation, system returned failure.'
-        };
-        try { await this._sendCancelledEmail(sessionRow, data, payloadAppt); } catch (_) {}
-        // Return to menu after sending
+        try {
+          const sessionRow = await this.sessionManager.getSessionById(session.id);
+          const appt = data.selected_cancel_appt || {};
+          const payloadAppt = {
+            id: appt.id,
+            starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+            appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+            practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+            clinic: appt._business_display || appt.business_name || appt.clinic,
+            note: 'User attempted cancellation, system returned failure.'
+          };
+          await this._sendCancelledEmail(sessionRow, data, payloadAppt);
+        } catch (_) {}
         delete data.cancel_error_prompt;
-        delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
       }
       if (text === '0' || text === 'menu' || text === 'back') {
         delete data.cancel_error_prompt;
-        delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         return await this.goToInteractiveMenu(session);
       }
-      // Re-prompt on any other input
       return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
     // Require explicit yes
     if (text !== 'yes') {
       const appt = data.selected_cancel_appt;
-      const practitioner = appt?._practitioner_display || appt?.practitioner_name || appt?.practitioner || 'Selected physio';
-      const type = appt?._appointment_type_display || appt?.appointment_type_name || appt?.appointment_type || 'Appointment';
-      const whenStr = appt?._display_dt || (appt?.starts_at ? new Date(appt.starts_at).toLocaleString() : '');
-      const intro = appt ? `You are cancelling:\n${practitioner} — ${type}\n${whenStr}` : '';
+      const intro = appt ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '';
       return `${intro}\nType "yes" to confirm cancellation, or "0" to go back.`;
     }
 
-    // Proceed to cancel
     const appt = data.selected_cancel_appt;
     if (!appt || !appt.id) {
-      delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
+      delete data.cancel_appt_list;
+      delete data.selected_cancel_appt;
+      delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
     }
 
     const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
 
-    // Clear selection regardless to avoid stale state
-    delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
+    // Clean up transient state either way
+    delete data.cancel_appt_list;
+    delete data.selected_cancel_appt;
+    delete data.selected_cancel_appt_idx;
+    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
     if (result && result.success) {
-      // Send email on success
+      // ✅ Send the cancel email on success (new, minimal)
       try {
         const sessionRow = await this.sessionManager.getSessionById(session.id);
         const payloadAppt = {
@@ -3542,11 +3542,10 @@ class ChatbotEngine {
         };
         await this._sendCancelledEmail(sessionRow, data, payloadAppt);
       } catch (_) {}
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
     }
 
-    // Failure: stay in this state with a support option
+    // Failure -> show prompt to contact support
     data.cancel_error_prompt = true;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
     return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
