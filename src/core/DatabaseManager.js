@@ -37,6 +37,7 @@ class DatabaseManager {
           verification_status TEXT DEFAULT 'pending',
           conversation_state TEXT DEFAULT 'INTRO',
           context TEXT DEFAULT '{}',
+          data TEXT,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
           expires_at DATETIME,

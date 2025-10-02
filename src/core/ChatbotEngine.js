@@ -17,11 +17,11 @@ const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 const REGION_SUPPORT_INFO = {
   SG: {
     phone: '+65 6123 4567',
-    email: 'support@prohealth.com.sg'
+    email: 'ramesh@prohelthasia.com'
   },
   HK: {
     phone: '+852 1234 5678',
-    email: 'support@prohealth.hk'
+    email: 'ramesh@prohealthasia.com'
   },
   IN: {
     phone: '+91 98765 43210',
