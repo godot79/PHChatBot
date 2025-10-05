@@ -3331,30 +3331,122 @@ class ChatbotEngine {
   }
 
   // ========== VIEW FEES / LOCATIONS / REGISTER (REUSE) ==========
-
   async handleViewFeesState(session, message) {
-    // (re-use your static display or API as before)
-    const fees = `
-💰 *Fee Structure by Clinic*
+    try {
+      // Detect active region from session.context
+      let ctx = {};
+      try {
+        ctx = typeof session.context === 'string' ? JSON.parse(session.context || '{}') : (session.context || {});
+      } catch { ctx = {}; }
+      const region = String((ctx && ctx.region) || 'SG').toUpperCase();
 
-🏥 *Prohealth Physiofocus Pte Ltd*
-• Initial: SGD 180
-• Follow-up: SGD 150
+      // Region-aware mocked fees (UWC excluded by design)
+      const MOCK_FEES_BY_REGION = {
+        SG: [
+          {
+            clinic: 'Prohealth In Touch Physiotherapy',
+            items: [
+              { service: 'Initial',   price: 'SGD 190' },
+              { service: 'Follow-up', price: 'SGD 160' },
+            ]
+          },
+        ],
+        HK: [
+          // HK locations you provided (shown regardless of live list)
+          {
+            clinic: 'A. Prohealth Sports & Spinal Physiotherapy Centres (15/F)',
+            items: [
+              { service: 'Initial',   price: 'HKD 1,200' },
+              { service: 'Follow-up', price: 'HKD 900' },
+            ]
+          },
+          {
+            clinic: 'B. Prohealth Sports & Spinal Physiotherapy Centres (12/F)',
+            items: [
+              { service: 'Initial',   price: 'HKD 1,100' },
+              { service: 'Follow-up', price: 'HKD 850' },
+            ]
+          },
+          {
+            clinic: 'C. ProHealth Sports and Spinal Physiotherapy Centres (WWH)',
+            items: [
+              { service: 'Initial',   price: 'HKD 1,100' },
+              { service: 'Follow-up', price: 'HKD 850' },
+            ]
+          },
+        ],
+        IN: [
+          {
+            clinic: 'ProHealth Physiotherapy – Delhi',
+            items: [
+              { service: 'Initial',   price: 'INR 1,500' },
+              { service: 'Follow-up', price: 'INR 1,200' },
+            ]
+          },
+        ],
+        PH: [
+          {
+            clinic: 'ProHealth Physiotherapy – Manila',
+            items: [
+              { service: 'Initial',   price: 'PHP 3,000' },
+              { service: 'Follow-up', price: 'PHP 2,500' },
+            ]
+          },
+        ]
+      };
 
-🏥 *Prohealth In Touch Physiotherapy*
-• Initial: SGD 190
-• Follow-up: SGD 160
+      const regionFees = MOCK_FEES_BY_REGION[region] || MOCK_FEES_BY_REGION.SG;
 
-🏥 *UWC East*
-• Initial: SGD 170
-• Follow-up: SGD 140
+      // Fetch live clinics (region-scoped; excludes UWC)
+      let liveClinics = [];
+      try {
+        liveClinics = await this.clinikoAPI.getClinics();
+      } catch {
+        liveClinics = [];
+      }
 
-🏥 *UWC Dover*
-• Initial: SGD 175
-• Follow-up: SGD 145
-    `.trim();
-    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-    return fees + '\n\n' + await this.renderMainMenu(session);
+      // Always display mock, but warn when counts don't match
+      const liveCount = Array.isArray(liveClinics) ? liveClinics.length : 0;
+      const mockCount = Array.isArray(regionFees) ? regionFees.length : 0;
+
+      if (liveCount !== mockCount) {
+        // Include region and sample names to help debugging mismatches
+        const liveNames = (liveClinics || []).map(c => c.business_name).slice(0, 10);
+        const mockNames = (regionFees || []).map(x => x.clinic).slice(0, 10);
+        this.logger.warn('[FeesMock] Clinic count mismatch', {
+          region,
+          liveCount,
+          mockCount,
+          liveSample: liveNames,
+          mockSample: mockNames
+        });
+      }
+
+      const labelByRegion = {
+        SG: 'Singapore 🇸🇬',
+        HK: 'Hong Kong 🇭🇰',
+        IN: 'India 🇮🇳',
+        PH: 'Philippines 🇵🇭'
+      };
+      const regionLabel = labelByRegion[region] || region;
+
+      // Build response body from mock (always display)
+      const lines = [`💰 Fee Structure — ${regionLabel}`];
+      for (const entry of regionFees) {
+        lines.push(`\n🏥 ${entry.clinic}`);
+        for (const it of entry.items) {
+          lines.push(`• ${it.service}: ${it.price}`);
+        }
+      }
+      const body = lines.join('\n').trim();
+
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      return `${body}\n\n` + await this.renderMainMenu(session);
+    } catch (e) {
+      this.logger.error('handleViewFeesState (region-mock) error', { err: e?.message || e });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      return 'We could not load fees right now. Please try again later.\n\n' + await this.renderMainMenu(session);
+    }
   }
 
   async handleViewLocationsState(session, message) {
