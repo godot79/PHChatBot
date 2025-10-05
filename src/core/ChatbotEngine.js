@@ -952,46 +952,77 @@ class ChatbotEngine {
     const regionCodes = Object.keys(regionLabels);
 
     // Parse context safely
-    let context = (session.context && typeof session.context === 'string')
-      ? JSON.parse(session.context)
-      : (session.context || {});
-    const text = (message || '').trim().toLowerCase();
-
-    // Add this block:
-    if (text === '9' || text.includes('logout')) {
-      await this.sessionManager.deleteSessionAndData(session.id);
-      const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
-      await this.sessionManager.deleteSessionAndData(session.id);
-      let fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
-      fresh.verified = false;
-      // Force clean flags
-      await this.sessionManager.updateSession(fresh.id, { verified: false, patient_id: null, conversation_state: this.STATES.INTRO, data: null, context: JSON.stringify({}) });
-      return '✅ All your data has been deleted and you are logged out.\n\n' +
-             (await this.goToInteractiveMenu(fresh));
+    let context = {};
+    try {
+      context = (session.context && typeof session.context === 'string')
+        ? JSON.parse(session.context)
+        : (session.context || {});
+    } catch {
+      context = {};
     }
 
-    // If region not set, try auto-detect
+    const text = (message || '').trim().toLowerCase();
+
+    // Logout: clear PII but PRESERVE region
+    if (text === '9' || text.includes('logout')) {
+      // Keep region if present
+      let existingCtx = {};
+      try {
+        existingCtx = (typeof session.context === 'string')
+          ? JSON.parse(session.context || '{}')
+          : (session.context || {});
+      } catch {
+        existingCtx = {};
+      }
+      const newCtx = { ...existingCtx };
+      // Clear PII-only bits
+      delete newCtx.email;
+
+      // Wipe data + patient/verified; keep region
+      await this.sessionManager.deleteSessionAndData(session.id);
+      const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
+      // Ensure flags are reset and region is preserved
+      await this.sessionManager.updateSession(fresh.id, {
+        verified: false,
+        patient_id: null,
+        conversation_state: this.STATES.INTRO,
+        data: null,
+        context: JSON.stringify(newCtx)
+      });
+      const menu = await this.goToInteractiveMenu(fresh);
+      return '✅ All your data has been deleted and you are logged out.\n\n' + menu;
+    }
+
+    // If region not set, try to auto-detect ONCE and persist it
     if (!context.region) {
       const phone = session.phone_number || session.phoneNumber;
       if (typeof this.sessionManager.getRegionFromPhoneNumber === 'function') {
-        const info = this.sessionManager.getRegionFromPhoneNumber(phone);
-        if (info && info.region && regionLabels[info.region]) {
-          context.region = info.region;
-          await this.sessionManager.updateSession(session.id, { context });
-        }
+        try {
+          const info = this.sessionManager.getRegionFromPhoneNumber(phone);
+          if (info && info.region && regionLabels[info.region]) {
+            context.region = info.region; // e.g., 'HK'
+            await this.sessionManager.updateSession(session.id, {
+              context: JSON.stringify(context)
+            });
+          }
+        } catch {}
       }
     }
 
     // If region not set or user typed "region", show region selection menu
     if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
       context.awaiting_region_selection = true;
-      // Handle selection input
+
+      // Persist awaiting flag so we don't lose it on next read
+      await this.sessionManager.updateSession(session.id, { context: JSON.stringify(context) });
+
+      // Handle selection input (number or text match)
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < regionCodes.length) {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
-          await this.sessionManager.updateSession(session.id, { context });
+          await this.sessionManager.updateSession(session.id, { context: JSON.stringify(context) });
           // Return main menu immediately after setting region
           return await this.renderMainMenu(session);
         }
@@ -999,19 +1030,17 @@ class ChatbotEngine {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
-        await this.sessionManager.updateSession(session.id, { context });
-        // Return main menu immediately after setting region
+        await this.sessionManager.updateSession(session.id, { context: JSON.stringify(context) });
         return await this.renderMainMenu(session);
       }
 
       if (!context.region || context.awaiting_region_selection) {
         const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
-        await this.sessionManager.updateSession(session.id, { context });
         return `Please select your region:\n\n${menu}\n\nReply with the number.`;
       }
     }
 
-    // From here, region is set. Proceed with your existing menu logic, using renderMainMenu.
+    // From here, region is set. Proceed with existing logic...
     if (session.verified) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
@@ -1048,8 +1077,7 @@ class ChatbotEngine {
       });
       return await this.handleRegisterPatientState(session, '');
     }
-    return `Sorry, I didn't understand that.\n\n` +
-      await this.renderMainMenu(session);
+    return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
   }
 
   /**
@@ -1169,12 +1197,30 @@ class ChatbotEngine {
       return await this.renderMainMenu(updatedSession);
     }
     if (text === '9' || text.includes('logout')) {
+      // Preserve region; clear PII
+      let existingCtx = {};
+      try {
+        existingCtx = (typeof session.context === 'string')
+          ? JSON.parse(session.context || '{}')
+          : (session.context || {});
+      } catch {
+        existingCtx = {};
+      }
+      const newCtx = { ...existingCtx };
+      delete newCtx.email;
+
       await this.sessionManager.deleteSessionAndData(session.id);
       const updatedSession = await this.sessionManager.getOrCreateSession(
         session.phone_number || session.phoneNumber,
         true
       );
-      await this.sessionManager.updateSession(updatedSession.id, { verified: false, patient_id: null, conversation_state: this.STATES.INTRO, data: null, context: JSON.stringify({}) });
+      await this.sessionManager.updateSession(updatedSession.id, {
+        verified: false,
+        patient_id: null,
+        conversation_state: this.STATES.INTRO,
+        data: null,
+        context: JSON.stringify(newCtx)
+      });
       return '✅ All your data has been deleted and you are logged out.\n\n' +
         (await this.goToInteractiveMenu(updatedSession));
     }
