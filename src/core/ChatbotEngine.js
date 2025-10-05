@@ -961,7 +961,11 @@ class ChatbotEngine {
     if (text === '9' || text.includes('logout')) {
       await this.sessionManager.deleteSessionAndData(session.id);
       const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
+      await this.sessionManager.deleteSessionAndData(session.id);
+      let fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
       fresh.verified = false;
+      // Force clean flags
+      await this.sessionManager.updateSession(fresh.id, { verified: false, patient_id: null, conversation_state: this.STATES.INTRO, data: null, context: JSON.stringify({}) });
       return '✅ All your data has been deleted and you are logged out.\n\n' +
              (await this.goToInteractiveMenu(fresh));
     }
@@ -1170,7 +1174,7 @@ class ChatbotEngine {
         session.phone_number || session.phoneNumber,
         true
       );
-      updatedSession.verified = false;
+      await this.sessionManager.updateSession(updatedSession.id, { verified: false, patient_id: null, conversation_state: this.STATES.INTRO, data: null, context: JSON.stringify({}) });
       return '✅ All your data has been deleted and you are logged out.\n\n' +
         (await this.goToInteractiveMenu(updatedSession));
     }
