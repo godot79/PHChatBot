@@ -640,7 +640,11 @@ class ChatbotEngine {
   _getSessionRegion(session) {
     let context = session.context;
     if (context && typeof context === 'string') {
-      try { context = JSON.parse(context); } catch {}
+      try { 
+        context = JSON.parse(context);
+      } catch (error) {
+        this.logger.error('Failed to initialize region for session:', error);
+      }
     }
     return (context && context.region) || 'SG';
   }
@@ -754,7 +758,11 @@ class ChatbotEngine {
     let region = '';
     let context = session.context;
     if (context && typeof context === 'string') {
-      try { context = JSON.parse(context); } catch {}
+      try { 
+        context = JSON.parse(context); 
+      } catch (error) {
+        this.logger.error('renderMainMenu error:', error);
+      }
     }
     if (context && context.region) {
       const regionLabels = {
@@ -3481,7 +3489,7 @@ class ChatbotEngine {
     if (data.cancel_error_prompt === true) {
       if (text === '1') {
         try {
-          const sessionRow = await this.sessionManager.getSessionById(session.id);
+          const sessionRow = await this.sessionManager.getSession(session.id);
           const appt = data.selected_cancel_appt || {};
           const payloadAppt = {
             id: appt.id,
@@ -3492,7 +3500,9 @@ class ChatbotEngine {
             note: 'User attempted cancellation, system returned failure.'
           };
           await this._sendCancelledEmail(sessionRow, data, payloadAppt);
-        } catch (_) {}
+        } catch (error) {
+          this.logger.error('Error parsing appt to cancel:', error);
+        }
         delete data.cancel_error_prompt;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
@@ -3532,7 +3542,7 @@ class ChatbotEngine {
     if (result && result.success) {
       // ✅ Send the cancel email on success (new, minimal)
       try {
-        const sessionRow = await this.sessionManager.getSessionById(session.id);
+        const sessionRow = await this.sessionManager.getSession(session.id);
         const payloadAppt = {
           id: appt.id,
           starts_at: appt.starts_at || appt.appointment_start || appt.slot,
@@ -3541,7 +3551,9 @@ class ChatbotEngine {
           clinic: appt._business_display || appt.business_name || appt.clinic
         };
         await this._sendCancelledEmail(sessionRow, data, payloadAppt);
-      } catch (_) {}
+      } catch (error) {
+        this.logger.error('Error parsing appt to cancel after success:', error);
+      }
       return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
     }
 
@@ -3727,7 +3739,7 @@ class ChatbotEngine {
       if (text === '1') {
         // Contact support with context
         try {
-          const sessionRow = await this.sessionManager.getSessionById(session.id);
+          const sessionRow = await this.sessionManager.getSession(session.id);
           const oldAppt = {
             id: appt?.id,
             starts_at: appt?.starts_at || appt?.appointment_start || appt?.slot,
@@ -3745,7 +3757,9 @@ class ChatbotEngine {
             clinic: sel.business_name || sel.clinic || (data._selected_business_display || '')
           };
           await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
-        } catch (_) {}
+        } catch (error) {
+          this.logger.error('Error parsing appt to reschedule after failure:', error);
+        }
         delete data.resched_error_prompt;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
@@ -3801,7 +3815,7 @@ class ChatbotEngine {
       if (result && result.success) {
         // Email on success
         try {
-          const sessionRow = await this.sessionManager.getSessionById(session.id);
+          const sessionRow = await this.sessionManager.getSession(session.id);
           const oldAppt = {
             id: appt.id,
             starts_at: appt.starts_at || appt.appointment_start || appt.slot,
@@ -3817,7 +3831,9 @@ class ChatbotEngine {
             clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
           };
           await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
-        } catch (_) {}
+        } catch (error) {
+          this.logger.error('Error parsing appt to reschedule after success:', error);
+        }
 
         // Clear transient reschedule UI state
         delete data.available_times; delete data.selected_new_slot; delete data.slot_page;
