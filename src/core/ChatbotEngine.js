@@ -17,11 +17,11 @@ const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 const REGION_SUPPORT_INFO = {
   SG: {
     phone: '+65 6123 4567',
-    email: 'ramesh@prohelthasia.com'
+    email: 'admin@intouchphysio.com,ramesh@prohelthasia.com'
   },
   HK: {
     phone: '+852 1234 5678',
-    email: 'ramesh@prohealthasia.com'
+    email: 'appt@physiohk.com,ramesh@prohealthasia.com'
   },
   IN: {
     phone: '+91 98765 43210',
@@ -32,6 +32,30 @@ const REGION_SUPPORT_INFO = {
     email: 'support@prohealth.ph'
   }
 };
+
+/**
+ *Resolve support email recipients based on existing REGION_SUPPORT_INFO.
+ *Uses REGION_SUPPORT_INFO[region].email if available.
+ *Accepts comma-separated list in REGION_SUPPORT_INFO to support multiple recipients.
+ *Falls back to REGION_SUPPORT_INFO.SG if region is missing or not found (consistent with getSupportInfo).
+ *No other hardcoding or environment variables are used here, per instruction.
+ *
+ * @param {string|undefined} region - Optional region code like 'SG','HK','IN','PH'
+ * @returns {string[]} Array of unique, trimmed email addresses.
+ */
+function resolveSupportEmails(region) {
+  const code = String(region || '').toUpperCase().trim();
+  const fallback = 'SG'; // aligns with getSupportInfo default behavior
+  const info = REGION_SUPPORT_INFO[code] || REGION_SUPPORT_INFO[fallback] || {};
+  const raw = info.email || '';
+  const out = new Set();
+  String(raw)
+    .split(',')
+    .map(s => String(s || '').trim())
+    .filter(Boolean)
+    .forEach(e => out.add(e));
+  return Array.from(out);
+}
 
 // ====== NAVIGATION HELPERS ======
 
@@ -1052,6 +1076,13 @@ class ChatbotEngine {
     delete clearedData.awaiting_email;
 
     if (patient) {
+      try {
+        if (typeof this.saveEmailToSessionContext === 'function') {
+          await this.saveEmailToSessionContext(session, email);
+        }
+      } catch (e) {
+        // deliberate noop
+      }
       await this.sessionManager.updateSession(session.id, {
         verified: true,
         patient_id: patient.id,
@@ -3330,6 +3361,13 @@ class ChatbotEngine {
     try {
       const result = await this.clinikoAPI.registerNewPatient(patient);
       if (result) {
+        try {
+          if (typeof this.saveEmailToSessionContext === 'function') {
+            await this.saveEmailToSessionContext(session, patient.email);
+          }
+        } catch (e) {
+          // deliberate noop
+        }
         await this.sessionManager.updateSession(session.id, {
           verified: true,
           conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
@@ -3560,6 +3598,26 @@ class ChatbotEngine {
     // Failure -> show prompt to contact support
     data.cancel_error_prompt = true;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    try {
+      const sessionRow = await this.sessionManager.getSession(session.id);
+      const appt = data.selected_cancel_appt || {};
+      const payloadAppt = {
+        id: appt.id,
+        starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+        appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+        practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+        clinic: appt._business_display || appt.business_name || appt.clinic,
+        patient_email: (data && data.email) || sessionRow.email || ''
+      };
+      if (typeof this._composeSupportEmailPayloadCancelled === 'function') {
+        const payload = await this._composeSupportEmailPayloadCancelled(sessionRow, data, payloadAppt, true);
+        if (payload && Array.isArray(payload.to) && payload.to.length && typeof this._postEmail === 'function') {
+          await this._postEmail(payload);
+        }
+      }
+    } catch (e) {
+      // deliberate noop
+    }
     return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
   }
 
@@ -3845,6 +3903,35 @@ class ChatbotEngine {
       // Failure: keep state and offer support
       data.resched_error_prompt = true;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+
+      try {
+        const sessionRow = await this.sessionManager.getSession(session.id);
+        const oldAppt = data.selected_reschedule_appt || {};
+        const chosen = data.selected_new_slot || {};
+        const oldPayload = {
+          id: oldAppt.id,
+          starts_at: oldAppt.starts_at || oldAppt.appointment_start || oldAppt.slot,
+          appointment_type: oldAppt._appointment_type_display || oldAppt.appointment_type_name || oldAppt.appointment_type,
+          practitioner: oldAppt._practitioner_display || oldAppt.practitioner_name || oldAppt.practitioner,
+          clinic: oldAppt._business_display || oldAppt.business_name || oldAppt.clinic,
+          patient_email: (data && data.email) || sessionRow.email || ''
+        };
+        const newPayload = {
+          id: chosen.id || '',
+          starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
+          appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
+          practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
+          clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
+        };
+        if (typeof this._composeSupportEmailPayloadRescheduled === 'function') {
+          const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data, oldPayload, newPayload, true);
+          if (payload && Array.isArray(payload.to) && payload.to.length && typeof this._postEmail === 'function') {
+            await this._postEmail(payload);
+          }
+        }
+      } catch (e) {
+        // deliberate noop
+      }
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
@@ -3871,44 +3958,47 @@ class ChatbotEngine {
    * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
    */
   async _composeSupportEmailPayloadRescheduled(sessionRow, data = {}, oldAppt = {}, newAppt = {}) {
-    const region = (sessionRow.region || data.region || 'SG').toString().toUpperCase();
-    const phone  = sessionRow.phone_number || data.phone || '';
-    const email  = data.email || sessionRow.email || '—';
+    let region = 'SG';
+    try {
+      let ctx = sessionRow && sessionRow.context;
+      if (typeof ctx === 'string') {
+        try { ctx = JSON.parse(ctx); } catch { ctx = {}; }
+      }
+      if (ctx && ctx.region) region = String(ctx.region).toUpperCase();
+      else if (data && data.region) region = String(data.region).toUpperCase();
+    } catch {}
+    const phone = sessionRow.phone_number || data.phone || '';
+    const email = data.email || sessionRow.email || '—';
 
-    const supportDesk =
-      (this.config && (this.config.supportEmail || this.config.support_email)) ||
-      'support@prohealth.com.sg';
-
-    const subject = `[Rescheduled] Appointment — ${region} — ${phone}`;
+    const to = resolveSupportEmails(region);
+    const subject = [Rescheduled] Appointment — ${region} — ${phone};
 
     const whenOld = oldAppt.starts_at ? new Date(oldAppt.starts_at).toLocaleString() : '—';
     const whenNew = newAppt.starts_at ? new Date(newAppt.starts_at).toLocaleString() : '—';
 
     const text =
-  `Appointment rescheduled.
+    `Appointment rescheduled.
 
     — Context —
     Region: ${region}
-    Phone:  ${phone}
-    Email:  ${email}
+    Phone: ${phone}
+    Email: ${email}
 
     — Previous —
     Clinic: ${oldAppt.clinic || '—'}
     Physio: ${oldAppt.practitioner || '—'}
-    Type:   ${oldAppt.appointment_type || '—'}
-    When:   ${whenOld}
-    ID:     ${oldAppt.id || '—'}
+    Type: ${oldAppt.appointment_type || '—'}
+    When: ${whenOld}
+    ID: ${oldAppt.id || '—'}
 
     — New —
     Clinic: ${newAppt.clinic || '—'}
     Physio: ${newAppt.practitioner || '—'}
-    Type:   ${newAppt.appointment_type || '—'}
-    When:   ${whenNew}
-    ID:     ${newAppt.id || '—'}`;
+    Type: ${newAppt.appointment_type || '—'}
+    When: ${whenNew}
+    ID: ${newAppt.id || '—'}`;
 
-    const to = [supportDesk];
-    const patientEmail =
-      (newAppt.patient_email || oldAppt.patient_email || '').trim();
+    const patientEmail = (newAppt.patient_email || oldAppt.patient_email || '').trim();
     if (patientEmail) to.push(patientEmail);
 
     return { to, subject, text };
@@ -3923,35 +4013,45 @@ class ChatbotEngine {
    * @returns {{to:string[], subject:string, text:string}}
    */
   async _composeSupportEmailPayloadCancelled(sessionRow, data = {}, appt = {}) {
-    const region = (sessionRow.region || data.region || 'SG').toString().toUpperCase();
-    const phone  = sessionRow.phone_number || data.phone || '';
-    const email  = data.email || sessionRow.email || '—';
 
-    // Support desk destination (read from config if present; fallback constant).
-    const supportDesk =
-      (this.config && (this.config.supportEmail || this.config.support_email)) ||
-      'support@prohealth.com.sg';
+    // Derive region consistently with your menus: prefer context.region if available via engine helper
+    let region = 'SG';
+    try {
+      let ctx = sessionRow && sessionRow.context;
+      if (typeof ctx === 'string') {
+        try { ctx = JSON.parse(ctx); } catch { ctx = {}; }
+      }
 
-    const subject = `[Cancelled] Appointment — ${region} — ${phone}`;
+      if (ctx && ctx.region)
+        region = String(ctx.region).toUpperCase();
+      else 
+        if (data && data.region) 
+          region = String(data.region).toUpperCase();
+    } catch {}
+
+    const phone = sessionRow.phone_number || data.phone || '';
+    const email = data.email || sessionRow.email || '—';
+
+    const to = resolveSupportEmails(region);
+    const subject = [Cancelled] Appointment — ${region} — ${phone};
     const whenStr = appt.starts_at ? new Date(appt.starts_at).toLocaleString() : '—';
 
     const text =
-  `Appointment cancelled.
+    `Appointment cancelled.
 
     — Context —
     Region: ${region}
-    Phone:  ${phone}
-    Email:  ${email}
+    Phone: ${phone}
+    Email: ${email}
 
     — Appointment —
     Clinic: ${appt.clinic || '—'}
     Physio: ${appt.practitioner || '—'}
-    Type:   ${appt.appointment_type || '—'}
-    When:   ${whenStr}
-    ID:     ${appt.id || '—'}`;
+    Type: ${appt.appointment_type || '—'}
+    When: ${whenStr}
+    ID: ${appt.id || '—'}`;
 
-    // Intend to mail both support and the patient if we have it.
-    const to = [supportDesk];
+    // Also include patient if provided
     const patientEmail = (appt.patient_email || '').trim();
     if (patientEmail) to.push(patientEmail);
 
@@ -3960,34 +4060,59 @@ class ChatbotEngine {
 
   /**
    * Build email payload for "no slots → contact me".
-   * Chronological transcript with user lines highlighted inline.
+   * Centralizes recipients via resolveSupportEmails() and keeps the same transcript logic.
    *
-   * @param {object} session
-   * @param {object} data
+   * @param {object} session - session row (expects id, phone_number, context JSON string or object)
+   * @param {object} data    - parsed session.data or {}
    * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
    */
   async _composeSupportEmailPayloadNoSlots(session, data) {
-    const safeParse = (v) => { try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } };
+    function safeParse(v) {
+      try {
+        if (typeof v === 'string') {
+          return JSON.parse(v || '{}');
+        }
+        return v || {};
+      } catch (e) {
+        return {};
+      }
+    }
+
     const s = session || {};
     const d = (data && typeof data === 'object') ? data : safeParse(s.data);
     const ctx = safeParse(s.context);
 
-    const region = String(ctx.region || d.region || 'SG').trim();
-    const phone  = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    const userEmail = String(s.email || d.email || '').trim();
+    let region = 'SG';
+    try {
+      const cand = (ctx && ctx.region) || d.region || 'SG';
+      region = String(cand).toUpperCase().trim();
+    } catch (e) {
+      region = 'SG';
+    }
 
-    const regionDesk = (typeof REGION_SUPPORT_INFO === 'object' && REGION_SUPPORT_INFO && REGION_SUPPORT_INFO[region] && REGION_SUPPORT_INFO[region].email)
-      ? REGION_SUPPORT_INFO[region].email : null;
-    const supportEmail = regionDesk || process.env.SUPPORT_EMAIL || process.env.DEFAULT_SUPPORT_EMAIL || '';
+    let phone = '';
+    try {
+      phone = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    } catch (e) {
+      phone = '';
+    }
 
-    const to = [];
-    if (supportEmail) to.push(supportEmail);
-    if (userEmail)   to.push(userEmail);
+    let userEmail = '';
+    try {
+      userEmail = String(s.email || d.email || '').trim();
+    } catch (e) {
+      userEmail = '';
+    }
+
+    const to = resolveSupportEmails(region);
+    if (userEmail) {
+      to.push(userEmail);
+    }
 
     const meta = {
       session_id: s.id || '',
-      region,
-      phone,
+      region: region,
+      phone: phone,
       patient_id: d.patient_id || d.patientId || '',
       selected_clinic: d.selected_clinic || null,
       selected_physio: d.selected_physio || null,
@@ -3995,10 +4120,20 @@ class ChatbotEngine {
       selected_date: d.selected_date || null
     };
 
-    const fmtTs = (ts) => { try { return ts ? new Date(ts).toLocaleString() : ''; } catch { return ts || ''; } };
+    function fmtTs(ts) {
+      try {
+        if (ts) {
+          return new Date(ts).toLocaleString();
+        }
+        return '';
+      } catch (e) {
+        return ts || '';
+      }
+    }
+
     let lines = [];
     try {
-      if (this.sessionManager?.db?.getChatHistory && s.id) {
+      if (this.sessionManager && this.sessionManager.db && typeof this.sessionManager.db.getChatHistory === 'function' && s.id) {
         const rows = await this.sessionManager.db.getChatHistory(s.id);
         if (Array.isArray(rows) && rows.length) {
           const recent = rows.slice(-40);
@@ -4006,33 +4141,213 @@ class ChatbotEngine {
             const ts = r.timestamp || r.created_at || r.time || '';
             const u = r.message && String(r.message).trim();
             const b = r.response && String(r.response).trim();
-            if (u) lines.push(`[${fmtTs(ts)}] USER ▶ ${u}`);
-            if (b) lines.push(`[${fmtTs(ts)}] Bot   : ${b}`);
+            if (u) {
+              lines.push('[' + fmtTs(ts) + '] USER ▶ ' + u);
+            }
+            if (b) {
+              lines.push('[' + fmtTs(ts) + '] Bot   : ' + b);
+            }
           }
         }
       }
-    } catch {}
+    } catch (e) {
+      // deliberate noop
+    }
 
     const header =
-  `No available slots — user requested a callback.
-
-  — Context —
-  Region: ${region}
-  Phone:  ${phone || '—'}
-  Email:  ${userEmail || '—'}
-  Date:   ${meta.selected_date || '—'}
-  ${meta.selected_clinic ? `Clinic: ${meta.selected_clinic.business_name || meta.selected_clinic.name || meta.selected_clinic}\n` : ''}${meta.selected_physio ? `Physio: ${meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio}\n` : ''}${meta.selected_appt_type ? `Type:   ${meta.selected_appt_type.name || meta.selected_appt_type}\n` : ''}`;
+  'No available slots — user requested a callback.\n\n' +
+  '— Context —\n' +
+  'Region: ' + region + '\n' +
+  'Phone:  ' + (phone || '—') + '\n' +
+  'Email:  ' + (userEmail || '—') + '\n' +
+  'Date:   ' + (meta.selected_date || '—') + '\n' +
+  (meta.selected_clinic ? ('Clinic: ' + (meta.selected_clinic.business_name || meta.selected_clinic.name || meta.selected_clinic) + '\n') : '') +
+  (meta.selected_physio ? ('Physio: ' + (meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio) + '\n') : '') +
+  (meta.selected_appt_type ? ('Type:   ' + (meta.selected_appt_type.name || meta.selected_appt_type) + '\n') : '');
 
     const transcript = lines.length
-      ? `\n— Transcript (most recent) —\n${lines.join('\n')}\n`
-      : `\n— Transcript —\n(no history rows found)\n`;
+      ? '\n— Transcript (most recent) —\n' + lines.join('\n') + '\n'
+      : '\n— Transcript —\n(no history rows found)\n';
 
-    const subject = `[No Slots] Contact request — ${region} — ${phone || (userEmail || 'unknown')}`;
-    const text = `${header}\n${transcript}`.trim();
+    const subject = '[No Slots] Contact request — ' + region + ' — ' + (phone || userEmail || 'unknown');
+    const text = (header + '\n' + transcript).trim();
 
     return { to, subject, text, meta };
   }
 
+  /**
+   * Compose a support email payload to notify staff when an operation fails without an appointment context.
+   * Use this for generic failures in cancel/reschedule flows when we do not have a structured appt object.
+   *
+   * @param {Object} sessionRow - row from `sessions`
+   * @param {Object} data       - parsed session.data or {}
+   * @param {string} action     - One of: 'cancel', 'reschedule'
+   * @param {string} reason     - Optional short reason message
+   * @returns {{to:string[], subject:string, text:string}}
+   */
+  async _composeGenericFailureEmail(sessionRow, data = {}, action = 'cancel', reason = '') {
+    let ctx = {};
+    try {
+      if (sessionRow && typeof sessionRow.context === 'string') {
+        ctx = JSON.parse(sessionRow.context || '{}');
+      } else if (sessionRow && sessionRow.context) {
+        ctx = sessionRow.context;
+      } else {
+        ctx = {};
+      }
+    } catch (e) {
+      ctx = {};
+    }
+
+    let region = 'SG';
+    try {
+      if (ctx && ctx.region) {
+        region = String(ctx.region).toUpperCase();
+      } else if (data && data.region) {
+        region = String(data.region).toUpperCase();
+      }
+    } catch (e) {
+      region = 'SG';
+    }
+
+    let phone = '';
+    try {
+      if (sessionRow && sessionRow.phone_number) {
+        phone = sessionRow.phone_number;
+      } else if (data && data.phone) {
+        phone = data.phone;
+      }
+    } catch (e) {
+      phone = '';
+    }
+
+    let email = '—';
+    try {
+      if (data && data.email) {
+        email = data.email;
+      } else if (sessionRow && sessionRow.email) {
+        email = sessionRow.email;
+      }
+    } catch (e) {
+      email = '—';
+    }
+
+    const to = resolveSupportEmails(region);
+
+    let act = 'Cancel';
+    try {
+      if (String(action || '').toLowerCase() === 'reschedule') {
+        act = 'Reschedule';
+      }
+    } catch (e) {
+      act = 'Cancel';
+    }
+
+    const subject = '[' + act + ' Failed] — ' + region + ' — ' + phone;
+
+    const text =
+  'Operation failure notification.\n\n' +
+  '— Context —\n' +
+  'Action: ' + act + '\n' +
+  'Region: ' + region + '\n' +
+  'Phone:  ' + phone + '\n' +
+  'Email:  ' + email + '\n' +
+  (reason ? ('\nDetails: ' + reason + '\n') : '');
+
+    try {
+      const patientEmail = (data && data.email) ? String(data.email).trim() : '';
+      if (patientEmail) {
+        to.push(patientEmail);
+      }
+    } catch (e) {
+      // deliberate noop
+    }
+
+    return { to, subject, text };
+  }
+
+  /**
+   * Persist the patient's email into session.data so it can be reused by email composers.
+   * This merges the provided email into the existing JSON in session.data.
+   *
+   * Integration points (add these calls without changing functional behavior):
+   *  - After successful verification in handleVerifyState (on success path), call:
+   *      await this.saveEmailToSessionData(session, email);
+   *  - After successful registration in handleRegisterPatientState (on success path), call:
+   *      await this.saveEmailToSessionData(session, data.email);
+   *
+   * Note: This does not alter menus or flow; it only persists data.email.
+   *
+   * @param {object} session - Session object with id and current data
+   * @param {string} email   - Patient email to persist
+   * @returns {Promise<void>}
+   */
+  async saveEmailToSessionData(session, email) {
+    if (!session || !session.id) {
+      return;
+    }
+
+    let dataObj = {};
+    try {
+      if (typeof session.data === 'string') {
+        dataObj = JSON.parse(session.data || '{}');
+      } else {
+        dataObj = session.data || {};
+      }
+    } catch (e) {
+      dataObj = {};
+    }
+
+    try {
+      dataObj.email = String(email || '').trim();
+    } catch (e) {
+      dataObj.email = '';
+    }
+
+    try {
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(dataObj) });
+    } catch (e) {
+      // deliberate noop
+    }
+  }
+
+  /**
+   * Persist the patient's email into session.context (not session.data).
+   * This merges { email } into the existing context JSON, ensuring availability
+   * for later email composers even when session.data is cleared by flows.
+   *
+   * @param {object} session - Session row/object with id and context
+   * @param {string} email   - Patient email to persist
+   * @returns {Promise<void>}
+   */
+  async function saveEmailToSessionContext(session, email) {
+    if (!session || !session.id) {
+      return;
+    }
+
+    let ctx = {};
+    try {
+      if (typeof session.context === 'string') {
+        ctx = JSON.parse(session.context || '{}');
+      } else {
+        ctx = session.context || {};
+      }
+    } catch (e) {
+      ctx = {};
+    }
+
+    try {
+      ctx.email = String(email || '').trim();
+    } catch (e) {
+      ctx.email = '';
+    }
+
+    try {
+      await this.sessionManager.updateSession(session.id, { context: ctx });
+    } catch (e) {
+      // deliberate noop
+    }
+  }
   /**
    * Low-level POST to local mailer. Keeps runtime quiet on failures.
    * Expects: { to: string[], subject: string, text: string }
