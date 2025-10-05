@@ -4499,8 +4499,8 @@ class ChatbotEngine {
     try {
       // If your updateSession expects a plain object for context, this is fine.
       // If it expects a string, you can replace the next line with:
-      // await this.sessionManager.updateSession(session.id, { context: JSON.stringify(ctx) });
-      await this.sessionManager.updateSession(session.id, { context: ctx });
+      await this.sessionManager.updateSession(session.id, { context: JSON.stringify(ctx) });
+      //await this.sessionManager.updateSession(session.id, { context: ctx });
     } catch (e) {
       // noop
     }
@@ -4548,6 +4548,7 @@ class ChatbotEngine {
   async _sendCancelledEmail(sessionRow, data, appt) {
     if (typeof this._composeSupportEmailPayloadCancelled !== 'function') return;
     const payload = await this._composeSupportEmailPayloadCancelled(sessionRow, data || {}, appt || {});
+    console.log('DBG context raw:', sessionRow && sessionRow.context);
     if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
   }
 
@@ -4557,6 +4558,7 @@ class ChatbotEngine {
   async _sendRescheduledEmail(sessionRow, data, oldAppt, newAppt) {
     if (typeof this._composeSupportEmailPayloadRescheduled !== 'function') return;
     const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data || {}, oldAppt || {}, newAppt || {});
+    console.log('DBG context raw:', sessionRow && sessionRow.context);
     if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
   }
    
