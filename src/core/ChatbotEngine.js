@@ -17,7 +17,7 @@ const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 const REGION_SUPPORT_INFO = {
   SG: {
     phone: '+65 6123 4567',
-    email: 'admin@intouchphysio.com,ramesh@prohelthasia.com'
+    email: 'admin@intouchphysio.com,ramesh@prohealthasia.com'
   },
   HK: {
     phone: '+852 1234 5678',
@@ -4028,11 +4028,15 @@ class ChatbotEngine {
 
     let email = '—';
     try {
-      if (data && data.email) {
-        email = data.email;
-      } else if (sessionRow && sessionRow.email) {
-        email = sessionRow.email;
-      }
+      let ctxEmail = '';
+      try {
+        const ctxObj = typeof sessionRow?.context === 'string'
+          ? JSON.parse(sessionRow.context || '{}')
+          : (sessionRow?.context || {});
+        ctxEmail = String(ctxObj.email || '').trim();
+      } catch (_) {}
+      const cand = (data && data.email) || ctxEmail || (sessionRow && sessionRow.email) || '';
+      email = String(cand || '').trim() || '—';
     } catch (e) {
       email = '—';
     }
@@ -4086,18 +4090,18 @@ class ChatbotEngine {
   'ID:     ' + (newAppt && newAppt.id ? newAppt.id : '—');
 
     try {
+      const set = new Set(Array.isArray(to) ? to : []);
       let patientEmail = '';
       if (newAppt && newAppt.patient_email) {
         patientEmail = String(newAppt.patient_email).trim();
       } else if (oldAppt && oldAppt.patient_email) {
         patientEmail = String(oldAppt.patient_email).trim();
       }
-      if (patientEmail) {
-        to.push(patientEmail);
-      }
-    } catch (e) {
-      // deliberate noop
-    }
+      if (patientEmail) set.add(patientEmail);
+      if (email && email !== '—') set.add(email);
+      to.length = 0;
+      for (const addr of set) to.push(addr);
+    } catch (e) {}
 
     return { to, subject, text };
   }
@@ -4151,11 +4155,17 @@ class ChatbotEngine {
 
     let email = '—';
     try {
-      if (data && data.email) {
-        email = data.email;
-      } else if (sessionRow && sessionRow.email) {
-        email = sessionRow.email;
-      }
+      // Prefer explicit data.email, then context.email, then sessionRow.email
+      let ctxEmail = '';
+      try {
+        const ctxObj = typeof sessionRow?.context === 'string'
+          ? JSON.parse(sessionRow.context || '{}')
+          : (sessionRow?.context || {});
+        ctxEmail = String(ctxObj.email || '').trim();
+      } catch (_) {}
+
+      const cand = (data && data.email) || ctxEmail || (sessionRow && sessionRow.email) || '';
+      email = String(cand || '').trim() || '—';
     } catch (e) {
       email = '—';
     }
@@ -4194,12 +4204,15 @@ class ChatbotEngine {
   'ID:     ' + (appt && appt.id ? appt.id : '—');
 
     try {
-      const patientEmail = appt && appt.patient_email ? String(appt.patient_email).trim() : '';
-      if (patientEmail) {
-        to.push(patientEmail);
-      }
+      const set = new Set(Array.isArray(to) ? to : []);
+      const patientFromAppt = appt && appt.patient_email ? String(appt.patient_email).trim() : '';
+      if (patientFromAppt) set.add(patientFromAppt);
+      if (email && email !== '—') set.add(email);
+      // replace array content
+      to.length = 0;
+      for (const addr of set) to.push(addr);
     } catch (e) {
-      // deliberate noop
+      // noop
     }
 
     return { to, subject, text };
@@ -4467,10 +4480,8 @@ class ChatbotEngine {
    * @param {string} email   - Patient email to persist
    * @returns {Promise<void>}
    */
-  async function saveEmailToSessionContext(session, email) {
-    if (!session || !session.id) {
-      return;
-    }
+  async saveEmailToSessionContext(session, email) {
+    if (!session || !session.id) return;
 
     let ctx = {};
     try {
@@ -4483,18 +4494,18 @@ class ChatbotEngine {
       ctx = {};
     }
 
-    try {
-      ctx.email = String(email || '').trim();
-    } catch (e) {
-      ctx.email = '';
-    }
+    ctx.email = String(email || '').trim();
 
     try {
+      // If your updateSession expects a plain object for context, this is fine.
+      // If it expects a string, you can replace the next line with:
+      // await this.sessionManager.updateSession(session.id, { context: JSON.stringify(ctx) });
       await this.sessionManager.updateSession(session.id, { context: ctx });
     } catch (e) {
-      // deliberate noop
+      // noop
     }
   }
+  
   /**
    * Low-level POST to local mailer. Keeps runtime quiet on failures.
    * Expects: { to: string[], subject: string, text: string }
