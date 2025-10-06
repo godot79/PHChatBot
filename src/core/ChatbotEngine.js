@@ -4042,7 +4042,16 @@ class ChatbotEngine {
         return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
       }
 
-      const result = await this.clinikoAPI.rescheduleAppointment(oldId, chosen);
+      // Build minimal PATCH payload for reschedule: update starts_at (and ends_at if available)
+      const patchPayload = {};
+      const newStartsAt = chosen.starts_at || chosen.appointment_start || chosen.slot;
+      if (newStartsAt) patchPayload.starts_at = newStartsAt;
+      // If Cliniko returns duration or end fields, preserve ends_at when available
+      const newEndsAt = chosen.ends_at || chosen.appointment_end || chosen.end_time;
+      if (newEndsAt) patchPayload.ends_at = newEndsAt;
+
+      const result = await this.clinikoAPI.updateIndividualAppointment(oldId, patchPayload);
+
       if (result && result.success) {
         // Email on success
         try {
