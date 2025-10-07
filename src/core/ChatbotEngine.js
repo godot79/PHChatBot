@@ -4032,45 +4032,67 @@ class ChatbotEngine {
       if (idx < 0 || idx >= availableTimes.length) {
         return 'Invalid selection. Please reply with the number of the new time you want, or "0" to go back.';
       }
-      const chosen = availableTimes[idx];
-      data.selected_new_slot = chosen;
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-
-      // Attempt reschedule
-      const oldId = appt && appt.id ? appt.id.toString() : null;
-      if (!oldId) {
-        return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      // Build using your original attribute derivation
+      const slot = availableTimes[idx];
+      const appointment_type_id = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
+      const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
+      const patient_id = session.patient_id;
+      const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
+      const starts_at = slot.starts_at || slot.appointment_start || slot.slot;
+      let ends_at = slot.ends_at || slot.appointment_end;
+      if (!ends_at && starts_at) {
+        ends_at = new Date(new Date(starts_at).getTime() + 30 * 60000).toISOString();
       }
 
-      // Build minimal PATCH payload for reschedule: update starts_at (and ends_at if available)
-      const patchPayload = {};
-      const newStartsAt = chosen.starts_at || chosen.appointment_start || chosen.slot;
-      if (newStartsAt) patchPayload.starts_at = newStartsAt;
-      // If Cliniko returns duration or end fields, preserve ends_at when available
-      const newEndsAt = chosen.ends_at || chosen.appointment_end || chosen.end_time;
-      if (newEndsAt) patchPayload.ends_at = newEndsAt;
+      // Validate like before
+      if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
+        data.resched_error_prompt = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
+        // Preserve your existing flow (emails/prompts/clears) exactly as in your golden source
+        //delete data.reschedule_appt_list;
+        //delete data.selected_reschedule_appt;
+        //delete data.selected_reschedule_appt_idx;
+        //delete data.available_times;
+        //delete data.slot_page;
+        //await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        //return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.';
+      }
 
-      const result = await this.clinikoAPI.updateIndividualAppointment(oldId, patchPayload);
+      // Known-good full PATCH payload
+      const payload = {
+        appointment_type_id: appointment_type_id.toString(),
+        business_id: business_id.toString(),
+        patient_id: patient_id.toString(),
+        practitioner_id: practitioner_id.toString(),
+        starts_at,
+        ends_at,
+      };
+
+      const result = await this.clinikoAPI.updateIndividualAppointment(appt.id.toString(), payload);
 
       if (result && result.success) {
-        // Email on success
         try {
           const sessionRow = await this.sessionManager.getSession(session.id);
-          const oldAppt = {
-            id: appt.id,
-            starts_at: appt.starts_at || appt.appointment_start || appt.slot,
-            appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
-            practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
-            clinic: appt._business_display || appt.business_name || appt.clinic
+          const oldAppt = data.selected_reschedule_appt || {};
+          const chosen = data.selected_new_slot || {};
+          const oldPayload = {
+            id: oldAppt.id,
+            starts_at: oldAppt.starts_at || oldAppt.appointment_start || oldAppt.slot,
+            appointment_type: oldAppt._appointment_type_display || oldAppt.appointment_type_name || oldAppt.appointment_type,
+            practitioner: oldAppt._practitioner_display || oldAppt.practitioner_name || oldAppt.practitioner,
+            clinic: oldAppt._business_display || oldAppt.business_name || oldAppt.clinic,
+            patient_email: (data && data.email) || sessionRow.email || ''
           };
-          const newAppt = {
-            id: result.new_id || chosen.id || '',
+          const newPayload = {
+            id: chosen.id || '',
             starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
             appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
             practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
             clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
           };
-          await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
+          await this._sendRescheduledEmail(sessionRow, data, oldPayload, newPayload);
+
         } catch (error) {
           this.logger.error('Error parsing appt to reschedule after success:', error);
         }
@@ -4085,35 +4107,6 @@ class ChatbotEngine {
       // Failure: keep state and offer support
       data.resched_error_prompt = true;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-
-      try {
-        const sessionRow = await this.sessionManager.getSession(session.id);
-        const oldAppt = data.selected_reschedule_appt || {};
-        const chosen = data.selected_new_slot || {};
-        const oldPayload = {
-          id: oldAppt.id,
-          starts_at: oldAppt.starts_at || oldAppt.appointment_start || oldAppt.slot,
-          appointment_type: oldAppt._appointment_type_display || oldAppt.appointment_type_name || oldAppt.appointment_type,
-          practitioner: oldAppt._practitioner_display || oldAppt.practitioner_name || oldAppt.practitioner,
-          clinic: oldAppt._business_display || oldAppt.business_name || oldAppt.clinic,
-          patient_email: (data && data.email) || sessionRow.email || ''
-        };
-        const newPayload = {
-          id: chosen.id || '',
-          starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
-          appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
-          practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
-          clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
-        };
-        if (typeof this._composeSupportEmailPayloadRescheduled === 'function') {
-          const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data, oldPayload, newPayload, true);
-          if (payload && Array.isArray(payload.to) && payload.to.length && typeof this._postEmail === 'function') {
-            await this._postEmail(payload);
-          }
-        }
-      } catch (e) {
-        // deliberate noop
-      }
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
