@@ -789,12 +789,12 @@ class ChatbotEngine {
     }
 
     // Verified:
-    // If currently at booking method options, render that without changing state
     if (updatedSession.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
+      // Explicitly stay on booking-method menu without changing state
       return await this.renderBookingMethodMenu(updatedSession);
     }
 
-    // Otherwise, set to BOOK_MANAGE_OPTIONS and render verified menu
+    // Force the verified main menu state, then render with a fresh read
     await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
     const fresh = await this.sessionManager.getSession(updatedSession.id);
     return await this.renderMainMenu(fresh);
@@ -1166,8 +1166,12 @@ class ChatbotEngine {
 
     // Allow user to go back to Intro menu at any time
     if (['0', 'menu', 'back'].includes(text)) {
+      // Clear transient verification flags only
+      const cleared = { ...data };
+      delete cleared.awaiting_email;
       await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO
+        conversation_state: this.STATES.INTRO,
+        data: JSON.stringify(cleared)
       });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updated);
@@ -1190,39 +1194,51 @@ class ChatbotEngine {
 
     // Attempt verification
     const patient = await this.clinikoAPI.findPatientByEmail(email);
+
+    // Always clear transient verification flags regardless of outcome
     const clearedData = { ...data };
     delete clearedData.awaiting_email;
 
     if (patient) {
       try {
+        // Persist email in context for downstream email composers
         if (typeof this.saveEmailToSessionContext === 'function') {
           await this.saveEmailToSessionContext(session, email);
         }
+        // Optionally persist into session.data for composers that read data.email
+        if (typeof this.saveEmailToSessionData === 'function') {
+          await this.saveEmailToSessionData(session, email);
+        }
       } catch (e) {
-        // deliberate noop
+        // noop
       }
+
+      // Persist only what should survive: verified + patient_id + next state
       await this.sessionManager.updateSession(session.id, {
         verified: true,
         patient_id: patient.id,
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(clearedData)
       });
+
+      // Show verified main menu (don’t carry forward VERIFY state)
       return 'Verification successful!\n\nWhat would you like to do?\n\n1️⃣ Book Appointment\n2️⃣ Cancel Appointment\n3️⃣ Reschedule Appointment\n\nReply with the number or a keyword.';
-    } else {
-      // Verification failed: go back to Intro, show region-specific support info
-      await this.sessionManager.updateSession(session.id, {
-        verified: false,
-        conversation_state: this.STATES.INTRO,
-        data: JSON.stringify(clearedData)
-      });
-      const region = this._getSessionRegion(session);
-      const support = getSupportInfo(region);
-      return (
-        "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
-        support + "\n\n" +
-        await this.renderMainMenu(session)
-      );
     }
+
+    // Verification failed: go back to Intro, show region-specific support info
+    await this.sessionManager.updateSession(session.id, {
+      verified: false,
+      patient_id: null,
+      conversation_state: this.STATES.INTRO,
+      data: JSON.stringify(clearedData)
+    });
+    const region = this._getSessionRegion(session);
+    const support = getSupportInfo(region);
+    return (
+      "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
+      support + "\n\n" +
+      await this.renderMainMenu(session)
+    );
   }
 
   /**
@@ -1246,11 +1262,12 @@ class ChatbotEngine {
       return await this.handleIntroState(updated, 'region');
     }
 
+    // Back/menu -> stay within verified main menu, not INTRO
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return await this.renderMainMenu(updatedSession);
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+      return await this.goToInteractiveMenu(session);
     }
+
     if (text === '9' || text.includes('logout')) {
       // Preserve region; clear PII
       let existingCtx = {};
@@ -1312,6 +1329,7 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       return await this.handleBookSpecificClinic(session, '');
     }
+
     return 'Please reply with a valid booking method (1-4' + (await (async () => {
       // Show 5 only for non-SG in the message text hint
       let ctx = {};
@@ -1344,8 +1362,9 @@ class ChatbotEngine {
 
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return 'What would you like to do?\n\n' + (await this.goToInteractiveMenu(session));
+      return await this.goToInteractiveMenu(session);
     }
+
     if (text === '1' || text.includes('history')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
       return await this.handleBookHistory(session, '');
@@ -1366,6 +1385,7 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       return await this.handleBookSpecificClinic(session, '');
     }
+
     return 'Please reply with a valid booking method (1-5).';
   }
 
@@ -3302,16 +3322,15 @@ class ChatbotEngine {
       data = {};
     }
 
-    // Back/menu → just go to menu using your central helper
+    // Back/menu → go to menu
     if (['0', 'menu', 'back'].includes(text)) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Selected slot
-    let selectedSlot = data.selected_slot;
+    // Validate selected slot
+    const selectedSlot = data.selected_slot;
     if (!selectedSlot) {
       this.logger.warn('[handleConfirmBookingState] No selected_slot in session.data');
-      // No state changes; just route to menu
       return "No slot was selected. Please try booking again.\n\n" + await this.goToInteractiveMenu(session);
     }
 
@@ -3332,12 +3351,11 @@ class ChatbotEngine {
       const patient_id = session.patient_id;
       if (!patient_id) {
         this.logger.warn('[handleConfirmBookingState] Missing patient_id');
-        // Bring user back to intro; do not proceed
         await this.sessionManager.updateSession(session.id, { verified: false, conversation_state: this.STATES.INTRO });
         return 'Cannot proceed with booking. Please start again.\n\n' + await this.renderMainMenu(session);
       }
 
-      // Validate required slot fields
+      // Validate slot fields
       if (!selectedSlot.practitioner_id || !selectedSlot.business_id || !selectedSlot.appointment_type_id || !selectedSlot.slot) {
         this.logger.warn('[handleConfirmBookingState] Slot missing required fields', { slot: selectedSlot });
         return "The selected slot is missing some details. Please try booking again.\n\n" + await this.goToInteractiveMenu(session);
@@ -3360,7 +3378,6 @@ class ChatbotEngine {
       }
 
       if (result.success) {
-        // Do not manually set a menu state; rely on goToInteractiveMenu for consistent state + display
         return (
           `✅ Your appointment is booked for:\n` +
           `👨‍⚕️ ${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}\n` +
@@ -3368,12 +3385,12 @@ class ChatbotEngine {
           `🗓️ ${dt.toLocaleString()}\n\n` +
           await this.goToInteractiveMenu(session)
         );
-      } else {
-        return (
-          `❌ Could not book your appointment. ${result.message || ''}\n\n` +
-          await this.goToInteractiveMenu(session)
-        );
       }
+
+      return (
+        `❌ Could not book your appointment. ${result.message || ''}\n\n` +
+        await this.goToInteractiveMenu(session)
+      );
     }
 
     // Confirmation prompt
@@ -3408,7 +3425,6 @@ class ChatbotEngine {
           },
         ],
         HK: [
-          // HK locations you provided (shown regardless of live list)
           {
             clinic: 'A. Prohealth Sports & Spinal Physiotherapy Centres (15/F)',
             items: [
@@ -3461,12 +3477,10 @@ class ChatbotEngine {
         liveClinics = [];
       }
 
-      // Always display mock, but warn when counts don't match
       const liveCount = Array.isArray(liveClinics) ? liveClinics.length : 0;
       const mockCount = Array.isArray(regionFees) ? regionFees.length : 0;
 
       if (liveCount !== mockCount) {
-        // Include region and sample names to help debugging mismatches
         const liveNames = (liveClinics || []).map(c => c.business_name).slice(0, 10);
         const mockNames = (regionFees || []).map(x => x.clinic).slice(0, 10);
         this.logger.warn('[FeesMock] Clinic count mismatch', {
@@ -3496,12 +3510,13 @@ class ChatbotEngine {
       }
       const body = lines.join('\n').trim();
 
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return `${body}\n\n` + await this.renderMainMenu(session);
+      // Do not force INTRO; let goToInteractiveMenu set and render appropriate menu
+      await this.sessionManager.updateSession(session.id, {});
+      return `${body}\n\n` + await this.goToInteractiveMenu(session);
     } catch (e) {
       this.logger.error('handleViewFeesState (region-mock) error', { err: e?.message || e });
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return 'We could not load fees right now. Please try again later.\n\n' + await this.renderMainMenu(session);
+      await this.sessionManager.updateSession(session.id, {});
+      return 'We could not load fees right now. Please try again later.\n\n' + await this.goToInteractiveMenu(session);
     }
   }
 
@@ -3510,8 +3525,10 @@ class ChatbotEngine {
     const displayText = clinics.map((c, idx) =>
       `${idx + 1}. ${c.business_name}\n `
     ).join('\n');
-    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(session);
+
+    // Do not force INTRO; let goToInteractiveMenu decide and render
+    await this.sessionManager.updateSession(session.id, {});
+    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.goToInteractiveMenu(session);
   }
 
   /**
@@ -3743,7 +3760,7 @@ class ChatbotEngine {
     const text = textRaw.toLowerCase();
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
 
-    // Back/menu to menu (no state override here)
+    // Back/menu to menu
     if (text === '0' || text === 'menu' || text === 'back') {
       delete data.cancel_appt_list;
       delete data.selected_cancel_appt;
@@ -3807,7 +3824,6 @@ class ChatbotEngine {
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
     if (result && result.success) {
-      // Send the cancel email on success
       try {
         const sessionRow = await this.sessionManager.getSession(session.id);
         const payloadAppt = {
@@ -3845,9 +3861,7 @@ class ChatbotEngine {
           await this._postEmail(payload);
         }
       }
-    } catch (e) {
-      // noop
-    }
+    } catch (e) {}
     return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
   }
 
@@ -4081,9 +4095,8 @@ class ChatbotEngine {
       return slotList;
     }
 
-    // Back/menu
+    // Back/menu → menu
     if (text === '0' || text === 'menu' || text === 'back') {
-      // Keep data if you want user to come back; only navigate
       return await this.goToInteractiveMenu(session);
     }
 
@@ -4117,7 +4130,6 @@ class ChatbotEngine {
         return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.\n\n' + await this.goToInteractiveMenu(session);
       }
 
-      // PATCH reschedule
       const payload = {
         appointment_type_id: appointment_type_id.toString(),
         business_id: business_id.toString(),
@@ -4130,7 +4142,6 @@ class ChatbotEngine {
       const result = await this.clinikoAPI.updateIndividualAppointment(appt.id.toString(), payload);
 
       if (result && result.success) {
-        // Email
         try {
           const sessionRow = await this.sessionManager.getSession(session.id);
           const oldAppt = {
@@ -4167,7 +4178,7 @@ class ChatbotEngine {
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
-    // Initial render of paginated list (or invalid input)
+    // Initial render (or invalid input)
     const slotList = formatPaginatedList({
       items: availableTimes,
       formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
