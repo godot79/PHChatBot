@@ -768,24 +768,33 @@ class ChatbotEngine {
 
   /**
    * Sets the appropriate menu state and renders the main menu.
-   * @param {object} session
-   * @returns {Promise<string>}
+   * Uses verified flag to route:
+   *  - Unverified -> INTRO
+   *  - Verified:
+   *      • If current state is BOOKING_METHOD_OPTIONS → show booking method menu
+   *      • Else → set BOOK_MANAGE_OPTIONS and show verified main menu
+   *
+   * Always reloads session before and after any state update to avoid race/stale reads.
    */
   async goToInteractiveMenu(session) {
     // Always get the latest session state from DB
-    const updatedSession = await this.sessionManager.getSession(session.id);
+    let updatedSession = await this.sessionManager.getSession(session.id);
+    if (!updatedSession) updatedSession = session;
 
+    // Unverified → Intro menu
     if (!updatedSession.verified) {
       await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
       const fresh = await this.sessionManager.getSession(updatedSession.id);
       return await this.renderMainMenu(fresh);
     }
 
+    // Verified:
+    // If currently at booking method options, render that without changing state
     if (updatedSession.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
       return await this.renderBookingMethodMenu(updatedSession);
     }
-    // Add more as needed (manage, cancel, etc.)
-    // Falling through here
+
+    // Otherwise, set to BOOK_MANAGE_OPTIONS and render verified menu
     await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
     const fresh = await this.sessionManager.getSession(updatedSession.id);
     return await this.renderMainMenu(fresh);
@@ -3278,7 +3287,6 @@ class ChatbotEngine {
    * @returns {Promise<string>} Message to send to the user
    */
   async handleConfirmBookingState(session, message) {
-    // --- Debug: Start function ---
     this.logger.debug('[handleConfirmBookingState] Entry', { message, sessionId: session?.id });
 
     const text = (message || '').trim().toLowerCase();
@@ -3294,40 +3302,26 @@ class ChatbotEngine {
       data = {};
     }
 
-    // Handle "back" or "menu"
+    // Back/menu → just go to menu using your central helper
     if (['0', 'menu', 'back'].includes(text)) {
-      try {
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-          data: null
-        });
-      } catch (e) {
-        this.logger.error('[handleConfirmBookingState] Failed to update session for menu/back', e);
-      }
-      return 'How would you like to book?\n\n' + (await this.goToInteractiveMenu(session));
+      return await this.goToInteractiveMenu(session);
     }
 
-    // --- Debug: Prepare slot for enrichment ---
+    // Selected slot
     let selectedSlot = data.selected_slot;
     if (!selectedSlot) {
       this.logger.warn('[handleConfirmBookingState] No selected_slot in session.data');
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: null
-      });
+      // No state changes; just route to menu
       return "No slot was selected. Please try booking again.\n\n" + await this.goToInteractiveMenu(session);
     }
 
-    // --- Enrichment (safe) ---
+    // Enrich for confirmation copy
     let enrichedSlot = selectedSlot;
     try {
       const enrichableSlot = slotToEnrichable(selectedSlot);
       const enrichedArr = await enrichAppointmentsForDisplay([enrichableSlot], this.clinikoAPI);
       if (enrichedArr && enrichedArr[0]) {
         enrichedSlot = enrichedArr[0];
-        this.logger.debug('[handleConfirmBookingState] Slot enriched', { enriched: enrichedSlot });
-      } else {
-        this.logger.warn('[handleConfirmBookingState] Enrichment returned empty');
       }
     } catch (e) {
       this.logger.warn('[handleConfirmBookingState] Slot enrichment failed', { error: e });
@@ -3335,26 +3329,17 @@ class ChatbotEngine {
     const dt = new Date(enrichedSlot.slot);
 
     if (text === 'yes') {
-      // Required booking info
       const patient_id = session.patient_id;
       if (!patient_id) {
         this.logger.warn('[handleConfirmBookingState] Missing patient_id');
-        try {
-          await this.sessionManager.updateSession(session.id, {
-            conversation_state: this.STATES.INTRO,
-            verified: false
-          });
-        } catch (e) {
-          this.logger.error('[handleConfirmBookingState] Failed to set INTRO after missing patient_id', e);
-        }
+        // Bring user back to intro; do not proceed
+        await this.sessionManager.updateSession(session.id, { verified: false, conversation_state: this.STATES.INTRO });
         return 'Cannot proceed with booking. Please start again.\n\n' + await this.renderMainMenu(session);
       }
 
+      // Validate required slot fields
       if (!selectedSlot.practitioner_id || !selectedSlot.business_id || !selectedSlot.appointment_type_id || !selectedSlot.slot) {
         this.logger.warn('[handleConfirmBookingState] Slot missing required fields', { slot: selectedSlot });
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return "The selected slot is missing some details. Please try booking again.\n\n" + await this.goToInteractiveMenu(session);
       }
 
@@ -3375,10 +3360,7 @@ class ChatbotEngine {
       }
 
       if (result.success) {
-        // Reset to verified main menu before rendering it
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
+        // Do not manually set a menu state; rely on goToInteractiveMenu for consistent state + display
         return (
           `✅ Your appointment is booked for:\n` +
           `👨‍⚕️ ${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}\n` +
@@ -3387,9 +3369,6 @@ class ChatbotEngine {
           await this.goToInteractiveMenu(session)
         );
       } else {
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return (
           `❌ Could not book your appointment. ${result.message || ''}\n\n` +
           await this.goToInteractiveMenu(session)
@@ -3764,15 +3743,12 @@ class ChatbotEngine {
     const text = textRaw.toLowerCase();
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
 
-    // Back/menu
+    // Back/menu to menu (no state override here)
     if (text === '0' || text === 'menu' || text === 'back') {
       delete data.cancel_appt_list;
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-      });
       return await this.goToInteractiveMenu(session);
     }
 
@@ -3796,17 +3772,11 @@ class ChatbotEngine {
         }
         delete data.cancel_error_prompt;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
       }
       if (text === '0' || text === 'menu' || text === 'back') {
         delete data.cancel_error_prompt;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return await this.goToInteractiveMenu(session);
       }
       return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
@@ -3825,9 +3795,6 @@ class ChatbotEngine {
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-      });
       return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
     }
 
@@ -3855,10 +3822,6 @@ class ChatbotEngine {
         this.logger.error('Error parsing appt to cancel after success:', error);
       }
 
-      // Reset state to verified main menu
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-      });
       return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
     }
 
@@ -3867,13 +3830,13 @@ class ChatbotEngine {
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
     try {
       const sessionRow = await this.sessionManager.getSession(session.id);
-      const appt = data.selected_cancel_appt || {};
+      const appt2 = data.selected_cancel_appt || {};
       const payloadAppt = {
-        id: appt.id,
-        starts_at: appt.starts_at || appt.appointment_start || appt.slot,
-        appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
-        practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
-        clinic: appt._business_display || appt.business_name || appt.clinic,
+        id: appt2.id,
+        starts_at: appt2.starts_at || appt2.appointment_start || appt2.slot,
+        appointment_type: appt2._appointment_type_display || appt2.appointment_type_name || appt2.appointment_type,
+        practitioner: appt2._practitioner_display || appt2.practitioner_name || appt2.practitioner,
+        clinic: appt2._business_display || appt2.business_name || appt2.clinic,
         patient_email: (data && data.email) || sessionRow.email || ''
       };
       if (typeof this._composeSupportEmailPayloadCancelled === 'function') {
@@ -3883,10 +3846,10 @@ class ChatbotEngine {
         }
       }
     } catch (e) {
-      // deliberate noop
+      // noop
     }
     return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
-  }  
+  }
 
   // ========== RESCHEDULE WORKFLOW  ==========
   /**
@@ -4059,7 +4022,7 @@ class ChatbotEngine {
     const availableTimes = data.available_times || [];
     let slot_page = data.slot_page || 0;
 
-    // Back/menu from error prompt
+    // Error prompt follow-ups
     if (data.resched_error_prompt === true) {
       if (text === '1') {
         try {
@@ -4092,24 +4055,17 @@ class ChatbotEngine {
         }
         delete data.resched_error_prompt;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        // Reset to verified main menu
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
       }
       if (text === '0' || text === 'menu' || text === 'back') {
         delete data.resched_error_prompt;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return await this.goToInteractiveMenu(session);
       }
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
-    // Pagination for slot list
+    // Pagination
     if (text === 'm' || text === 'more') {
       slot_page = slot_page + 1;
       data.slot_page = slot_page;
@@ -4127,10 +4083,7 @@ class ChatbotEngine {
 
     // Back/menu
     if (text === '0' || text === 'menu' || text === 'back') {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(data)
-      });
+      // Keep data if you want user to come back; only navigate
       return await this.goToInteractiveMenu(session);
     }
 
@@ -4140,7 +4093,6 @@ class ChatbotEngine {
       if (idx < 0 || idx >= availableTimes.length) {
         return 'Invalid selection. Please reply with the number of the new time you want, or "0" to go back.';
       }
-      // Build using your original attribute derivation
       const slot = availableTimes[idx];
       data.selected_new_slot = slot;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -4162,13 +4114,10 @@ class ChatbotEngine {
         delete data.available_times;
         delete data.slot_page;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.\n\n' + await this.goToInteractiveMenu(session);
       }
 
-      // Known-good PATCH
+      // PATCH reschedule
       const payload = {
         appointment_type_id: appointment_type_id.toString(),
         business_id: business_id.toString(),
@@ -4181,7 +4130,7 @@ class ChatbotEngine {
       const result = await this.clinikoAPI.updateIndividualAppointment(appt.id.toString(), payload);
 
       if (result && result.success) {
-        // Send “[Rescheduled]” email after success
+        // Email
         try {
           const sessionRow = await this.sessionManager.getSession(session.id);
           const oldAppt = {
@@ -4209,10 +4158,6 @@ class ChatbotEngine {
         delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
-        // Explicitly set verified menu state
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
-        });
         return `✅ Your appointment has been rescheduled.\n\n` + await this.goToInteractiveMenu(session);
       }
 
@@ -4222,7 +4167,7 @@ class ChatbotEngine {
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
-    // Initial render of slot list (or invalid input)
+    // Initial render of paginated list (or invalid input)
     const slotList = formatPaginatedList({
       items: availableTimes,
       formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
@@ -4233,7 +4178,6 @@ class ChatbotEngine {
     }) + `\n\nReply with number${(slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? ' or M for more' : ''}. (0️⃣ Back)`;
     return slotList;
   }
-  
 
   /**
    * Build email payload after a successful or failed reschedule.
