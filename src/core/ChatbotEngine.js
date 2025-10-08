@@ -872,7 +872,7 @@ class ChatbotEngine {
     // 4 View Locations (omit for SG)
     const showLocations = (regionCode !== 'SG');
     const lines = [
-      `👋 *Welcome to ProHealthAsia*`,
+      `👋 *Welcome to ProhealthAsia*`,
       ``,
       `${region}`.trim(),
       `Please select an option:`,
@@ -3440,7 +3440,7 @@ class ChatbotEngine {
             ]
           },
           {
-            clinic: 'C. ProHealth Sports and Spinal Physiotherapy Centres (WWH)',
+            clinic: 'C. Prohealth Sports and Spinal Physiotherapy Centres (WWH)',
             items: [
               { service: 'Initial',   price: 'HKD 1,100' },
               { service: 'Follow-up', price: 'HKD 850' },
@@ -3449,7 +3449,7 @@ class ChatbotEngine {
         ],
         IN: [
           {
-            clinic: 'ProHealth Physiotherapy – Delhi',
+            clinic: 'Prohealth Physiotherapy – Delhi',
             items: [
               { service: 'Initial',   price: 'INR 1,500' },
               { service: 'Follow-up', price: 'INR 1,200' },
@@ -3458,7 +3458,7 @@ class ChatbotEngine {
         ],
         PH: [
           {
-            clinic: 'ProHealth Physiotherapy – Manila',
+            clinic: 'Prohealth Physiotherapy – Manila',
             items: [
               { service: 'Initial',   price: 'PHP 3,000' },
               { service: 'Follow-up', price: 'PHP 2,500' },
