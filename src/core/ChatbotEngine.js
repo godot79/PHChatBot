@@ -777,27 +777,23 @@ class ChatbotEngine {
    * Always reloads session before and after any state update to avoid race/stale reads.
    */
   async goToInteractiveMenu(session) {
-    // Always get the latest session state from DB
-    let updatedSession = await this.sessionManager.getSession(session.id);
-    if (!updatedSession) updatedSession = session;
+    let s = await this.sessionManager.getSession(session.id);
+    if (!s) s = session;
 
-    // Unverified → Intro menu
-    if (!updatedSession.verified) {
-      await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
-      const fresh = await this.sessionManager.getSession(updatedSession.id);
-      return await this.renderMainMenu(fresh);
+    if (!s.verified) {
+      if (s.conversation_state !== this.STATES.INTRO) {
+        await this.sessionManager.updateSession(s.id, { conversation_state: this.STATES.INTRO });
+        s = await this.sessionManager.getSession(s.id);
+      }
+      return await this.renderMainMenu(s);
     }
 
-    // Verified:
-    if (updatedSession.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
-      // Explicitly stay on booking-method menu without changing state
-      return await this.renderBookingMethodMenu(updatedSession);
+    if (s.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
+      return await this.renderBookingMethodMenu(s);
     }
 
-    // Force the verified main menu state, then render with a fresh read
-    await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-    const fresh = await this.sessionManager.getSession(updatedSession.id);
-    return await this.renderMainMenu(fresh);
+    // Verified but not in BOOKING_METHOD_OPTIONS → render verified main menu
+    return await this.renderMainMenu(s);
   }
 
   async renderBookingMethodMenu(session) {
@@ -1262,10 +1258,10 @@ class ChatbotEngine {
       return await this.handleIntroState(updated, 'region');
     }
 
-    // Back/menu -> stay within verified main menu, not INTRO
+    // Back/menu -> stay within verified main menu; re-render only
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return await this.goToInteractiveMenu(session);
+      return await this.renderMainMenu(session);
     }
 
     if (text === '9' || text.includes('logout')) {
@@ -1297,6 +1293,7 @@ class ChatbotEngine {
         (await this.goToInteractiveMenu(updatedSession));
     }
 
+    // Your existing mappings below remain unchanged
     if (text === '1' || text.includes('history')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
       return await this.handleBookHistory(session, '');
@@ -1331,7 +1328,6 @@ class ChatbotEngine {
     }
 
     return 'Please reply with a valid booking method (1-4' + (await (async () => {
-      // Show 5 only for non-SG in the message text hint
       let ctx = {};
       try { ctx = typeof session.context === 'string' ? JSON.parse(session.context || '{}') : (session.context || {}); } catch {}
       const rc = String((ctx && ctx.region) || 'SG').toUpperCase();
@@ -1362,7 +1358,7 @@ class ChatbotEngine {
 
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return await this.goToInteractiveMenu(session);
+      return await this.renderMainMenu(session);
     }
 
     if (text === '1' || text.includes('history')) {
