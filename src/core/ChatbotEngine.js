@@ -4143,15 +4143,11 @@ class ChatbotEngine {
       return slotList;
     }
 
-    - // Back/menu → menu
-    - if (text === '0' || text === 'menu' || text === 'back') {
-    -   return await this.goToInteractiveMenu(session);
-    - }
-    + // Back/menu → verified main menu with pinned state
-    + if (text === '0' || text === 'menu' || text === 'back') {
-    +   await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-    +   return await this.renderMainMenu(session);
-    + }
+    // Back/menu → verified main menu with pinned state
+     if (text === '0' || text === 'menu' || text === 'back') {
+       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+       return await this.renderMainMenu(session);
+     }
 
     // Pick a slot by index
     if (/^\d+$/.test(text)) {
