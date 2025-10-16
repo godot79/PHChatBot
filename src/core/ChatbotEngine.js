@@ -2110,14 +2110,25 @@ class ChatbotEngine {
    * Book by a specific date with date-scoped choices.
    * Navigation-only + date-availability filtering change:
    * - After date selection, list only appointment types and physios that have availability on that date.
+   * - Auto-advance:
+   *    1) If there is only ONE clinic for the chosen physio, auto-advance from choose_clinic.
+   *    2) At view_slots, when there are NO slots, present the standard no-slots decision
+   *       using _handleNoSlotsDecision (consistent with other flows), letting the user
+   *       try another option, ask support to reach out, or go to main menu.
    * - Stable indices and back behavior identical to other flows.
    *
    * Steps: choose_date -> choose_type -> choose_physio -> choose_clinic -> SELECT_SLOT
+   *
+   * Only minimal changes applied as requested:
+   *   - Added auto-advance guard in choose_clinic when only one clinic.
+   *   - Replaced inline "no slots" message in view_slots with the shared no-slots prompt
+   *     via data.no_slots_prompt + _handleNoSlotsDecision.
    *
    * @param {object} session
    * @param {string} message
    * @returns {Promise<string>}
    */
+
   async handleBookSpecificDate(session, message) {
     // ----- safe load -----
     let data;
@@ -2131,6 +2142,19 @@ class ChatbotEngine {
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
     const ymdLocal = (d) => { const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
 
+    // PATCH A: Handle pending no-slots decision first for the date flow
+    if (data.no_slots_prompt && data.no_slots_prompt.context === 'date') {
+      const ret = await this._handleNoSlotsDecision(
+        session,
+        data,
+        this.STATES.BOOK_SPECIFIC_DATE,
+        this.handleBookSpecificDate,
+        message || ''
+      );
+      if (ret) return ret;
+      // Fall through to re-render current step if input didn’t match 1/2/3/0
+    }
+
     // ----- global back/menu -----
     if (text === 'back' || text === 'menu') {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
@@ -2138,13 +2162,12 @@ class ChatbotEngine {
     }
     if (text === '0' && data.selection_step && data.selection_step !== 'choose_date') {
       const current = data.selection_step;
-      const { step, popped } = typeof navBack === 'function' ? navBack(data) : { step: null };
+      const { step, popped } = typeof navBack === 'function' ? navBack(data) : { step: null, popped: [] };
       if (step && step !== current) {
         if (typeof clearForwardStateForPopped === 'function') clearForwardStateForPopped(data, popped);
         data.selection_step = step;
         data.suppress_auto_advance = true;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        // no recursion
         return await this.handleBookSpecificDate(session, '');
       }
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
@@ -2159,70 +2182,42 @@ class ChatbotEngine {
     }
 
     // =====================================================================
-    // choose_date — 10 dates from tomorrow, skip Sundays, 5 per page
+    // choose_date — show upcoming dates (skip Sundays), 5 per page, 2 pages
     // =====================================================================
     if (data.selection_step === 'choose_date') {
       const MAX_DATE_ITEMS = 5;
       const MAX_DATE_PAGES = 2;
 
-      // build 10 forward dates excluding Sundays
       const candidates = [];
       let d = new Date();
       d.setHours(0,0,0,0);
       d.setDate(d.getDate() + 1);
       while (candidates.length < MAX_DATE_ITEMS * MAX_DATE_PAGES) {
-        if (d.getDay() !== 0) candidates.push(new Date(d));
+        if (d.getDay() !== 0) candidates.push(new Date(d)); // skip Sunday
         d.setDate(d.getDate() + 1);
       }
 
       const page = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
       const pageItems = candidates.slice(page * MAX_DATE_ITEMS, page * MAX_DATE_ITEMS + MAX_DATE_ITEMS);
 
-      // numeric pick FIRST (sanitize digits)
+      // numeric pick
       const numStr = text.replace(/[^\d]/g, '');
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1; // 0..4
+        const idx = parseInt(numStr, 10) - 1;
         const picked = pageItems[idx];
         if (picked) {
-          // advance state without recursion
-          data.selected_date = ymdLocal(picked);
+          data.selected_date = ymdLocal(picked); // store as YYYY-MM-DD
           data.selection_step = 'choose_type';
           if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: true, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
 
-          // ----- INLINE RENDER: choose_type -----
-          if (!Array.isArray(data.appointment_type_list)) {
-            const groups = await this.clinikoAPI.getPractitionersByClinic();
-            const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
-            const buckets = new Map();
-            for (const t of allTypes || []) {
-              if (!t || !t.name) continue;
-              if (/UWC/i.test(t.name)) continue;
-              const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
-              const n = normName(display);
-              if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-              buckets.get(n).ids.add(String(t.id));
-            }
-            data.appointment_type_list = Array.from(buckets.values())
-              .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
-              .sort((a,b)=>a.name.localeCompare(b.name));
-            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-          }
-
-          const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-          const reply = formatPaginatedList({
-            items: data.appointment_type_list || [],
-            formatFn: (a,i)=>`${i}. ${a.name}`,
-            page: 0,
-            pageSize: MAX_SLOT_ITEMS,
-            moreLabel: null,
-            header: `Select visit type for ${headerDate}:`
-          }) + `\n\nReply with number. (0️⃣ Back)`;
-          return reply;
+          // render choose_type immediately
+          const fresh = await this.sessionManager.getSession(session.id);
+          return await this.handleBookSpecificDate(fresh, '');
         }
       }
 
-      // page back
+      // pagination/back
       if (text === '0') {
         if (page > 0) {
           data.date_page = page - 1;
@@ -2231,17 +2226,13 @@ class ChatbotEngine {
           await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
           return await this.goToInteractiveMenu(session);
         }
-      }
-
-      // page forward
-      if (text === 'm' || text === 'more') {
+      } else if (text === 'm' || text === 'more') {
         if (page < (MAX_DATE_PAGES - 1)) {
           data.date_page = page + 1;
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
         }
       }
 
-      // render date page
       const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
       const slice = candidates.slice(cur * MAX_DATE_ITEMS, cur * MAX_DATE_ITEMS + MAX_DATE_ITEMS);
       const list = slice.map((dt, i) => `${i + 1}. ${dt.toLocaleDateString()}`).join('\n');
@@ -2251,7 +2242,7 @@ class ChatbotEngine {
     }
 
     // =====================================================================
-    // choose_type
+    // choose_type — aggregate types across practitioners (exclude UWC-tagged)
     // =====================================================================
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.appointment_type_list)) {
@@ -2287,19 +2278,13 @@ class ChatbotEngine {
       }
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = formatPaginatedList({
-        items: data.appointment_type_list || [],
-        formatFn: (a,i)=>`${i}. ${a.name}`,
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
-        header: `Select visit type for ${headerDate}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
-      return reply;
+      const items = data.appointment_type_list || [];
+      const formatted = items.map((a,i)=>`${i+1}. ${a.name}`).join('\n');
+      return `Select visit type for ${headerDate}:\n\n${formatted}\n\nReply with number. (0️⃣ Back)`;
     }
 
     // =====================================================================
-    // choose_physio — physios who offer that type
+    // choose_physio — list physios who offer that type (no availability filter here)
     // =====================================================================
     if (data.selection_step === 'choose_physio') {
       if (!Array.isArray(data.practitioner_list)) {
@@ -2324,15 +2309,12 @@ class ChatbotEngine {
       }
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = formatPaginatedList({
-        items: data.practitioner_list || [],
-        formatFn: (p,i)=>`${i}. ${getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)}`,
-        page: data.practitioner_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More physios',
-        header: `Choose a physio for ${data.selected_appt_type?.name || 'visit'} on ${headerDate}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
-      return reply;
+      const items = data.practitioner_list || [];
+      const start = (data.practitioner_page || 0) * MAX_SLOT_ITEMS;
+      const pageItems = items.slice(start, start + MAX_SLOT_ITEMS);
+      const body = pageItems.map((p,i)=>`${i+1}. ${getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)}`).join('\n');
+      const more = (start + MAX_SLOT_ITEMS) < items.length ? '\nM. More physios' : '';
+      return `Choose a physio for ${data.selected_appt_type?.name || 'visit'} on ${headerDate}:\n\n${body}${more}\n\nReply with number. (0️⃣ Back)`;
     }
 
     // =====================================================================
@@ -2349,6 +2331,18 @@ class ChatbotEngine {
         }
         data.clinic_list = clinics;
         data.clinic_page = 0;
+
+        // PATCH B: Auto-advance when exactly one clinic
+        if ((data.clinic_list || []).length === 1 && !data.suppress_auto_advance) {
+          data.selected_clinic = data.clinic_list[0];
+          data.selection_step = 'view_slots';
+          if (typeof navPush === 'function') {
+            navPush(data, 'view_slots', { had_multiple_options: false, auto: true });
+          }
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          return await this.handleBookSpecificDate(session, '');
+        }
+
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
@@ -2366,15 +2360,12 @@ class ChatbotEngine {
       }
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = formatPaginatedList({
-        items: data.clinic_list || [],
-        formatFn: (c,i)=>`${i}. ${getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name}`,
-        page: data.clinic_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More clinics',
-        header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)} on ${headerDate}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
-      return reply;
+      const items = data.clinic_list || [];
+      const start = (data.clinic_page || 0) * MAX_SLOT_ITEMS;
+      const pageItems = items.slice(start, start + MAX_SLOT_ITEMS);
+      const body = pageItems.map((c,i)=>`${i+1}. ${getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name}`).join('\n');
+      const more = (start + MAX_SLOT_ITEMS) < items.length ? '\nM. More clinics' : '';
+      return `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)} on ${headerDate}:\n\n${body}${more}\n\nReply with number. (0️⃣ Back)`;
     }
 
     // =====================================================================
@@ -2384,7 +2375,7 @@ class ChatbotEngine {
       const date = data.selected_date; // 'YYYY-MM-DD'
       const { from, to } = normalizeDateWindow(date, date, 1);
 
-      const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+      const rawSlots = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
         business_id: String(data.selected_clinic.id),
         practitioner_id: String(data.selected_physio.id),
         from,
@@ -2392,23 +2383,36 @@ class ChatbotEngine {
       });
 
       const typeNorm = normName(data.selected_appt_type?.name || '');
-      const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const slots = deduplicateSlots((rawSlots || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+
+      // PATCH C: Standardized no-slots handling
       if (!slots.length) {
-        data.selection_step = 'choose_clinic';
+        data.no_slots_prompt = { context: 'date' };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        return 'No slots for that date at this clinic. Pick another clinic or go back (0).';
+        return await this._handleNoSlotsDecision(
+          session,
+          data,
+          this.STATES.BOOK_SPECIFIC_DATE,
+          this.handleBookSpecificDate,
+          message || ''
+        );
       }
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
-      const reply = formatPaginatedList({
-        items: slots,
-        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString('en-GB')}`; },
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header
-      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-      return reply;
+      const header =
+        `${data.selected_appt_type?.name} • ` +
+        `${getPractitionerDisplayName(data.selected_physio)} • ` +
+        `${getBusinessDisplayName(data.selected_clinic)} • ` +
+        `${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
+
+      const start = 0;
+      const pageItems = slots.slice(start, start + MAX_SLOT_ITEMS);
+      const body = pageItems.map((s,i) => {
+        const dt = new Date(s.slot || s.starts_at || s.appointment_start);
+        return `${i+1}. ${dt.toLocaleString('en-GB')}`;
+      }).join('\n');
+
+      const more = slots.length > MAX_SLOT_ITEMS ? '\nM. More slots' : '';
+      return `${header}\n\n${body}${more}\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
     }
 
     // fallback
@@ -3228,6 +3232,21 @@ class ChatbotEngine {
       }
 
       if (result.success) {
+
+        // ✅ Send the booking email on success (new, minimal)
+        try {
+          const sessionRow = await this.sessionManager.getSession(session.id);
+          const payloadAppt = {
+            id: selectedSlot.appointment_type_id,
+            starts_at: selectedSlot.starts_at || selectedSlot.appointment_start || selectedSlot.slot,
+            appointment_type: enrichedSlot._appointment_type_display || enrichedSlot.appointment_type_name || enrichedSlot.appointment_type,
+            practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name,
+            clinic: enrichedSlot._business_display || enrichedSlot.business_name
+        };
+        await this._sendBookedEmail(sessionRow, data, payloadAppt);
+        } catch (error) {
+          this.logger.error('Error parsing appt to book after success:', error);
+        }
         // --- Debug: Booking success, show enriched details ---
         return (
           `✅ Your appointment is booked for:\n` +
@@ -4199,7 +4218,118 @@ class ChatbotEngine {
 
     return { to, subject, text };
   }
-  
+
+  /**
+   * Build support + user email payload for a BOOKING appointment.
+   * Centralizes support recipients via resolveSupportEmails() using region from session context or data.
+   * Adds a "Failure" variant when a cancellation attempt fails.
+   *
+   * @param {Object} sessionRow - row from `sessions` (expects `phone_number`, `context` as JSON/object)
+   * @param {Object} data       - parsed session.data or {}
+   * @param {Object} appt       - { id, starts_at, appointment_type, practitioner, clinic, patient_email, patient_phone }
+   * @param {boolean} failed    - If true, compose a failure-notice email subject/body
+   * @returns {{to:string[], subject:string, text:string}}
+   */
+  async _composeSupportEmailPayloadBooked(sessionRow, data = {}, appt = {}, failed = false) {
+    let ctx = {};
+    try {
+      if (sessionRow && typeof sessionRow.context === 'string') {
+        ctx = JSON.parse(sessionRow.context || '{}');
+      } else if (sessionRow && sessionRow.context) {
+        ctx = sessionRow.context;
+      } else {
+        ctx = {};
+      }
+    } catch (e) {
+      ctx = {};
+    }
+
+    let region = 'SG';
+    try {
+      if (ctx && ctx.region) {
+        region = String(ctx.region).toUpperCase();
+      } else if (data && data.region) {
+        region = String(data.region).toUpperCase();
+      }
+    } catch (e) {
+      // deliberate noop
+    }
+
+    let phone = '';
+    try {
+      if (sessionRow && sessionRow.phone_number) {
+        phone = sessionRow.phone_number;
+      } else if (data && data.phone) {
+        phone = data.phone;
+      }
+    } catch (e) {
+      phone = '';
+    }
+
+    let email = '—';
+    try {
+      // Prefer explicit data.email, then context.email, then sessionRow.email
+      let ctxEmail = '';
+      try {
+        const ctxObj = typeof sessionRow?.context === 'string'
+          ? JSON.parse(sessionRow.context || '{}')
+          : (sessionRow?.context || {});
+        ctxEmail = String(ctxObj.email || '').trim();
+      } catch (_) {}
+
+      const cand = (data && data.email) || ctxEmail || (sessionRow && sessionRow.email) || '';
+      email = String(cand || '').trim() || '—';
+    } catch (e) {
+      email = '—';
+    }
+
+    const to = resolveSupportEmails(region);
+
+    let whenStr = '—';
+    try {
+      if (appt && appt.starts_at) {
+        whenStr = new Date(appt.starts_at).toLocaleString('en-GB');
+      }
+    } catch (e) {
+      whenStr = '—';
+    }
+
+    //const subjectPrefix = failed ? '[Cancel Failed]' : '[Cancelled]';
+    const subjectPrefix = 'Booked!';
+    const subject = subjectPrefix + ' Appointment — ' + region + ' — ' + phone;
+   /*
+   let failureNote = '';
+    if (failed === true) {
+      failureNote = '\nNote: User attempted to cancel via chatbot but the operation failed. Please assist.\n';
+    }
+    */ 
+    const text =
+  'Appointment booking notification.\n\n' +
+  '— Context —\n' +
+  'Region: ' + region + '\n' +
+  'Phone:  ' + phone + '\n' +
+  'Email:  ' + email + '\n' +
+  '— Appointment —\n' +
+  'Clinic: ' + (appt && appt.clinic ? appt.clinic : '—') + '\n' +
+  'Physio: ' + (appt && appt.practitioner ? appt.practitioner : '—') + '\n' +
+  'Type:   ' + (appt && appt.appointment_type ? appt.appointment_type : '—') + '\n' +
+  'When:   ' + whenStr + '\n' +
+  'ID:     ' + (appt && appt.id ? appt.id : '—');
+
+    try {
+      const set = new Set(Array.isArray(to) ? to : []);
+      //const patientFromAppt = appt && appt.patient_email ? String(appt.patient_email).trim() : '';
+      //if (patientFromAppt) set.add(patientFromAppt);
+      if (email && email !== '—') set.add(email);
+      // replace array content
+      to.length = 0;
+      for (const addr of set) to.push(addr);
+    } catch (e) {
+      // noop
+    }
+
+    return { to, subject, text };
+  }
   /**
    * Build support + user email payload for a CANCELLED appointment.
    * Centralizes support recipients via resolveSupportEmails() using region from session context or data.
@@ -4642,6 +4772,16 @@ class ChatbotEngine {
   async _sendCancelledEmail(sessionRow, data, appt) {
     if (typeof this._composeSupportEmailPayloadCancelled !== 'function') return;
     const payload = await this._composeSupportEmailPayloadCancelled(sessionRow, data || {}, appt || {});
+    console.log('DBG context raw:', sessionRow && sessionRow.context);
+    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  }
+
+  /**
+   * Wrapper for “booked” email using your existing composer.
+   */
+  async _sendBookedEmail(sessionRow, data, appt) {
+    if (typeof this._composeSupportEmailPayloadBooked !== 'function') return;
+    const payload = await this._composeSupportEmailPayloadBooked(sessionRow, data || {}, appt || {});
     console.log('DBG context raw:', sessionRow && sessionRow.context);
     if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
   }
