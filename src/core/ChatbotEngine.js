@@ -409,7 +409,7 @@ function getSupportInfo(region) {
 
 function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
-  return `${idx}. ${dt.toLocaleString()}`;
+  return `${idx}. ${dt.toLocaleString('en-GB')}`;
 }
 
 /**
@@ -560,7 +560,7 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
     appt._practitioner_display = getPractitionerDisplayName(practitionerObj);
     appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj);
     appt._business_display = getBusinessDisplayName(businessObj);
-    appt._display_dt = new Date(appt.starts_at).toLocaleString();
+    appt._display_dt = new Date(appt.starts_at).toLocaleString('en-GB');
   }
 
   // Single summary log at the end
@@ -614,7 +614,7 @@ function formatSlotItem(slot, idx, opts = {}) {
   if (!opts.omitPhysio && slot.practitioner_name) main.push(slot.practitioner_name);
   if (!opts.omitClinic && slot.business_name) main.push(slot.business_name);
   if (slot.appointment_type_name) main.push(slot.appointment_type_name);
-  return `${idx}. ${main.join(' — ')}\n   ${dt.toLocaleString()}`;
+  return `${idx}. ${main.join(' — ')}\n   ${dt.toLocaleString('en-GB')}`;
 }
 */
 
@@ -768,32 +768,27 @@ class ChatbotEngine {
 
   /**
    * Sets the appropriate menu state and renders the main menu.
-   * Uses verified flag to route:
-   *  - Unverified -> INTRO
-   *  - Verified:
-   *      • If current state is BOOKING_METHOD_OPTIONS → show booking method menu
-   *      • Else → set BOOK_MANAGE_OPTIONS and show verified main menu
-   *
-   * Always reloads session before and after any state update to avoid race/stale reads.
+   * @param {object} session
+   * @returns {Promise<string>}
    */
   async goToInteractiveMenu(session) {
-    let s = await this.sessionManager.getSession(session.id);
-    if (!s) s = session;
+    // Always get the latest session state from DB
+    const updatedSession = await this.sessionManager.getSession(session.id);
 
-    if (!s.verified) {
-      if (s.conversation_state !== this.STATES.INTRO) {
-        await this.sessionManager.updateSession(s.id, { conversation_state: this.STATES.INTRO });
-        s = await this.sessionManager.getSession(s.id);
-      }
-      return await this.renderMainMenu(s);
+    if (!updatedSession.verified) {
+      await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
+      const fresh = await this.sessionManager.getSession(updatedSession.id);
+      return await this.renderMainMenu(fresh);
     }
 
-    if (s.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
-      return await this.renderBookingMethodMenu(s);
+    if (updatedSession.conversation_state === this.STATES.BOOKING_METHOD_OPTIONS) {
+      return await this.renderBookingMethodMenu(updatedSession);
     }
-
-    // Verified but not in BOOKING_METHOD_OPTIONS → render verified main menu
-    return await this.renderMainMenu(s);
+    // Add more as needed (manage, cancel, etc.)
+    // Falling through here
+    await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+    const fresh = await this.sessionManager.getSession(updatedSession.id);
+    return await this.renderMainMenu(fresh);
   }
 
   /**
@@ -808,10 +803,13 @@ class ChatbotEngine {
         ? JSON.parse(session.context || '{}')
         : (session.context || {});
       regionCode = String((ctx && ctx.region) || 'SG').toUpperCase();
+      this.logger.debug('handleRender: Ramesh', { ctx, regionCode });
     } catch {
       regionCode = 'SG';
     }
 
+    this.logger.debug('handleRender1: Ramesh', { regionCode });
+    this.logger.debug('handleRender1: Ramesh', (regionCode!=='SG'));
     const lines = [
       'How would you like to book?',
       '1. Based on your last physio visit',
@@ -836,18 +834,16 @@ class ChatbotEngine {
   */
   async renderMainMenu(session) {
     // Get region from context (parse string if needed)
-    let regionCode = 'SG';
     let region = '';
+    let showLocations = false;
     let context = session.context;
+    this.logger.debug('handleIntro : Ramesh', { context });
     if (context && typeof context === 'string') {
       try { 
         context = JSON.parse(context); 
       } catch (error) {
         this.logger.error('renderMainMenu error:', error);
-        context = {};
       }
-    } else {
-      context = context || {};
     }
     if (context && context.region) {
       const regionLabels = {
@@ -856,16 +852,14 @@ class ChatbotEngine {
         IN: 'India 🇮🇳',
         PH: 'Philippines 🇵🇭'
       };
-      const code = String(context.region).toUpperCase();
-      regionCode = regionLabels[code] ? code : 'SG';
+      this.logger.debug('handleIntro : Ramesh', { context });
+      const code = String(context.region).toUpperCase();  // normalize
       if (regionLabels[code]) {
         region = `🌏 *Your region*: ${regionLabels[code]}\n`;
+        showLocations = (code !== 'SG');
       }
-    } else {
-      regionCode = 'SG';
     }
 
-    // If verified, keep your existing verified main menu
     if (session.verified) {
       return (
         `${region}` +
@@ -877,29 +871,36 @@ class ChatbotEngine {
         `Type "region" anytime to change region.\n` +
         `Reply with the number or a keyword.`
       );
+    } else {
+      const lines = [
+        `👋 *Welcome to ProhealthAsia*`,
+        ``,
+        `${region}`.trim(),
+        `Please select an option:`,
+        `1️⃣ Existing Clients: Book or Manage Appointments`,
+        `2️⃣ New Clients: Book or Manage Appointments`,
+        `3️⃣ View Fees`,
+        ...(showLocations ? [`4️⃣ View Locations`] : []),
+        ``,
+        `Type "region" anytime to change region.`,
+        `Reply with the number or a keyword.`
+      ];
+      const body = lines.filter((l, i) => !(l === '' && (i === 0 || lines[i - 1] === ''))).join('\n');
+      return body;
+      /*
+      return (
+        `👋 *Welcome to ProHealthAsia*\n\n` +
+        `${region}` +
+        `Please select an option:\n` +
+        `1️⃣ Book or Manage Appointment\n` +
+        `2️⃣ View Fees\n` +
+        `3️⃣ View Locations\n` +
+        `4️⃣ Register as New Patient\n\n` +
+        `Type "region" anytime to change region.\n` +
+        `Reply with the number or a keyword.`
+      );
+      */
     }
-
-    // Unverified (Intro) menu per request:
-    // 1 Existing Clients: Book or Manage Appointments → verification flow
-    // 2 New Clients: Book or Manage Appointments      → registration flow
-    // 3 View Fees
-    // 4 View Locations (omit for SG)
-    const showLocations = (regionCode !== 'SG');
-    const lines = [
-      `👋 *Welcome to ProhealthAsia*`,
-      ``,
-      `${region}`.trim(),
-      `Please select an option:`,
-      `1️⃣ Existing Clients: Book or Manage Appointments`,
-      `2️⃣ New Clients: Book or Manage Appointments`,
-      `3️⃣ View Fees`,
-      ...(showLocations ? [`4️⃣ View Locations`] : []),
-      ``,
-      `Type "region" anytime to change region.`,
-      `Reply with the number or a keyword.`
-    ];
-    const body = lines.filter((l, i) => !(l === '' && (i === 0 || lines[i - 1] === ''))).join('\n');
-    return body;
   }
  
   // ====== MAIN ENTRY POINT ======
@@ -941,41 +942,6 @@ class ChatbotEngine {
         });
         session.conversation_state = this.STATES.INTRO;
       }
-
-      // Global logout: allow "9" or "logout" from ANY state
-      const textRawGlobal = String(message || '').trim().toLowerCase();
-      if (textRawGlobal === '9' || textRawGlobal.includes('logout')) {
-        // Preserve region; clear PII (email)
-        let existingCtx = {};
-        try {
-          existingCtx = (typeof session.context === 'string')
-            ? JSON.parse(session.context || '{}')
-            : (session.context || {});
-        } catch { existingCtx = {}; }
-        const newCtx = { ...existingCtx };
-        delete newCtx.email;
-
-        // Drop current session row + data
-        try {
-          await this.sessionManager.deleteSessionAndData(session.id);
-        } catch (e) {
-          this.logger.warn('deleteSessionAndData failed during global logout', { error: e?.message || e });
-        }
-
-        // Recreate fresh session with INTRO and preserved region
-        const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
-        await this.sessionManager.updateSession(fresh.id, {
-          verified: false,
-          patient_id: null,
-          conversation_state: this.STATES.INTRO,
-          data: null,
-          context: JSON.stringify(newCtx)
-        });
-
-        const menu = await this.goToInteractiveMenu(fresh);
-        return '✅ All your data has been deleted and you are logged out.\n\n' + menu;
-      }
-
       const currentState = session.conversation_state || this.STATES.INTRO;
       if (!this.stateHandlers[currentState]) {
         return await this.handleFallbackState(session, message);
@@ -1007,6 +973,7 @@ class ChatbotEngine {
     }
   }
 
+
   // ====== STATE HANDLERS ======
 
   /**
@@ -1030,31 +997,27 @@ class ChatbotEngine {
     const regionCodes = Object.keys(regionLabels);
 
     // Parse context safely
-    let context = {};
-    try {
-      context = (session.context && typeof session.context === 'string')
-        ? JSON.parse(session.context)
-        : (session.context || {});
-    } catch {
-      context = {};
-    }
-
+    let context = (session.context && typeof session.context === 'string')
+      ? JSON.parse(session.context)
+      : (session.context || {});
     const text = (message || '').trim().toLowerCase();
 
     // Logout: clear PII but PRESERVE region
     if (text === '9' || text.includes('logout')) {
       // Keep region if present
       let existingCtx = {};
+      let region = '';
       try {
         existingCtx = (typeof session.context === 'string')
           ? JSON.parse(session.context || '{}')
           : (session.context || {});
+        this.logger.debug('handleOut : Ramesh', { existingCtx });
       } catch {
         existingCtx = {};
       }
-      const newCtx = { ...existingCtx };
+      const newCtx = {};
+      newCtx.region = (existingCtx.region || region);
       // Clear PII-only bits
-      delete newCtx.email;
 
       // Wipe data + patient/verified; keep region
       await this.sessionManager.deleteSessionAndData(session.id);
@@ -1070,37 +1033,38 @@ class ChatbotEngine {
       const menu = await this.goToInteractiveMenu(fresh);
       return '✅ All your data has been deleted and you are logged out.\n\n' + menu;
     }
+    /*
+      await this.sessionManager.deleteSessionAndData(session.id);
+      const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
+      // Force clean flags
+      await this.sessionManager.updateSession(fresh.id, { verified: false, patient_id: null, conversation_state: this.STATES.INTRO, data: null, context: JSON.stringify({}) });
+      return '✅ All your data has been deleted and you are logged out.\n\n' +
+             (await this.goToInteractiveMenu(fresh));
+    }
+    */ 
 
-    // If region not set, try to auto-detect ONCE and persist it
+    // If region not set, try auto-detect
     if (!context.region) {
       const phone = session.phone_number || session.phoneNumber;
       if (typeof this.sessionManager.getRegionFromPhoneNumber === 'function') {
-        try {
-          const info = this.sessionManager.getRegionFromPhoneNumber(phone);
-          if (info && info.region && regionLabels[info.region]) {
-            context.region = info.region; // e.g., 'HK'
-            await this.sessionManager.updateSession(session.id, {
-              context: JSON.stringify(context)
-            });
-          }
-        } catch {}
+        const info = this.sessionManager.getRegionFromPhoneNumber(phone);
+        if (info && info.region && regionLabels[info.region]) {
+          context.region = info.region;
+          await this.sessionManager.updateSession(session.id, { context });
+        }
       }
     }
 
     // If region not set or user typed "region", show region selection menu
     if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
       context.awaiting_region_selection = true;
-
-      // Persist awaiting flag so we don't lose it on next read
-      await this.sessionManager.updateSession(session.id, { context: JSON.stringify(context) });
-
-      // Handle selection input (number or text match)
+      // Handle selection input
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < regionCodes.length) {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
-          await this.sessionManager.updateSession(session.id, { context: JSON.stringify(context) });
+          await this.sessionManager.updateSession(session.id, { context });
           // Return main menu immediately after setting region
           return await this.renderMainMenu(session);
         }
@@ -1108,17 +1072,19 @@ class ChatbotEngine {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
-        await this.sessionManager.updateSession(session.id, { context: JSON.stringify(context) });
+        await this.sessionManager.updateSession(session.id, { context });
+        // Return main menu immediately after setting region
         return await this.renderMainMenu(session);
       }
 
       if (!context.region || context.awaiting_region_selection) {
         const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
+        await this.sessionManager.updateSession(session.id, { context });
         return `Please select your region:\n\n${menu}\n\nReply with the number.`;
       }
     }
 
-    // From here, region is set. Proceed with existing logic...
+    // From here, region is set. Proceed with your existing menu logic, using renderMainMenu.
     if (session.verified) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
@@ -1129,16 +1095,7 @@ class ChatbotEngine {
     if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
       return await this.renderMainMenu(session);
     }
-
-    // Determine regionCode for conditional options
-    let regionCode = 'SG';
-    try {
-      const ctx = typeof session.context === 'string' ? JSON.parse(session.context || '{}') : (session.context || {});
-      regionCode = String((ctx && ctx.region) || 'SG').toUpperCase();
-    } catch { regionCode = 'SG'; }
-
-    // 1 Existing Clients -> Verify (unchanged handler)
-    if (text === '1' || text.includes('existing')) {
+    if (text === '1' || text.includes('book') || text.includes('manage')) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.VERIFY,
         verified: false
@@ -1146,32 +1103,26 @@ class ChatbotEngine {
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.handleVerifyState(updatedSession, '');
     }
-
-    // 2 New Clients -> Registration flow (reuse existing register handler)
-    if (text === '2' || (text.includes('new') && text.includes('client'))) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.REGISTER_PATIENT
-      });
-      return await this.handleRegisterPatientState(session, '');
-    }
-
-    // 3 View Fees
     if (text === '3' || text.includes('fee')) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.VIEW_FEES
       });
       return await this.handleViewFeesState(session, '');
     }
-
-    // 4 View Locations (only for non-SG)
-    if ((text === '4' || text.includes('location')) && regionCode !== 'SG') {
+    if (text === '4' || text.includes('location')) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.VIEW_LOCATIONS
       });
       return await this.handleViewLocationsState(session, '');
     }
-
-    return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
+    if (text === '2' || text.includes('register')) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.REGISTER_PATIENT
+      });
+      return await this.handleRegisterPatientState(session, '');
+    }
+    return `Sorry, I didn't understand that.\n\n` +
+      await this.renderMainMenu(session);
   }
 
   /**
@@ -1205,12 +1156,8 @@ class ChatbotEngine {
 
     // Allow user to go back to Intro menu at any time
     if (['0', 'menu', 'back'].includes(text)) {
-      // Clear transient verification flags only
-      const cleared = { ...data };
-      delete cleared.awaiting_email;
       await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO,
-        data: JSON.stringify(cleared)
+        conversation_state: this.STATES.INTRO
       });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updated);
@@ -1233,51 +1180,39 @@ class ChatbotEngine {
 
     // Attempt verification
     const patient = await this.clinikoAPI.findPatientByEmail(email);
-
-    // Always clear transient verification flags regardless of outcome
     const clearedData = { ...data };
     delete clearedData.awaiting_email;
 
     if (patient) {
       try {
-        // Persist email in context for downstream email composers
         if (typeof this.saveEmailToSessionContext === 'function') {
           await this.saveEmailToSessionContext(session, email);
         }
-        // Optionally persist into session.data for composers that read data.email
-        if (typeof this.saveEmailToSessionData === 'function') {
-          await this.saveEmailToSessionData(session, email);
-        }
       } catch (e) {
-        // noop
+        // deliberate noop
       }
-
-      // Persist only what should survive: verified + patient_id + next state
       await this.sessionManager.updateSession(session.id, {
         verified: true,
         patient_id: patient.id,
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(clearedData)
       });
-
-      // Show verified main menu (don’t carry forward VERIFY state)
       return 'Verification successful!\n\nWhat would you like to do?\n\n1️⃣ Book Appointment\n2️⃣ Cancel Appointment\n3️⃣ Reschedule Appointment\n\nReply with the number or a keyword.';
+    } else {
+      // Verification failed: go back to Intro, show region-specific support info
+      await this.sessionManager.updateSession(session.id, {
+        verified: false,
+        conversation_state: this.STATES.INTRO,
+        data: JSON.stringify(clearedData)
+      });
+      const region = this._getSessionRegion(session);
+      const support = getSupportInfo(region);
+      return (
+        "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
+        support + "\n\n" +
+        await this.renderMainMenu(session)
+      );
     }
-
-    // Verification failed: go back to Intro, show region-specific support info
-    await this.sessionManager.updateSession(session.id, {
-      verified: false,
-      patient_id: null,
-      conversation_state: this.STATES.INTRO,
-      data: JSON.stringify(clearedData)
-    });
-    const region = this._getSessionRegion(session);
-    const support = getSupportInfo(region);
-    return (
-      "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
-      support + "\n\n" +
-      await this.renderMainMenu(session)
-    );
   }
 
   /**
@@ -1288,7 +1223,7 @@ class ChatbotEngine {
   async handleBookManageOptions(session, message) {
     const text = (message || '').trim().toLowerCase();
 
-    // Region change
+    // Support region change from the verified main menu
     if (text === 'region' || text === 'change region') {
       let context = session.context;
       if (context && typeof context === 'string') {
@@ -1301,83 +1236,69 @@ class ChatbotEngine {
       return await this.handleIntroState(updated, 'region');
     }
 
-    // Back/menu -> stay within verified main menu; re-render only
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return await this.renderMainMenu(session);
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return await this.renderMainMenu(updatedSession);
     }
-
-    // Logout and wipe PII, preserve region if present
+    /*
     if (text === '9' || text.includes('logout')) {
-      let existingCtx = {};
-      try {
-        existingCtx = (typeof session.context === 'string')
-          ? JSON.parse(session.context || '{}')
-          : (session.context || {});
-      } catch { existingCtx = {}; }
-      const newCtx = { ...existingCtx };
-      delete newCtx.email;
-
       await this.sessionManager.deleteSessionAndData(session.id);
       const updatedSession = await this.sessionManager.getOrCreateSession(
         session.phone_number || session.phoneNumber,
         true
       );
-      await this.sessionManager.updateSession(updatedSession.id, {
+      await this.sessionManager.updateSession(updatedSession.id, { verified: false, patient_id: null, conversation_state: this.STATES.INTRO, data: null, context: JSON.stringify({}) });
+      return '✅ All your data has been deleted and you are logged out.\n\n' +
+        (await this.goToInteractiveMenu(updatedSession));
+    }
+    */
+    // Logout: clear PII but PRESERVE region
+    if (text === '9' || text.includes('logout')) {
+      // Keep region if present
+      let existingCtx = {};
+      let region = '';
+      try {
+        existingCtx = (typeof session.context === 'string')
+          ? JSON.parse(session.context || '{}')
+          : (session.context || {});
+        this.logger.debug('handleOutBMO : Ramesh', { existingCtx });
+      } catch {
+        existingCtx = {};
+      }
+      const newCtx = {};
+      newCtx.region = (existingCtx.region || region);
+      // Clear PII-only bits
+
+      // Wipe data + patient/verified; keep region
+      await this.sessionManager.deleteSessionAndData(session.id);
+      const fresh = await this.sessionManager.getOrCreateSession(session.phone_number || session.phoneNumber, true);
+      // Ensure flags are reset and region is preserved
+      await this.sessionManager.updateSession(fresh.id, {
         verified: false,
         patient_id: null,
         conversation_state: this.STATES.INTRO,
         data: null,
         context: JSON.stringify(newCtx)
       });
-      return '✅ All your data has been deleted and you are logged out.\n\n' +
-        (await this.goToInteractiveMenu(updatedSession));
+      const menu = await this.goToInteractiveMenu(fresh);
+      return '✅ All your data has been deleted and you are logged out.\n\n' + menu;
     }
 
-    // Determine region for any conditional flows you render later
-    let regionCode = 'SG';
-    try {
-      const ctx = typeof session.context === 'string' ? JSON.parse(session.context || '{}') : (session.context || {});
-      regionCode = String((ctx && ctx.region) || 'SG').toUpperCase();
-    } catch { regionCode = 'SG'; }
-
-    // Main actions
-    // If you have a separate “Book Appointment” entry, map it to showing the booking method menu:
     if (text === '1' || text.includes('book')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
-      return await this.renderBookingMethodMenu(session);
+      //return 'How would you like to book?\n\n1️⃣ Based on your last physio visit\n2️⃣ Soonest available\n3️⃣ At specific date\n4️⃣ Pick a specific physio\n5️⃣ Pick a specific clinic\n\nReply with number or keyword.';
+      return await this.goToInteractiveMenu(session);
     }
-
-    // If your verified menu maps directly to specific booking flows (history/soonest/date/physio/clinic),
-    // keep these branches. They are optional depending on your menu text.
-    if (text.includes('history')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
-      return await this.handleBookHistory(session, '');
+    if (text === '2' || text.includes('cancel')) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CANCEL_APPOINTMENT });
+      return await this.handleCancelAppointmentState(session, '');
     }
-    if (text.includes('soonest')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST });
-      return await this.handleBookSoonest(session, '');
+    if (text === '3' || text.includes('resched')) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
+      return await this.handleRescheduleAppointmentState(session, '');
     }
-    if (text.includes('date')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-      return await this.handleBookSpecificDate(session, '');
-    }
-    if (text.includes('physio')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-      return await this.handleBookSpecificPhysio(session, '');
-    }
-    if (text.includes('clinic')) {
-      if (regionCode === 'SG') {
-        // SG does not support clinic selection
-        return 'Clinic selection is not available in your region. Please choose another booking method.';
-      }
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
-      return await this.handleBookSpecificClinic(session, '');
-    }
-
-    // Fallback: re-render verified main menu
-    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-    return await this.renderMainMenu(session);
+    return 'Your response is not understood. Here are the options. Try again.' + (await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1388,20 +1309,30 @@ class ChatbotEngine {
   async handleBookingMethodOptions(session, message) {
     const text = (message || '').trim().toLowerCase();
 
-    // Back/menu → verified main menu
-    if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return await this.renderMainMenu(session);
+    // Support region change while at booking method menu
+    if (text === 'region' || text === 'change region') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_region_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'region');
     }
 
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+      return 'What would you like to do?\n\n' + (await this.goToInteractiveMenu(session));
+    }
     // Determine region
     let regionCode = 'SG';
     try {
       const ctx = typeof session.context === 'string' ? JSON.parse(session.context || '{}') : (session.context || {});
       regionCode = String((ctx && ctx.region) || 'SG').toUpperCase();
     } catch { regionCode = 'SG'; }
-
-    // Map inputs (1-4 everywhere, 5 only when not SG)
+  
     if (text === '1' || text.includes('history')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
       return await this.handleBookHistory(session, '');
@@ -1426,8 +1357,6 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       return await this.handleBookSpecificClinic(session, '');
     }
-
-    // Invalid input respecting region
     return `Please choose ${regionCode === 'SG' ? '1-4' : '1-5'}. Reply 0 to go back.`;
   }
 
@@ -1713,7 +1642,7 @@ class ChatbotEngine {
 
       const reply = formatPaginatedList({
         items: list,
-        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${new Date(p.last_seen).toLocaleString()}`,
+        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${new Date(p.last_seen).toLocaleString('en-GB')}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: null,
@@ -1861,7 +1790,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply4 = formatPaginatedList({
         items: filtered,
-        formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString('en-GB')}`; },
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2328,7 +2257,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply = formatPaginatedList({
         items: filtered,
-        formatFn: (s, i) => { const dt = new Date(s.slot); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s, i) => { const dt = new Date(s.slot); return `${i}. ${dt.toLocaleString('en-GB')}`; },
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2644,7 +2573,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString('en-GB')}`; },
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2870,7 +2799,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString('en-GB')}`; },
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -3152,7 +3081,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString('en-GB')}`; },
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -3305,7 +3234,7 @@ class ChatbotEngine {
       return (
         `You have selected:\n\n` +
         `• ${header}\n` +
-        `• ${dt.toLocaleString()}\n\n` +
+        `• ${dt.toLocaleString('en-GB')}\n\n` +
         `Reply YES to confirm, or 0️⃣ to cancel.`
       );
     }
@@ -3325,7 +3254,7 @@ class ChatbotEngine {
     // Time-only listing per line
     const compactFormat = (slot, idx) => {
       const dt = new Date(slot.slot);
-      return `${idx}. ${dt.toLocaleString()}`;
+      return `${idx}. ${dt.toLocaleString('en-GB')}`;
     };
 
     const reply = formatPaginatedList({
@@ -3349,6 +3278,7 @@ class ChatbotEngine {
    * @returns {Promise<string>} Message to send to the user
    */
   async handleConfirmBookingState(session, message) {
+    // --- Debug: Start function ---
     this.logger.debug('[handleConfirmBookingState] Entry', { message, sessionId: session?.id });
 
     const text = (message || '').trim().toLowerCase();
@@ -3364,49 +3294,72 @@ class ChatbotEngine {
       data = {};
     }
 
-    // Back/menu → go to verified main menu with pinned state
+    // Handle "back" or "menu"
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return await this.renderMainMenu(session);
+      try {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+          data: null
+        });
+      } catch (e) {
+        this.logger.error('[handleConfirmBookingState] Failed to update session for menu/back', e);
+      }
+      //return 'How would you like to book?\n\n1️⃣ Based on your last physio visit\n2️⃣ Soonest available\n3️⃣ At specific date\n4️⃣ Pick a specific physio\n5️⃣ Pick a specific clinic\n\nReply with number or keyword.';
+      return await this.goToInteractiveMenu(session);
     }
 
-    // Validate selected slot
-    const selectedSlot = data.selected_slot;
+    // --- Debug: Prepare slot for enrichment ---
+    let selectedSlot = data.selected_slot;
+    // Defensive: If slot is missing, bail out
     if (!selectedSlot) {
       this.logger.warn('[handleConfirmBookingState] No selected_slot in session.data');
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return "No slot was selected. Please try booking again.\n\n" + await this.renderMainMenu(session);
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+        data: null
+      });
+      return "No slot was selected. Please try booking again.";
     }
 
-    // Enrich for confirmation copy
+    // --- Debug: Enrichment ---
     let enrichedSlot = selectedSlot;
     try {
       const enrichableSlot = slotToEnrichable(selectedSlot);
       const enrichedArr = await enrichAppointmentsForDisplay([enrichableSlot], this.clinikoAPI);
       if (enrichedArr && enrichedArr[0]) {
         enrichedSlot = enrichedArr[0];
+        this.logger.debug('[handleConfirmBookingState] Slot enriched', { enriched: enrichedSlot });
+      } else {
+        this.logger.warn('[handleConfirmBookingState] Enrichment did not return an enriched slot');
       }
     } catch (e) {
       this.logger.warn('[handleConfirmBookingState] Slot enrichment failed', { error: e });
     }
     const dt = new Date(enrichedSlot.slot);
 
+    // --- Debug: Handle confirmation ---
     if (text === 'yes') {
+      // Defensive: Check required booking info
       const patient_id = session.patient_id;
       if (!patient_id) {
         this.logger.warn('[handleConfirmBookingState] Missing patient_id');
-        await this.sessionManager.updateSession(session.id, { verified: false, conversation_state: this.STATES.INTRO });
+        try {
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.INTRO,
+            verified: false
+          });
+        } catch (e) {
+          this.logger.error('[handleConfirmBookingState] Failed to set INTRO state after missing patient_id', e);
+        }
         return 'Cannot proceed with booking. Please start again.\n\n' + await this.renderMainMenu(session);
       }
 
-      // Validate slot fields
+      // Defensive: Check slot fields
       if (!selectedSlot.practitioner_id || !selectedSlot.business_id || !selectedSlot.appointment_type_id || !selectedSlot.slot) {
         this.logger.warn('[handleConfirmBookingState] Slot missing required fields', { slot: selectedSlot });
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-        return "The selected slot is missing some details. Please try booking again.\n\n" + await this.renderMainMenu(session);
+        return "The selected slot is missing some details. Please try booking again.";
       }
 
-      // Attempt booking
+      // --- Debug: Attempt booking ---
       let result = {};
       try {
         result = await this.clinikoAPI.bookAppointment({
@@ -3423,148 +3376,58 @@ class ChatbotEngine {
       }
 
       if (result.success) {
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+        // --- Debug: Booking success, show enriched details ---
         return (
           `✅ Your appointment is booked for:\n` +
-          `👨‍⚕️ ${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}\n` +
-          `🏥 ${enrichedSlot._business_display || ''}\n` +
-          `🗓️ ${dt.toLocaleString()}\n\n` +
-          await this.renderMainMenu(session)
+          `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
+          `🏥 *${enrichedSlot._business_display || ''}*\n` +
+          `🗓️ ${dt.toLocaleString('en-GB')}\n\n` +
+          await this.goToInteractiveMenu(session)
+        );
+      } else {
+        // --- Debug: Booking failed, show error message ---
+        return (
+          `❌ Could not book your appointment. ${result.message || ''}\n\n` +
+          await this.goToInteractiveMenu(session)
         );
       }
-
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return (
-        `❌ Could not book your appointment. ${result.message || ''}\n\n` +
-        await this.renderMainMenu(session)
-      );
     }
 
-    // Confirmation prompt
+    // --- Debug: Default, show confirmation message ---
     return (
       `You have selected:\n\n` +
-      `👨‍⚕️ ${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}\n` +
-      `🏥 ${enrichedSlot._business_display || ''}\n` +
-      `🗓️ ${dt.toLocaleString()}\n\n` +
+      `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
+      `🏥 *${enrichedSlot._business_display || ''}*\n` +
+      `🗓️ ${dt.toLocaleString('en-GB')}\n\n` +
       `Reply YES to confirm, or 0️⃣ to cancel.`
     );
   }
 
   // ========== VIEW FEES / LOCATIONS / REGISTER (REUSE) ==========
+
   async handleViewFeesState(session, message) {
-    try {
-      // Detect active region from session.context
-      let ctx = {};
-      try {
-        ctx = typeof session.context === 'string' ? JSON.parse(session.context || '{}') : (session.context || {});
-      } catch { ctx = {}; }
-      const region = String((ctx && ctx.region) || 'SG').toUpperCase();
+    // (re-use your static display or API as before)
+    const fees = `
+💰 *Fee Structure by Clinic*
 
-      // Region-aware mocked fees (UWC excluded by design)
-      const MOCK_FEES_BY_REGION = {
-        SG: [
-          {
-            clinic: 'Prohealth In Touch Physiotherapy',
-            items: [
-              { service: 'Initial',   price: 'SGD 190' },
-              { service: 'Follow-up', price: 'SGD 160' },
-            ]
-          },
-        ],
-        HK: [
-          {
-            clinic: 'A. Prohealth Sports & Spinal Physiotherapy Centres (15/F)',
-            items: [
-              { service: 'Initial',   price: 'HKD 1,200' },
-              { service: 'Follow-up', price: 'HKD 900' },
-            ]
-          },
-          {
-            clinic: 'B. Prohealth Sports & Spinal Physiotherapy Centres (12/F)',
-            items: [
-              { service: 'Initial',   price: 'HKD 1,100' },
-              { service: 'Follow-up', price: 'HKD 850' },
-            ]
-          },
-          {
-            clinic: 'C. Prohealth Sports and Spinal Physiotherapy Centres (WWH)',
-            items: [
-              { service: 'Initial',   price: 'HKD 1,100' },
-              { service: 'Follow-up', price: 'HKD 850' },
-            ]
-          },
-        ],
-        IN: [
-          {
-            clinic: 'Prohealth Physiotherapy – Delhi',
-            items: [
-              { service: 'Initial',   price: 'INR 1,500' },
-              { service: 'Follow-up', price: 'INR 1,200' },
-            ]
-          },
-        ],
-        PH: [
-          {
-            clinic: 'Prohealth Physiotherapy – Manila',
-            items: [
-              { service: 'Initial',   price: 'PHP 3,000' },
-              { service: 'Follow-up', price: 'PHP 2,500' },
-            ]
-          },
-        ]
-      };
+🏥 *Prohealth Physiofocus Pte Ltd*
+• Initial: SGD 180
+• Follow-up: SGD 150
 
-      const regionFees = MOCK_FEES_BY_REGION[region] || MOCK_FEES_BY_REGION.SG;
+🏥 *Prohealth In Touch Physiotherapy*
+• Initial: SGD 190
+• Follow-up: SGD 160
 
-      // Fetch live clinics (region-scoped; excludes UWC)
-      let liveClinics = [];
-      try {
-        liveClinics = await this.clinikoAPI.getClinics();
-      } catch {
-        liveClinics = [];
-      }
+🏥 *UWC East*
+• Initial: SGD 170
+• Follow-up: SGD 140
 
-      const liveCount = Array.isArray(liveClinics) ? liveClinics.length : 0;
-      const mockCount = Array.isArray(regionFees) ? regionFees.length : 0;
-
-      if (liveCount !== mockCount) {
-        const liveNames = (liveClinics || []).map(c => c.business_name).slice(0, 10);
-        const mockNames = (regionFees || []).map(x => x.clinic).slice(0, 10);
-        this.logger.warn('[FeesMock] Clinic count mismatch', {
-          region,
-          liveCount,
-          mockCount,
-          liveSample: liveNames,
-          mockSample: mockNames
-        });
-      }
-
-      const labelByRegion = {
-        SG: 'Singapore 🇸🇬',
-        HK: 'Hong Kong 🇭🇰',
-        IN: 'India 🇮🇳',
-        PH: 'Philippines 🇵🇭'
-      };
-      const regionLabel = labelByRegion[region] || region;
-
-      // Build response body from mock (always display)
-      const lines = [`💰 Fee Structure — ${regionLabel}`];
-      for (const entry of regionFees) {
-        lines.push(`\n🏥 ${entry.clinic}`);
-        for (const it of entry.items) {
-          lines.push(`• ${it.service}: ${it.price}`);
-        }
-      }
-      const body = lines.join('\n').trim();
-
-      // Do not force INTRO; let goToInteractiveMenu set and render appropriate menu
-      await this.sessionManager.updateSession(session.id, {});
-      return `${body}\n\n` + await this.goToInteractiveMenu(session);
-    } catch (e) {
-      this.logger.error('handleViewFeesState (region-mock) error', { err: e?.message || e });
-      await this.sessionManager.updateSession(session.id, {});
-      return 'We could not load fees right now. Please try again later.\n\n' + await this.goToInteractiveMenu(session);
-    }
+🏥 *UWC Dover*
+• Initial: SGD 175
+• Follow-up: SGD 145
+    `.trim();
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+    return fees + '\n\n' + await this.renderMainMenu(session);
   }
 
   async handleViewLocationsState(session, message) {
@@ -3572,10 +3435,8 @@ class ChatbotEngine {
     const displayText = clinics.map((c, idx) =>
       `${idx + 1}. ${c.business_name}\n `
     ).join('\n');
-
-    // Do not force INTRO; let goToInteractiveMenu decide and render
-    await this.sessionManager.updateSession(session.id, {});
-    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.goToInteractiveMenu(session);
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(session);
   }
 
   /**
@@ -3807,16 +3668,16 @@ class ChatbotEngine {
     const text = textRaw.toLowerCase();
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
 
-    // Back/menu to verified main menu with pinned state
+    // Back/menu
     if (text === '0' || text === 'menu' || text === 'back') {
       delete data.cancel_appt_list;
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return await this.renderMainMenu(session);
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return await this.goToInteractiveMenu(session);
     }
 
-    // Failure prompt branch
+    // Failure prompt branch: allow contacting support (unchanged)
     if (data.cancel_error_prompt === true) {
       if (text === '1') {
         try {
@@ -3835,13 +3696,13 @@ class ChatbotEngine {
           this.logger.error('Error parsing appt to cancel:', error);
         }
         delete data.cancel_error_prompt;
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-        return `Thanks. Our support team will follow up shortly.\n\n` + await this.renderMainMenu(session);
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
       }
       if (text === '0' || text === 'menu' || text === 'back') {
         delete data.cancel_error_prompt;
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-        return await this.renderMainMenu(session);
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return await this.goToInteractiveMenu(session);
       }
       return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
@@ -3858,8 +3719,8 @@ class ChatbotEngine {
       delete data.cancel_appt_list;
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return 'Could not find the selected appointment. Please try again.\n\n' + await this.renderMainMenu(session);
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
     }
 
     const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
@@ -3871,6 +3732,7 @@ class ChatbotEngine {
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
     if (result && result.success) {
+      // ✅ Send the cancel email on success (new, minimal)
       try {
         const sessionRow = await this.sessionManager.getSession(session.id);
         const payloadAppt = {
@@ -3884,9 +3746,7 @@ class ChatbotEngine {
       } catch (error) {
         this.logger.error('Error parsing appt to cancel after success:', error);
       }
-
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return `✅ Your appointment has been cancelled.\n\n` + await this.renderMainMenu(session);
+      return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
     }
 
     // Failure -> show prompt to contact support
@@ -3894,13 +3754,13 @@ class ChatbotEngine {
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
     try {
       const sessionRow = await this.sessionManager.getSession(session.id);
-      const appt2 = data.selected_cancel_appt || {};
+      const appt = data.selected_cancel_appt || {};
       const payloadAppt = {
-        id: appt2.id,
-        starts_at: appt2.starts_at || appt2.appointment_start || appt2.slot,
-        appointment_type: appt2._appointment_type_display || appt2.appointment_type_name || appt2.appointment_type,
-        practitioner: appt2._practitioner_display || appt2.practitioner_name || appt2.practitioner,
-        clinic: appt2._business_display || appt2.business_name || appt2.clinic,
+        id: appt.id,
+        starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+        appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+        practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+        clinic: appt._business_display || appt.business_name || appt.clinic,
         patient_email: (data && data.email) || sessionRow.email || ''
       };
       if (typeof this._composeSupportEmailPayloadCancelled === 'function') {
@@ -3909,7 +3769,9 @@ class ChatbotEngine {
           await this._postEmail(payload);
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      // deliberate noop
+    }
     return `❌ Could not cancel your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
   }
 
@@ -4054,7 +3916,7 @@ class ChatbotEngine {
     });
     const slotList = formatPaginatedList({
       items: availableTimes,
-      formatFn: (slot, i) => `${i}. ${new Date(slot.appointment_start).toLocaleString()}`,
+      formatFn: (slot, i) => `${i}. ${new Date(slot.appointment_start).toLocaleString('en-GB')}`,
       page: 0,
       pageSize: MAX_SLOT_ITEMS,
       moreLabel: 'M. More slots',
@@ -4084,57 +3946,52 @@ class ChatbotEngine {
     const availableTimes = data.available_times || [];
     let slot_page = data.slot_page || 0;
 
-    // Error prompt follow-ups
+    // Back/menu from error prompt
     if (data.resched_error_prompt === true) {
       if (text === '1') {
+        // Contact support with context
         try {
           const sessionRow = await this.sessionManager.getSession(session.id);
-          const oldAppt = data.selected_reschedule_appt || {};
-          const chosen = data.selected_new_slot || {};
-          const oldPayload = {
-            id: oldAppt.id,
-            starts_at: oldAppt.starts_at || oldAppt.appointment_start || oldAppt.slot,
-            appointment_type: oldAppt._appointment_type_display || oldAppt.appointment_type_name || oldAppt.appointment_type,
-            practitioner: oldAppt._practitioner_display || oldAppt.practitioner_name || oldAppt.practitioner,
-            clinic: oldAppt._business_display || oldAppt.business_name || oldAppt.clinic,
-            patient_email: (data && data.email) || sessionRow.email || ''
+          const oldAppt = {
+            id: appt?.id,
+            starts_at: appt?.starts_at || appt?.appointment_start || appt?.slot,
+            appointment_type: appt?._appointment_type_display || appt?.appointment_type_name || appt?.appointment_type,
+            practitioner: appt?._practitioner_display || appt?.practitioner_name || appt?.practitioner,
+            clinic: appt?._business_display || appt?.business_name || appt?.clinic,
+            note: 'User attempted reschedule, system returned failure.'
           };
-          const newPayload = {
-            id: chosen.id || '',
-            starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
-            appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
-            practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
-            clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
+          const sel = data.selected_new_slot || {};
+          const newAppt = {
+            id: sel.id || '',
+            starts_at: sel.starts_at || sel.appointment_start || sel.slot || '',
+            appointment_type: sel.appointment_type_name || sel.appointment_type || (data._selected_type_display || ''),
+            practitioner: sel.practitioner_name || sel.practitioner || (data._selected_practitioner_display || ''),
+            clinic: sel.business_name || sel.clinic || (data._selected_business_display || '')
           };
-          if (typeof this._composeSupportEmailPayloadRescheduled === 'function') {
-            const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data, oldPayload, newPayload, true);
-            if (payload && Array.isArray(payload.to) && payload.to.length && typeof this._postEmail === 'function') {
-              await this._postEmail(payload);
-            }
-          }
+          await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
         } catch (error) {
-          this.logger.error('Error composing/sending failure reschedule email:', error);
+          this.logger.error('Error parsing appt to reschedule after failure:', error);
         }
         delete data.resched_error_prompt;
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-        return `Thanks. Our support team will follow up shortly.\n\n` + await this.renderMainMenu(session);
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `Thanks. Our support team will follow up shortly.\n\n` + await this.goToInteractiveMenu(session);
       }
       if (text === '0' || text === 'menu' || text === 'back') {
         delete data.resched_error_prompt;
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-        return await this.renderMainMenu(session);
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return await this.goToInteractiveMenu(session);
       }
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
-    // Pagination
+    // Pagination for slot list
     if (text === 'm' || text === 'more') {
       slot_page = slot_page + 1;
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const slotList = formatPaginatedList({
         items: availableTimes,
-        formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
+        formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString('en-GB')}`,
         page: slot_page,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: (slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? 'M. More' : null,
@@ -4143,11 +4000,12 @@ class ChatbotEngine {
       return slotList;
     }
 
-    // Back/menu → verified main menu with pinned state
-     if (text === '0' || text === 'menu' || text === 'back') {
-       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-       return await this.renderMainMenu(session);
-     }
+    // Back/menu
+    if (text === '0' || text === 'menu' || text === 'back') {
+      // Do not clear the original selection here; user may come back
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS, data: JSON.stringify(data) });
+      return await this.goToInteractiveMenu(session);
+    }
 
     // Pick a slot by index
     if (/^\d+$/.test(text)) {
@@ -4189,56 +4047,82 @@ class ChatbotEngine {
       };
 
       const result = await this.clinikoAPI.updateIndividualAppointment(appt.id.toString(), payload);
-
       if (result && result.success) {
+        // Email on success
         try {
           const sessionRow = await this.sessionManager.getSession(session.id);
           const oldAppt = {
-            id: appt?.id,
-            starts_at: appt?.starts_at || appt?.appointment_start || appt?.slot,
-            appointment_type: appt?._appointment_type_display || appt?.appointment_type_name || appt?.appointment_type,
-            practitioner: appt?._practitioner_display || appt?.practitioner_name || appt?.practitioner,
-            clinic: appt?._business_display || appt?.business_name || appt?.clinic,
-            patient_email: (data && data.email) || sessionRow.email || ''
+            id: appt.id,
+            starts_at: appt.starts_at || appt.appointment_start || appt.slot,
+            appointment_type: appt._appointment_type_display || appt.appointment_type_name || appt.appointment_type,
+            practitioner: appt._practitioner_display || appt.practitioner_name || appt.practitioner,
+            clinic: appt._business_display || appt.business_name || appt.clinic
           };
           const newAppt = {
-            id: slot?.id || '',
-            starts_at: starts_at,
-            appointment_type: slot?.appointment_type_name || slot?.appointment_type || (data._selected_type_display || ''),
-            practitioner: slot?.practitioner_name || slot?.practitioner || (data._selected_practitioner_display || ''),
-            clinic: slot?.business_name || slot?.clinic || (data._selected_business_display || '')
+            id: result.new_id || chosen.id || '',
+            starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
+            appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
+            practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
+            clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
           };
           await this._sendRescheduledEmail(sessionRow, data, oldAppt, newAppt);
-        } catch (err) {
-          this.logger.error('Reschedule success email send error:', err);
+        } catch (error) {
+          this.logger.error('Error parsing appt to reschedule after success:', error);
         }
 
         // Clear transient reschedule UI state
         delete data.available_times; delete data.selected_new_slot; delete data.slot_page;
         delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx;
-        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data), conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-
-        return `✅ Your appointment has been rescheduled.\n\n` + await this.renderMainMenu(session);
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return `✅ Your appointment has been rescheduled.\n\n` + await this.goToInteractiveMenu(session);
       }
 
       // Failure: keep state and offer support
       data.resched_error_prompt = true;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+
+      try {
+        const sessionRow = await this.sessionManager.getSession(session.id);
+        const oldAppt = data.selected_reschedule_appt || {};
+        const chosen = data.selected_new_slot || {};
+        const oldPayload = {
+          id: oldAppt.id,
+          starts_at: oldAppt.starts_at || oldAppt.appointment_start || oldAppt.slot,
+          appointment_type: oldAppt._appointment_type_display || oldAppt.appointment_type_name || oldAppt.appointment_type,
+          practitioner: oldAppt._practitioner_display || oldAppt.practitioner_name || oldAppt.practitioner,
+          clinic: oldAppt._business_display || oldAppt.business_name || oldAppt.clinic,
+          patient_email: (data && data.email) || sessionRow.email || ''
+        };
+        const newPayload = {
+          id: chosen.id || '',
+          starts_at: chosen.starts_at || chosen.appointment_start || chosen.slot || '',
+          appointment_type: chosen.appointment_type_name || chosen.appointment_type || (data._selected_type_display || ''),
+          practitioner: chosen.practitioner_name || chosen.practitioner || (data._selected_practitioner_display || ''),
+          clinic: chosen.business_name || chosen.clinic || (data._selected_business_display || '')
+        };
+        if (typeof this._composeSupportEmailPayloadRescheduled === 'function') {
+          const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data, oldPayload, newPayload, true);
+          if (payload && Array.isArray(payload.to) && payload.to.length && typeof this._postEmail === 'function') {
+            await this._postEmail(payload);
+          }
+        }
+      } catch (e) {
+        // deliberate noop
+      }
       return `❌ Could not reschedule your appointment.\n\nReply 1 to contact support, or 0 to return to menu.`;
     }
 
-    // Initial render (or invalid input)
+    // Initial render of slot list (or invalid input)
     const slotList = formatPaginatedList({
       items: availableTimes,
-      formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
+      formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString('en-GB')}`,
       page: slot_page,
       pageSize: MAX_SLOT_ITEMS,
       moreLabel: (slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? 'M. More' : null,
       header: 'Pick a new time:'
     }) + `\n\nReply with number${(slot_page + 1) * MAX_SLOT_ITEMS < availableTimes.length ? ' or M for more' : ''}. (0️⃣ Back)`;
     return slotList;
-  }  
-
+  }
 
   /**
    * Build email payload after a successful or failed reschedule.
@@ -4308,7 +4192,7 @@ class ChatbotEngine {
     let whenOld = '—';
     try {
       if (oldAppt && oldAppt.starts_at) {
-        whenOld = new Date(oldAppt.starts_at).toLocaleString();
+        whenOld = new Date(oldAppt.starts_at).toLocaleString('en-GB');
       }
     } catch (e) {
       whenOld = '—';
@@ -4317,7 +4201,7 @@ class ChatbotEngine {
     let whenNew = '—';
     try {
       if (newAppt && newAppt.starts_at) {
-        whenNew = new Date(newAppt.starts_at).toLocaleString();
+        whenNew = new Date(newAppt.starts_at).toLocaleString('en-GB');
       }
     } catch (e) {
       whenNew = '—';
@@ -4437,7 +4321,7 @@ class ChatbotEngine {
     let whenStr = '—';
     try {
       if (appt && appt.starts_at) {
-        whenStr = new Date(appt.starts_at).toLocaleString();
+        whenStr = new Date(appt.starts_at).toLocaleString('en-GB');
       }
     } catch (e) {
       whenStr = '—';
@@ -4545,7 +4429,7 @@ class ChatbotEngine {
     function fmtTs(ts) {
       try {
         if (ts) {
-          return new Date(ts).toLocaleString();
+          return new Date(ts).toLocaleString('en-GB');
         }
         return '';
       } catch (e) {
