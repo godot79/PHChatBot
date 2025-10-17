@@ -20,7 +20,7 @@ const REGION_SUPPORT_INFO = {
     email: 'admin@intouchphysio.com,ramesh@prohealthasia.com'
   },
   HK: {
-    phone: '+852 1234 5678',
+    phone: '+852 1235 5678',
     email: 'appt@physiohk.com,ramesh@prohealthasia.com'
   },
   IN: {
@@ -1197,7 +1197,8 @@ class ChatbotEngine {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(clearedData)
       });
-      return 'Verification successful!\n\nWhat would you like to do?\n\n1️⃣ Book Appointment\n2️⃣ Cancel Appointment\n3️⃣ Reschedule Appointment\n\nReply with the number or a keyword.';
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return 'Verification successful!\n\n' + await this.goToInteractiveMenu(updatedSession);
     } else {
       // Verification failed: go back to Intro, show region-specific support info
       await this.sessionManager.updateSession(session.id, {
@@ -2379,7 +2380,7 @@ class ChatbotEngine {
         business_id: String(data.selected_clinic.id),
         practitioner_id: String(data.selected_physio.id),
         from,
-        to
+        from
       });
 
       const typeNorm = normName(data.selected_appt_type?.name || '');
@@ -2417,7 +2418,8 @@ class ChatbotEngine {
 
     // fallback
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-    return await this.goToInteractiveMenu(session);
+    const fresh = await this.sessionManager.getSession(session.id);
+    return await this.goToInteractiveMenu(fresh);
   }
 
   /**
@@ -2498,7 +2500,8 @@ class ChatbotEngine {
           data.selection_step = 'choose_type';
           if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-          return await this.handleBookSpecificPhysio(session, '');
+          const fresh = await this.sessionManager.getSession(session.id);
+          return await this.handleBookSpecificPhysio(fresh, '');
         }
       }
 
@@ -2522,6 +2525,7 @@ class ChatbotEngine {
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
+          if (/UWC/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
@@ -2539,7 +2543,8 @@ class ChatbotEngine {
           data.selection_step = 'choose_clinic';
           if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-          return await this.handleBookSpecificPhysio(session, '');
+          const fresh = await this.sessionManager.getSession(session.id);
+          return await this.handleBookSpecificPhysio(fresh, '');
         }
       }
 
@@ -2579,7 +2584,8 @@ class ChatbotEngine {
           data.selection_step = 'view_slots';
           if (typeof navPush === 'function') navPush(data, 'view_slots', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-          return await this.handleBookSpecificPhysio(session, '');
+          const fresh = await this.sessionManager.getSession(session.id);
+          return await this.handleBookSpecificPhysio(fresh, '');
         }
       }
 
@@ -2643,7 +2649,8 @@ class ChatbotEngine {
 
     // fallback
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-    return await this.goToInteractiveMenu(session);
+    const fresh = await this.sessionManager.getSession(session.id);
+    return await this.goToInteractiveMenu(fresh);
   }
 
   /**
@@ -4294,15 +4301,8 @@ class ChatbotEngine {
       whenStr = '—';
     }
 
-    //const subjectPrefix = failed ? '[Cancel Failed]' : '[Cancelled]';
     const subjectPrefix = 'Booked!';
     const subject = subjectPrefix + ' Appointment — ' + region + ' — ' + phone;
-   /*
-   let failureNote = '';
-    if (failed === true) {
-      failureNote = '\nNote: User attempted to cancel via chatbot but the operation failed. Please assist.\n';
-    }
-    */ 
     const text =
   'Appointment booking notification.\n\n' +
   '— Context —\n' +
@@ -4721,10 +4721,7 @@ class ChatbotEngine {
     ctx.email = String(email || '').trim();
 
     try {
-      // If your updateSession expects a plain object for context, this is fine.
-      // If it expects a string, you can replace the next line with:
       await this.sessionManager.updateSession(session.id, { context: JSON.stringify(ctx) });
-      //await this.sessionManager.updateSession(session.id, { context: ctx });
     } catch (e) {
       // noop
     }
