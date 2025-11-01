@@ -123,13 +123,30 @@ function _parseDobDdMmYyyy(raw) {
 }
 
 /**
- * Returns the inline image attachment object for the company logo using a base64-encoded PNG.
- * Reference in HTML as <img src="cid:prohealth-logo" ... />.
- * Swap base64Data with the real company logo for production.
+ * Returns the inline image attachment object for the company logo using a base64-encoded JPEG
+ * loaded from either PROHEALTH_LOGO_JPEG_BASE64 (env) or PROHEALTH_LOGO_JPEG_PATH (file).
+ * Keeps source code small and avoids inlining large Base64 strings.
+ *
+ * Resolution order:
+ * - If PROHEALTH_LOGO_JPEG_BASE64 is set, use it.
+ * - Else if PROHEALTH_LOGO_JPEG_PATH is set, read file contents (single-line).
+ * - Else return empty content (no change to existing behavior unless configured).
  */
 function _getInlineLogoAttachment() {
-  const base64Data =
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII='; // 1x1 transparent PNG
+  const fs = require('fs');
+  const envB64 = process.env.PROHEALTH_LOGO_PNG_BASE64;
+  const path = process.env.PROHEALTH_LOGO_PNG_PATH;
+  let base64Data = '';
+  if (envB64) {
+    base64Data = envB64.trim();
+  } else if (path) {
+    try {
+      base64Data = fs.readFileSync(path, 'utf8').trim();
+    } catch (_err) {
+
+      base64Data = '';
+    }
+  }
   return {
     filename: 'prohealth-logo.png',
     content: base64Data,
