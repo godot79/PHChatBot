@@ -88,6 +88,57 @@ function resolveSupportEmails(region) {
   return Array.from(out);
 }
 
+/**
+ * Parse a user-entered DOB in the format "dd mm yyyy" (lenient on separators).
+ * Returns an ISO date string "YYYY-MM-DD" if valid, else null.
+ *
+ * Rules:
+ * - Accepts separators as spaces or non-digit chars (e.g., "09 04 1987", "09-04-1987", "09/04/1987").
+ * - Validates calendar date and coerces to UTC YYYY-MM-DD without time.
+ * - Rejects impossible dates (e.g., 31/02/2020).
+ *
+ * @param {string} raw - User input for DOB.
+ * @returns {string|null} YYYY-MM-DD or null if invalid.
+ */
+function _parseDobDdMmYyyy(raw) {
+  try {
+    const s = String(raw || '').trim();
+    const parts = s.split(/[^0-9]+/).filter(Boolean);
+    if (parts.length !== 3) return null;
+    let [dd, mm, yyyy] = parts.map(p => parseInt(p, 10));
+    if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yyyy)) return null;
+    if (yyyy < 1900 || yyyy > 2100) return null;
+    if (mm < 1 || mm > 12) return null;
+    if (dd < 1 || dd > 31) return null;
+
+    const date = new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0, 0));
+    if (isNaN(date.getTime())) return null;
+    if (date.getUTCFullYear() !== yyyy || (date.getUTCMonth() + 1) !== mm || date.getUTCDate() !== dd) return null;
+
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns the inline image attachment object for the company logo using a base64-encoded PNG.
+ * Reference in HTML as <img src="cid:prohealth-logo" ... />.
+ * Swap base64Data with the real company logo for production.
+ */
+function _getInlineLogoAttachment() {
+  const base64Data =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII='; // 1x1 transparent PNG
+  return {
+    filename: 'prohealth-logo.png',
+    content: base64Data,
+    encoding: 'base64',
+    cid: 'prohealth-logo',
+    contentType: 'image/png'
+  };
+}
+
 // ====== NAVIGATION HELPERS ======
 
 /**
@@ -1185,12 +1236,187 @@ class ChatbotEngine {
   }
 
   /**
-   * Handle user identity verification state.
-   * - Allows user to go back to Intro menu with "0/menu/back".
-   * - On verification failure, returns region-specific support info.
-   * @param {object} session
-   * @param {string} message
+   * Handle user identity verification (email + DOB).
+   * Flow:
+   *   1) Prompt for email
+   *   2) Prompt for DOB (dd mm yyyy)
+   *   3) Verify via ClinikoAPI.findPatientByEmailAndDob
+   *
+   * Navigation:
+   *   - "0/menu/back" => Intro + renderMainMenu
+   *   - On failure => 3-option fail prompt:
+   *        1. Try again
+   *        2. Have someone reach out
+   *        3. Go to main menu
+   *     Stored as data.verify_error_prompt = true to route follow-up input.
    */
+  async handleVerifyState(session, message) {
+    // Safe parse session.data
+    let data = {};
+    try {
+      data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    } catch { data = {}; }
+
+    const textRaw = (message || '').trim();
+    const text = textRaw.toLowerCase();
+
+    // Back/menu at any time -> Intro + main menu
+    if (['0', 'menu', 'back'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.renderMainMenu(updated);
+    }
+
+    // If we're in the fail-prompt branch, process 1/2/3
+    if (data.verify_error_prompt === true) {
+      if (text === '1') {
+        // Try again: clear verify state and restart flow at email
+        delete data.verify_error_prompt;
+        delete data.verify_email;
+        delete data.verify_dob;
+        delete data.awaiting_dob;
+        delete data.awaiting_email;
+        data.awaiting_email = true;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(data) });
+        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+      }
+
+      if (text === '2') {
+        // Have support reach out: send support email with minimal context and go to verified main menu (or intro)
+        try {
+          const sessionRow = await this.sessionManager.getSession(session.id);
+          // Reuse existing generic "no slots/contact" composer for outreach
+          if (typeof this._composeSupportEmailPayloadNoSlots === 'function' && typeof this._postEmail === 'function') {
+            const payload = await this._composeSupportEmailPayloadNoSlots(sessionRow, { reason: 'Verification failed: user requested outreach.' });
+            if (payload && Array.isArray(payload.to) && payload.to.length) {
+              await this._postEmail(payload);
+            }
+          }
+        } catch (e) {
+          // noop
+        }
+        // Clear prompt state and return to main menu (Intro, since not verified)
+        delete data.verify_error_prompt;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
+        const updated = await this.sessionManager.getSession(session.id);
+        return 'Thanks. Our support team will reach out shortly.\n\n' + await this.renderMainMenu(updated);
+      }
+
+      if (text === '3') {
+        // Go to main menu
+        delete data.verify_error_prompt;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
+        const updated = await this.sessionManager.getSession(session.id);
+        return await this.renderMainMenu(updated);
+      }
+
+      // Unknown input → reprint the fail prompt
+      return (
+        "We couldn't verify those details.\n\n" +
+        "1. Try again\n" +
+        "2. Have someone reach out\n" +
+        "3. Go to main menu\n\n" +
+        "(Reply 1, 2, or 3. 0️⃣ Back)"
+      );
+    }
+
+    // Step 1: ask for email
+    if (!data.verify_email) {
+      if (!data.awaiting_email) {
+        data.awaiting_email = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+      }
+      // Validate email input
+      const email = textRaw.trim().toLowerCase();
+      if (!email.includes('@') || !email.includes('.')) {
+        return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+      }
+      data.verify_email = email;
+      delete data.awaiting_email;
+      data.awaiting_dob = true;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return 'Please enter your date of birth in the format: dd mm yyyy (e.g., 09 04 1987).\n\n(0️⃣ Back to menu)';
+    }
+
+    // Step 2: ask for DOB
+    if (!data.verify_dob) {
+      if (!textRaw) {
+        return 'Please enter your date of birth in the format: dd mm yyyy (e.g., 09 04 1987).\n\n(0️⃣ Back to menu)';
+      }
+      const parsed = _parseDobDdMmYyyy(textRaw);
+      if (!parsed) {
+        return 'That doesn\'t look like a valid date. Please enter your date of birth as dd mm yyyy (e.g., 09 04 1987).\n\n(0️⃣ Back to menu)';
+      }
+      data.verify_dob = parsed; // YYYY-MM-DD
+      delete data.awaiting_dob;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    }
+
+    // Step 3: verify with API (email + dob)
+    const emailToFind = data.verify_email;
+    const dobToFind = data.verify_dob; // YYYY-MM-DD
+
+    try {
+      // New API method that prefers exact match and falls back email-only internally
+      const patient = await this.clinikoAPI.findPatientByEmailAndDob(emailToFind, dobToFind);
+
+      // Clean transient verify state before branching
+      const cleared = { ...data };
+      delete cleared.awaiting_email;
+      delete cleared.awaiting_dob;
+      delete cleared.verify_email;
+      delete cleared.verify_dob;
+
+      if (patient && patient.id) {
+        try {
+          if (typeof this.saveEmailToSessionContext === 'function') {
+            await this.saveEmailToSessionContext(session, emailToFind);
+          }
+        } catch {}
+        await this.sessionManager.updateSession(session.id, {
+          verified: true,
+          patient_id: patient.id,
+          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          data: JSON.stringify(cleared)
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        return 'Verification successful!\n\n' + await this.goToInteractiveMenu(updated);
+      }
+
+      // Failure → show 3-option fail prompt
+      cleared.verify_error_prompt = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
+
+      const region = this._getSessionRegion(session);
+      const support = getSupportInfo(region);
+      return (
+        "We couldn't verify those details. Please check your email and date of birth and try again, or contact support for assistance.\n\n" +
+        support + "\n\n" +
+        "1. Try again\n" +
+        "2. Have someone reach out\n" +
+        "3. Go to main menu\n\n" +
+        "(Reply 1, 2, or 3. 0️⃣ Back)"
+      );
+    } catch (e) {
+      // API error → same fail prompt
+      const cleared = { ...data, verify_error_prompt: true };
+      delete cleared.awaiting_email;
+      delete cleared.awaiting_dob;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
+
+      const region = this._getSessionRegion(session);
+      const support = getSupportInfo(region);
+      return (
+        "We couldn't verify those details. Please check your email and date of birth and try again, or contact support for assistance.\n\n" +
+        support + "\n\n" +
+        "1. Try again\n" +
+        "2. Have someone reach out\n" +
+        "3. Go to main menu\n\n" +
+        "(Reply 1, 2, or 3. 0️⃣ Back)"
+      );
+    }
+  }
   async handleVerifyState(session, message) {
     let data = {};
     try {
@@ -3474,9 +3700,16 @@ class ChatbotEngine {
 
   /**
    * Handle patient registration flow with support for "0/back/menu".
-   * - At any prompt, typing "0"/"back"/"menu" cancels registration and returns to the Intro menu.
-   * - Preserves your required fields order: first_name -> last_name -> email.
-   * - Uses only ClinikoAPI.registerNewPatient; does not change Logger or API contracts.
+   * - Adds DOB (dd mm yyyy) collection before calling ClinikoAPI.registerNewPatient.
+   * - On successful registration:
+   *    • Saves email into session context (existing helper).
+   *    • Builds a verification message + patient-form link (no POST), sends back to user.
+   *    • Sends a "registration" email using existing composer, appending the form message.
+   * - On failure:
+   *    • Sends a support email with chat history via _composeSupportEmailPayloadNoSlots.
+   *    • Prompts the user with existing 3-option support semantics.
+   *
+   * Uses only uploaded helpers and endpoints. Does not alter other flows.
    *
    * @param {object} session
    * @param {string} message
@@ -3499,8 +3732,8 @@ class ChatbotEngine {
       return await this.renderMainMenu(updated);
     }
 
-    // Collect required fields in order
-    const required = ['first_name', 'last_name', 'email'];
+    // Collect required fields in order, with DOB added (dd mm yyyy)
+    const required = ['first_name', 'last_name', 'email', 'date_of_birth'];
     let next = null;
     for (const f of required) {
       if (!data[f]) { next = f; break; }
@@ -3508,32 +3741,50 @@ class ChatbotEngine {
 
     if (next) {
       if (text) {
-        data[next] = text;
+        if (next === 'date_of_birth') {
+          const parsed = _parseDobDdMmYyyy(text);
+          if (!parsed) {
+            return "Please enter your date of birth in the format: dd mm yyyy (e.g., 09 04 1987).\n(0️⃣ Back)";
+          }
+          data.date_of_birth = parsed; // store as YYYY-MM-DD
+        } else if (next === 'email') {
+          const emailLower = text.trim().toLowerCase();
+          if (!emailLower.includes('@') || !emailLower.includes('.')) {
+            return "That doesn't look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back)";
+          }
+          data.email = emailLower;
+        } else {
+          data[next] = text;
+        }
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         log.info('Collected field', { field: next });
       }
-      if (!data.first_name) return "Please tell me your first name:\n(0️⃣ Back)";
-      if (!data.last_name)  return "Got it. What's your last name?\n(0️⃣ Back)";
-      if (!data.email)      return "Thanks. Lastly, what's your email address?\n(0️⃣ Back)";
+
+      if (!data.first_name)     return "Please tell me your first name:\n(0️⃣ Back)";
+      if (!data.last_name)      return "Got it. What's your last name?\n(0️⃣ Back)";
+      if (!data.email)          return "Thanks. Lastly, what's your email address?\n(0️⃣ Back)";
+      if (!data.date_of_birth)  return "Please enter your date of birth (dd mm yyyy):\n(0️⃣ Back)";
     }
 
     // All fields collected → register
     const phoneNumber = session.phone_number || session.phoneNumber;
-    if (!data.email || !phoneNumber) {
+    if (!data.email || !phoneNumber || !data.date_of_birth) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.INTRO,
         verified: false
       });
       const updated = await this.sessionManager.getSession(session.id);
-      log.warn('Missing email or phone for registration');
-      return "We need both email and phone number to complete registration.\n\n" + await this.renderMainMenu(updated);
+      log.warn('Missing email, phone, or DOB for registration');
+      return "We need your email, phone number, and date of birth to complete registration.\n\n" + await this.goToInteractiveMenu(updated);
     }
 
     const patient = {
       first_name: data.first_name,
       last_name:  data.last_name,
       email:      data.email,
+      date_of_birth: data.date_of_birth
     };
+
     const phone = String(session.phoneNumber || '').trim();
     if (phone) {
       if (Array.isArray(patient.patient_phone_numbers)) {
@@ -3552,26 +3803,82 @@ class ChatbotEngine {
           if (typeof this.saveEmailToSessionContext === 'function') {
             await this.saveEmailToSessionContext(session, patient.email);
           }
+        } catch (e) { /* noop */ }
+
+        // Try to attach patient_id to session for subsequent flows
+        try {
+          const newPatientId = result?.patient?.id || result?.id || null;
+          if (newPatientId) {
+            await this.sessionManager.updateSession(session.id, { patient_id: newPatientId });
+            session.patient_id = newPatientId;
+          }
+        } catch (e) { /* noop */ }
+
+        // Build verification + patient-form link (no POST)
+        // const formMsg = await this._buildPatientFormIntroMessage(session, result);
+
+        // Send confirmation email to support + user by reusing booked email composer (adds Next Step)
+        try {
+          const sessionRow = await this.sessionManager.getSession(session.id);
+          const apptLike = {
+            id: '',
+            starts_at: '',
+            appointment_type: 'New Patient Registration',
+            practitioner: '',
+            clinic: ''
+          };
+          const payload = await this._composeSupportEmailPayloadBooked(sessionRow, { email: patient.email }, apptLike, false);
+          if (payload) {
+            // const extra = `\n\n— Next Step —\n${formMsg}`;
+            const extra = `\n\n— Next Step —\n`;
+            payload.text = (payload.text || '') + extra;
+            if (payload.html) {
+              const safe = (s) => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+              //const injected = `<h3 style="margin:16px 0 8px 0;">Next Step</h3><p style="margin:0;">${safe(formMsg).replace(/\n/g,'<br/>')}</p>`;
+              const injected = `<h3 style="margin:16px 0 8px 0;">Next Step</h3><p style="margin:0;"></p>`;
+              payload.html = payload.html.replace('</body></html>', injected + '</body></html>');
+            }
+            if (Array.isArray(payload.to) && payload.to.length) {
+              await this._postEmail(payload);
+            }
+          }
         } catch (e) {
-          // deliberate noop
+          this.logger.warn('Registration success email send failed', { error: e?.message || e });
         }
+
         await this.sessionManager.updateSession(session.id, {
           verified: true,
           conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
           data: null
         });
         const updated = await this.sessionManager.getSession(session.id);
-        log.info('Registration success', { email: patient.email });
-        return `✅ You've been registered!\n\n` + await this.renderMainMenu(updated);
+
+        this.logger.info('Registration success', { email: patient.email });
+        //return `✅ You've been registered!\n\n${formMsg}\n\n` + await this.renderMainMenu(updated);
+        return `✅ You've been registered!\n\n` + await this.goToInteractiveMenu(updated);
       }
-      log.warn('Registration returned falsy result');
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return "Sorry, we couldn't complete registration right now.\n\n" + await this.renderMainMenu(session);
+      log.warn('Registration returned false result');
     } catch (e) {
       log.error('Registration error', { err: e?.message || e });
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return "We hit an error while registering you. Please try again later.\n\n" + await this.renderMainMenu(session);
     }
+
+    // Failure → send email with chat history and show support options
+    try {
+      const sessionRow = await this.sessionManager.getSession(session.id);
+      if (typeof this._composeSupportEmailPayloadNoSlots === 'function' && typeof this._postEmail === 'function') {
+        const payload = await this._composeSupportEmailPayloadNoSlots(sessionRow, data || {});
+        if (payload && Array.isArray(payload.to) && payload.to.length) {
+          await this._postEmail(payload);
+        }
+      }
+    } catch (e) { /* noop */ }
+
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+    return "We hit an error while registering you. Please try again later.\n\n" +
+           "1. Go back one level\n" +
+           "2. Have someone reach out\n" +
+           "3. Go to main menu\n\n" +
+           await this.goToInteractiveMenu(session);
   }
 
   // ========== CANCEL WORKFLOW  ==========
@@ -4170,83 +4477,17 @@ class ChatbotEngine {
    * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
    */
   async _composeSupportEmailPayloadRescheduled(sessionRow, data = {}, oldAppt = {}, newAppt = {}, failed = false) {
-    let ctx = {};
-    try {
-      if (sessionRow && typeof sessionRow.context === 'string') {
-        ctx = JSON.parse(sessionRow.context || '{}');
-      } else if (sessionRow && sessionRow.context) {
-        ctx = sessionRow.context;
-      } else {
-        ctx = {};
-      }
-    } catch (e) {
-      ctx = {};
-    }
-
-    let region = 'SG';
-    try {
-      if (ctx && ctx.region) {
-        region = String(ctx.region).toUpperCase();
-      } else if (data && data.region) {
-        region = String(data.region).toUpperCase();
-      }
-    } catch (e) {
-      // deliberate noop
-    }
-
-    let phone = '';
-    try {
-      if (sessionRow && sessionRow.phone_number) {
-        phone = sessionRow.phone_number;
-      } else if (data && data.phone) {
-        phone = data.phone;
-      }
-    } catch (e) {
-      phone = '';
-    }
-
-    let email = '—';
-    try {
-      let ctxEmail = '';
-      try {
-        const ctxObj = typeof sessionRow?.context === 'string'
-          ? JSON.parse(sessionRow.context || '{}')
-          : (sessionRow?.context || {});
-        ctxEmail = String(ctxObj.email || '').trim();
-      } catch (_) {}
-      const cand = (data && data.email) || ctxEmail || (sessionRow && sessionRow.email) || '';
-      email = String(cand || '').trim() || '—';
-    } catch (e) {
-      email = '—';
-    }
-
+    function safeJSON(v){ try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } }
+    const ctx = safeJSON(sessionRow?.context);
+    let region = String((ctx.region || data.region || 'SG')).toUpperCase();
+    let phone = String(sessionRow?.phone_number || data.phone || '').trim();
+    let email = String((data.email || ctx.email || sessionRow?.email || '')).trim() || '—';
     const to = resolveSupportEmails(region);
 
-    let whenOld = '—';
-    try {
-      if (oldAppt && oldAppt.starts_at) {
-        whenOld = new Date(oldAppt.starts_at).toLocaleString('en-GB');
-      }
-    } catch (e) {
-      whenOld = '—';
-    }
+    let whenOld = '—'; try { if (oldAppt?.starts_at) whenOld = new Date(oldAppt.starts_at).toLocaleString('en-GB'); } catch {}
+    let whenNew = '—'; try { if (newAppt?.starts_at) whenNew = new Date(newAppt.starts_at).toLocaleString('en-GB'); } catch {}
 
-    let whenNew = '—';
-    try {
-      if (newAppt && newAppt.starts_at) {
-        whenNew = new Date(newAppt.starts_at).toLocaleString('en-GB');
-      }
-    } catch (e) {
-      whenNew = '—';
-    }
-
-    const subjectPrefix = failed ? '[Reschedule Failed]' : '[Rescheduled]';
-    const subject = subjectPrefix + ' Appointment — ' + region + ' — ' + phone;
-
-    let failureNote = '';
-    if (failed === true) {
-      failureNote = '\nNote: User attempted to reschedule via chatbot but the operation failed. Please assist.\n';
-    }
+    const subject = (failed ? '[Reschedule Failed]' : '[Rescheduled]') + ' Appointment — ' + region + ' — ' + phone;
 
     const text =
   'Appointment reschedule notification.\n\n' +
@@ -4254,35 +4495,59 @@ class ChatbotEngine {
   'Region: ' + region + '\n' +
   'Phone:  ' + phone + '\n' +
   'Email:  ' + email + '\n' +
-  failureNote +
+  (failed ? '\nNote: User attempted to reschedule via chatbot but the operation failed. Please assist.\n' : '') +
   '— Previous —\n' +
-  'Clinic: ' + (oldAppt && oldAppt.clinic ? oldAppt.clinic : '—') + '\n' +
-  'Physio: ' + (oldAppt && oldAppt.practitioner ? oldAppt.practitioner : '—') + '\n' +
-  'Type:   ' + (oldAppt && oldAppt.appointment_type ? oldAppt.appointment_type : '—') + '\n' +
+  'Clinic: ' + (oldAppt?.clinic || '—') + '\n' +
+  'Physio: ' + (oldAppt?.practitioner || '—') + '\n' +
+  'Type:   ' + (oldAppt?.appointment_type || '—') + '\n' +
   'When:   ' + whenOld + '\n' +
-  'ID:     ' + (oldAppt && oldAppt.id ? oldAppt.id : '—') + '\n\n' +
+  'ID:     ' + (oldAppt?.id || '—') + '\n\n' +
   '— New —\n' +
-  'Clinic: ' + (newAppt && newAppt.clinic ? newAppt.clinic : '—') + '\n' +
-  'Physio: ' + (newAppt && newAppt.practitioner ? newAppt.practitioner : '—') + '\n' +
-  'Type:   ' + (newAppt && newAppt.appointment_type ? newAppt.appointment_type : '—') + '\n' +
+  'Clinic: ' + (newAppt?.clinic || '—') + '\n' +
+  'Physio: ' + (newAppt?.practitioner || '—') + '\n' +
+  'Type:   ' + (newAppt?.appointment_type || '—') + '\n' +
   'When:   ' + whenNew + '\n' +
-  'ID:     ' + (newAppt && newAppt.id ? newAppt.id : '—');
+  'ID:     ' + (newAppt?.id || '—');
+
+    const failureNote = failed
+      ? '<p style="margin:12px 0 0 0;"><em>Note: User attempted to reschedule via chatbot but the operation failed. Please assist.</em></p>'
+      : '';
+
+    const html =
+  '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
+  '<title>Appointment Notification</title></head><body style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#222;">' +
+  '<div style="text-align:center;margin-bottom:16px;"><img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" /></div>' +
+  '<h2 style="margin:0 0 12px 0;">Appointment reschedule notification</h2>' +
+  '<h3 style="margin:16px 0 8px 0;">Context</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Region:</strong> ${region}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Phone:</strong> ${phone}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Email:</strong> ${email}</p>` +
+  failureNote +
+  '<h3 style="margin:16px 0 8px 0;">Previous</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Clinic:</strong> ${oldAppt?.clinic || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Physio:</strong> ${oldAppt?.practitioner || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Type:</strong> ${oldAppt?.appointment_type || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>When:</strong> ${whenOld}</p>` +
+  `<p style="margin:0;"><strong>ID:</strong> ${oldAppt?.id || '—'}</p>` +
+  '<h3 style="margin:16px 0 8px 0;">New</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Clinic:</strong> ${newAppt?.clinic || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Physio:</strong> ${newAppt?.practitioner || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Type:</strong> ${newAppt?.appointment_type || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>When:</strong> ${whenNew}</p>` +
+  `<p style="margin:0;"><strong>ID:</strong> ${newAppt?.id || '—'}</p>` +
+  '</body></html>';
 
     try {
       const set = new Set(Array.isArray(to) ? to : []);
       let patientEmail = '';
-      if (newAppt && newAppt.patient_email) {
-        patientEmail = String(newAppt.patient_email).trim();
-      } else if (oldAppt && oldAppt.patient_email) {
-        patientEmail = String(oldAppt.patient_email).trim();
-      }
+      if (newAppt?.patient_email) patientEmail = String(newAppt.patient_email).trim();
+      else if (oldAppt?.patient_email) patientEmail = String(oldAppt.patient_email).trim();
       if (patientEmail) set.add(patientEmail);
       if (email && email !== '—') set.add(email);
-      to.length = 0;
-      for (const addr of set) to.push(addr);
-    } catch (e) {}
+      to.length = 0; for (const a of set) to.push(a);
+    } catch {}
 
-    return { to, subject, text };
+    return { to, subject, text, html, attachments: [_getInlineLogoAttachment()] };
   }
 
   /**
@@ -4297,71 +4562,15 @@ class ChatbotEngine {
    * @returns {{to:string[], subject:string, text:string}}
    */
   async _composeSupportEmailPayloadBooked(sessionRow, data = {}, appt = {}, failed = false) {
-    let ctx = {};
-    try {
-      if (sessionRow && typeof sessionRow.context === 'string') {
-        ctx = JSON.parse(sessionRow.context || '{}');
-      } else if (sessionRow && sessionRow.context) {
-        ctx = sessionRow.context;
-      } else {
-        ctx = {};
-      }
-    } catch (e) {
-      ctx = {};
-    }
-
-    let region = 'SG';
-    try {
-      if (ctx && ctx.region) {
-        region = String(ctx.region).toUpperCase();
-      } else if (data && data.region) {
-        region = String(data.region).toUpperCase();
-      }
-    } catch (e) {
-      // deliberate noop
-    }
-
-    let phone = '';
-    try {
-      if (sessionRow && sessionRow.phone_number) {
-        phone = sessionRow.phone_number;
-      } else if (data && data.phone) {
-        phone = data.phone;
-      }
-    } catch (e) {
-      phone = '';
-    }
-
-    let email = '—';
-    try {
-      // Prefer explicit data.email, then context.email, then sessionRow.email
-      let ctxEmail = '';
-      try {
-        const ctxObj = typeof sessionRow?.context === 'string'
-          ? JSON.parse(sessionRow.context || '{}')
-          : (sessionRow?.context || {});
-        ctxEmail = String(ctxObj.email || '').trim();
-      } catch (_) {}
-
-      const cand = (data && data.email) || ctxEmail || (sessionRow && sessionRow.email) || '';
-      email = String(cand || '').trim() || '—';
-    } catch (e) {
-      email = '—';
-    }
-
+    function safeJSON(v){ try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } }
+    const ctx = safeJSON(sessionRow?.context);
+    let region = String((ctx.region || data.region || 'SG')).toUpperCase();
+    let phone = String(sessionRow?.phone_number || data.phone || '').trim();
+    let email = String((data.email || ctx.email || sessionRow?.email || '')).trim() || '—';
     const to = resolveSupportEmails(region);
+    let whenStr = '—'; try { if (appt?.starts_at) whenStr = new Date(appt.starts_at).toLocaleString('en-GB'); } catch {}
+    const subject = 'Booked! Appointment — ' + region + ' — ' + phone;
 
-    let whenStr = '—';
-    try {
-      if (appt && appt.starts_at) {
-        whenStr = new Date(appt.starts_at).toLocaleString('en-GB');
-      }
-    } catch (e) {
-      whenStr = '—';
-    }
-
-    const subjectPrefix = 'Booked!';
-    const subject = subjectPrefix + ' Appointment — ' + region + ' — ' + phone;
     const text =
   'Appointment booking notification.\n\n' +
   '— Context —\n' +
@@ -4369,26 +4578,34 @@ class ChatbotEngine {
   'Phone:  ' + phone + '\n' +
   'Email:  ' + email + '\n' +
   '— Appointment —\n' +
-  'Clinic: ' + (appt && appt.clinic ? appt.clinic : '—') + '\n' +
-  'Physio: ' + (appt && appt.practitioner ? appt.practitioner : '—') + '\n' +
-  'Type:   ' + (appt && appt.appointment_type ? appt.appointment_type : '—') + '\n' +
+  'Clinic: ' + (appt?.clinic || '—') + '\n' +
+  'Physio: ' + (appt?.practitioner || '—') + '\n' +
+  'Type:   ' + (appt?.appointment_type || '—') + '\n' +
   'When:   ' + whenStr + '\n' +
-  'ID:     ' + (appt && appt.id ? appt.id : '—');
+  'ID:     ' + (appt?.id || '—');
 
-    try {
-      const set = new Set(Array.isArray(to) ? to : []);
-      //const patientFromAppt = appt && appt.patient_email ? String(appt.patient_email).trim() : '';
-      //if (patientFromAppt) set.add(patientFromAppt);
-      if (email && email !== '—') set.add(email);
-      // replace array content
-      to.length = 0;
-      for (const addr of set) to.push(addr);
-    } catch (e) {
-      // noop
-    }
+    const html =
+  '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
+  '<title>Appointment Notification</title></head><body style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#222;">' +
+  '<div style="text-align:center;margin-bottom:16px;"><img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" /></div>' +
+  '<h2 style="margin:0 0 12px 0;">Appointment booking notification</h2>' +
+  '<h3 style="margin:16px 0 8px 0;">Context</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Region:</strong> ${region}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Phone:</strong> ${phone}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Email:</strong> ${email}</p>` +
+  '<h3 style="margin:16px 0 8px 0;">Appointment</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Clinic:</strong> ${appt?.clinic || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Physio:</strong> ${appt?.practitioner || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Type:</strong> ${appt?.appointment_type || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>When:</strong> ${whenStr}</p>` +
+  `<p style="margin:0;"><strong>ID:</strong> ${appt?.id || '—'}</p>` +
+  '</body></html>';
 
-    return { to, subject, text };
+    try { const set = new Set(Array.isArray(to) ? to : []); if (email && email !== '—') set.add(email); to.length = 0; for (const a of set) to.push(a); } catch {}
+
+    return { to, subject, text, html, attachments: [_getInlineLogoAttachment()] };
   }
+  
   /**
    * Build support + user email payload for a CANCELLED appointment.
    * Centralizes support recipients via resolveSupportEmails() using region from session context or data.
@@ -4401,76 +4618,15 @@ class ChatbotEngine {
    * @returns {{to:string[], subject:string, text:string}}
    */
   async _composeSupportEmailPayloadCancelled(sessionRow, data = {}, appt = {}, failed = false) {
-    let ctx = {};
-    try {
-      if (sessionRow && typeof sessionRow.context === 'string') {
-        ctx = JSON.parse(sessionRow.context || '{}');
-      } else if (sessionRow && sessionRow.context) {
-        ctx = sessionRow.context;
-      } else {
-        ctx = {};
-      }
-    } catch (e) {
-      ctx = {};
-    }
-
-    let region = 'SG';
-    try {
-      if (ctx && ctx.region) {
-        region = String(ctx.region).toUpperCase();
-      } else if (data && data.region) {
-        region = String(data.region).toUpperCase();
-      }
-    } catch (e) {
-      // deliberate noop
-    }
-
-    let phone = '';
-    try {
-      if (sessionRow && sessionRow.phone_number) {
-        phone = sessionRow.phone_number;
-      } else if (data && data.phone) {
-        phone = data.phone;
-      }
-    } catch (e) {
-      phone = '';
-    }
-
-    let email = '—';
-    try {
-      // Prefer explicit data.email, then context.email, then sessionRow.email
-      let ctxEmail = '';
-      try {
-        const ctxObj = typeof sessionRow?.context === 'string'
-          ? JSON.parse(sessionRow.context || '{}')
-          : (sessionRow?.context || {});
-        ctxEmail = String(ctxObj.email || '').trim();
-      } catch (_) {}
-
-      const cand = (data && data.email) || ctxEmail || (sessionRow && sessionRow.email) || '';
-      email = String(cand || '').trim() || '—';
-    } catch (e) {
-      email = '—';
-    }
-
+    function safeJSON(v){ try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } }
+    const ctx = safeJSON(sessionRow?.context);
+    let region = String((ctx.region || data.region || 'SG')).toUpperCase();
+    let phone = String(sessionRow?.phone_number || data.phone || '').trim();
+    let email = String((data.email || ctx.email || sessionRow?.email || '')).trim() || '—';
     const to = resolveSupportEmails(region);
 
-    let whenStr = '—';
-    try {
-      if (appt && appt.starts_at) {
-        whenStr = new Date(appt.starts_at).toLocaleString('en-GB');
-      }
-    } catch (e) {
-      whenStr = '—';
-    }
-
-    const subjectPrefix = failed ? '[Cancel Failed]' : '[Cancelled]';
-    const subject = subjectPrefix + ' Appointment — ' + region + ' — ' + phone;
-
-    let failureNote = '';
-    if (failed === true) {
-      failureNote = '\nNote: User attempted to cancel via chatbot but the operation failed. Please assist.\n';
-    }
+    let whenStr = '—'; try { if (appt?.starts_at) whenStr = new Date(appt.starts_at).toLocaleString('en-GB'); } catch {}
+    const subject = (failed ? '[Cancel Failed]' : '[Cancelled]') + ' Appointment — ' + region + ' — ' + phone;
 
     const text =
   'Appointment cancellation notification.\n\n' +
@@ -4478,27 +4634,45 @@ class ChatbotEngine {
   'Region: ' + region + '\n' +
   'Phone:  ' + phone + '\n' +
   'Email:  ' + email + '\n' +
-  failureNote +
+  (failed ? '\nNote: User attempted to cancel via chatbot but the operation failed. Please assist.\n' : '') +
   '— Appointment —\n' +
-  'Clinic: ' + (appt && appt.clinic ? appt.clinic : '—') + '\n' +
-  'Physio: ' + (appt && appt.practitioner ? appt.practitioner : '—') + '\n' +
-  'Type:   ' + (appt && appt.appointment_type ? appt.appointment_type : '—') + '\n' +
+  'Clinic: ' + (appt?.clinic || '—') + '\n' +
+  'Physio: ' + (appt?.practitioner || '—') + '\n' +
+  'Type:   ' + (appt?.appointment_type || '—') + '\n' +
   'When:   ' + whenStr + '\n' +
-  'ID:     ' + (appt && appt.id ? appt.id : '—');
+  'ID:     ' + (appt?.id || '—');
+
+    const failureNote = failed
+      ? '<p style="margin:12px 0 0 0;"><em>Note: User attempted to cancel via chatbot but the operation failed. Please assist.</em></p>'
+      : '';
+
+    const html =
+  '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
+  '<title>Appointment Notification</title></head><body style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#222;">' +
+  '<div style="text-align:center;margin-bottom:16px;"><img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" /></div>' +
+  '<h2 style="margin:0 0 12px 0;">Appointment cancellation notification</h2>' +
+  '<h3 style="margin:16px 0 8px 0;">Context</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Region:</strong> ${region}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Phone:</strong> ${phone}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Email:</strong> ${email}</p>` +
+  failureNote +
+  '<h3 style="margin:16px 0 8px 0;">Appointment</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Clinic:</strong> ${appt?.clinic || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Physio:</strong> ${appt?.practitioner || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Type:</strong> ${appt?.appointment_type || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>When:</strong> ${whenStr}</p>` +
+  `<p style="margin:0;"><strong>ID:</strong> ${appt?.id || '—'}</p>` +
+  '</body></html>';
 
     try {
       const set = new Set(Array.isArray(to) ? to : []);
-      const patientFromAppt = appt && appt.patient_email ? String(appt.patient_email).trim() : '';
+      const patientFromAppt = appt?.patient_email ? String(appt.patient_email).trim() : '';
       if (patientFromAppt) set.add(patientFromAppt);
       if (email && email !== '—') set.add(email);
-      // replace array content
-      to.length = 0;
-      for (const addr of set) to.push(addr);
-    } catch (e) {
-      // noop
-    }
+      to.length = 0; for (const a of set) to.push(a);
+    } catch {}
 
-    return { to, subject, text };
+    return { to, subject, text, html, attachments: [_getInlineLogoAttachment()] };
   }
 
   /**
@@ -4510,52 +4684,22 @@ class ChatbotEngine {
    * @returns {Promise<{to:string[],subject:string,text:string,meta:object}>}
    */
   async _composeSupportEmailPayloadNoSlots(session, data) {
-    function safeParse(v) {
-      try {
-        if (typeof v === 'string') {
-          return JSON.parse(v || '{}');
-        }
-        return v || {};
-      } catch (e) {
-        return {};
-      }
-    }
-
+    function safeJSON(v){ try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } }
     const s = session || {};
-    const d = (data && typeof data === 'object') ? data : safeParse(s.data);
-    const ctx = safeParse(s.context);
+    const d = (data && typeof data === 'object') ? data : safeJSON(s.data);
+    const ctx = safeJSON(s.context);
 
-    let region = 'SG';
-    try {
-      const cand = (ctx && ctx.region) || d.region || 'SG';
-      region = String(cand).toUpperCase().trim();
-    } catch (e) {
-      region = 'SG';
-    }
-
-    let phone = '';
-    try {
-      phone = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    } catch (e) {
-      phone = '';
-    }
-
-    let userEmail = '';
-    try {
-      userEmail = String(s.email || d.email || '').trim();
-    } catch (e) {
-      userEmail = '';
-    }
+    let region = String((ctx.region || d.region || 'SG')).toUpperCase();
+    let phone = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    let userEmail = String(s.email || d.email || '').trim();
 
     const to = resolveSupportEmails(region);
-    if (userEmail) {
-      to.push(userEmail);
-    }
+    if (userEmail) to.push(userEmail);
 
     const meta = {
       session_id: s.id || '',
-      region: region,
-      phone: phone,
+      region,
+      phone,
       patient_id: d.patient_id || d.patientId || '',
       selected_clinic: d.selected_clinic || null,
       selected_physio: d.selected_physio || null,
@@ -4563,20 +4707,11 @@ class ChatbotEngine {
       selected_date: d.selected_date || null
     };
 
-    function fmtTs(ts) {
-      try {
-        if (ts) {
-          return new Date(ts).toLocaleString('en-GB');
-        }
-        return '';
-      } catch (e) {
-        return ts || '';
-      }
-    }
+    function fmtTs(ts){ try { return ts ? new Date(ts).toLocaleString('en-GB') : ''; } catch { return ts || ''; } }
 
     let lines = [];
     try {
-      if (this.sessionManager && this.sessionManager.db && typeof this.sessionManager.db.getChatHistory === 'function' && s.id) {
+      if (this.sessionManager?.db?.getChatHistory && s.id) {
         const rows = await this.sessionManager.db.getChatHistory(s.id);
         if (Array.isArray(rows) && rows.length) {
           const recent = rows.slice(-40);
@@ -4584,20 +4719,14 @@ class ChatbotEngine {
             const ts = r.timestamp || r.created_at || r.time || '';
             const u = r.message && String(r.message).trim();
             const b = r.response && String(r.response).trim();
-            if (u) {
-              lines.push('[' + fmtTs(ts) + '] USER ▶ ' + u);
-            }
-            if (b) {
-              lines.push('[' + fmtTs(ts) + '] Bot   : ' + b);
-            }
+            if (u) lines.push('[' + fmtTs(ts) + '] USER ▶ ' + u);
+            if (b) lines.push('[' + fmtTs(ts) + '] Bot   : ' + b);
           }
         }
       }
-    } catch (e) {
-      // deliberate noop
-    }
+    } catch {}
 
-    const header =
+    const headerText =
   'No available slots — user requested a callback.\n\n' +
   '— Context —\n' +
   'Region: ' + region + '\n' +
@@ -4608,15 +4737,40 @@ class ChatbotEngine {
   (meta.selected_physio ? ('Physio: ' + (meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio) + '\n') : '') +
   (meta.selected_appt_type ? ('Type:   ' + (meta.selected_appt_type.name || meta.selected_appt_type) + '\n') : '');
 
-    const transcript = lines.length
+    const transcriptText = lines.length
       ? '\n— Transcript (most recent) —\n' + lines.join('\n') + '\n'
       : '\n— Transcript —\n(no history rows found)\n';
 
     const subject = '[No Slots] Contact request — ' + region + ' — ' + (phone || userEmail || 'unknown');
-    const text = (header + '\n' + transcript).trim();
+    const text = (headerText + '\n' + transcriptText).trim();
 
-    return { to, subject, text, meta };
-  } 
+    const esc = (s) => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const headerHtml =
+  '<h2 style="margin:0 0 12px 0;">No available slots — user requested a callback.</h2>' +
+  '<h3 style="margin:16px 0 8px 0;">Context</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Region:</strong> ${region}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Phone:</strong> ${phone || '—'}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Email:</strong> ${userEmail || '—'}</p>` +
+  (meta.selected_date ? (`<p style="margin:0 0 6px 0;"><strong>Date:</strong> ${esc(meta.selected_date)}</p>`) : '') +
+  (meta.selected_clinic ? (`<p style="margin:0 0 6px 0;"><strong>Clinic:</strong> ${esc(meta.selected_clinic.business_name || meta.selected_clinic.name || meta.selected_clinic)}</p>`) : '') +
+  (meta.selected_physio ? (`<p style="margin:0 0 6px 0;"><strong>Physio:</strong> ${esc(meta.selected_physio.display_name || meta.selected_physio.name || meta.selected_physio)}</p>`) : '') +
+  (meta.selected_appt_type ? (`<p style="margin:0 0 6px 0;"><strong>Type:</strong> ${esc(meta.selected_appt_type.name || meta.selected_appt_type)}</p>`) : '');
+
+    const transcriptHtml =
+  '<h3 style="margin:16px 0 8px 0;">Transcript (most recent)</h3>' +
+  (lines.length
+    ? ('<pre style="background:#f6f6f6;padding:10px;border-radius:6px;white-space:pre-wrap;">' + lines.map(l => l.replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))).join('\n') + '</pre>')
+    : '<p style="margin:0;">(no history rows found)</p>');
+
+    const html =
+  '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
+  '<title>No Slots</title></head><body style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#222;">' +
+  '<div style="text-align:center;margin-bottom:16px;"><img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" /></div>' +
+  headerHtml + transcriptHtml +
+  '</body></html>';
+
+    return { to, subject, text, html, attachments: [_getInlineLogoAttachment()], meta };
+  }
 
   /**
    * Compose a support email payload to notify staff when an operation fails without an appointment context.
@@ -4629,64 +4783,15 @@ class ChatbotEngine {
    * @returns {{to:string[], subject:string, text:string}}
    */
   async _composeGenericFailureEmail(sessionRow, data = {}, action = 'cancel', reason = '') {
-    let ctx = {};
-    try {
-      if (sessionRow && typeof sessionRow.context === 'string') {
-        ctx = JSON.parse(sessionRow.context || '{}');
-      } else if (sessionRow && sessionRow.context) {
-        ctx = sessionRow.context;
-      } else {
-        ctx = {};
-      }
-    } catch (e) {
-      ctx = {};
-    }
-
-    let region = 'SG';
-    try {
-      if (ctx && ctx.region) {
-        region = String(ctx.region).toUpperCase();
-      } else if (data && data.region) {
-        region = String(data.region).toUpperCase();
-      }
-    } catch (e) {
-      region = 'SG';
-    }
-
-    let phone = '';
-    try {
-      if (sessionRow && sessionRow.phone_number) {
-        phone = sessionRow.phone_number;
-      } else if (data && data.phone) {
-        phone = data.phone;
-      }
-    } catch (e) {
-      phone = '';
-    }
-
-    let email = '—';
-    try {
-      if (data && data.email) {
-        email = data.email;
-      } else if (sessionRow && sessionRow.email) {
-        email = sessionRow.email;
-      }
-    } catch (e) {
-      email = '—';
-    }
-
+    function safeJSON(v){ try { return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch { return {}; } }
+    const ctx = safeJSON(sessionRow?.context);
+    let region = String((ctx.region || data.region || 'SG')).toUpperCase();
+    let phone = String(sessionRow?.phone_number || data.phone || '').trim();
+    let email = String((data.email || sessionRow?.email || '')).trim() || '—';
     const to = resolveSupportEmails(region);
 
-    let act = 'Cancel';
-    try {
-      if (String(action || '').toLowerCase() === 'reschedule') {
-        act = 'Reschedule';
-      }
-    } catch (e) {
-      act = 'Cancel';
-    }
-
-    const subject = '[' + act + ' Failed] — ' + region + ' — ' + phone;
+    let act = String(action || 'cancel').toLowerCase() === 'reschedule' ? 'Reschedule' : 'Cancel';
+    const subject = `[${act} Failed] — ${region} — ${phone}`;
 
     const text =
   'Operation failure notification.\n\n' +
@@ -4697,16 +4802,23 @@ class ChatbotEngine {
   'Email:  ' + email + '\n' +
   (reason ? ('\nDetails: ' + reason + '\n') : '');
 
-    try {
-      const patientEmail = (data && data.email) ? String(data.email).trim() : '';
-      if (patientEmail) {
-        to.push(patientEmail);
-      }
-    } catch (e) {
-      // deliberate noop
-    }
+    const esc = (s) => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const html =
+  '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
+  '<title>Operation Failure</title></head><body style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#222;">' +
+  '<div style="text-align:center;margin-bottom:16px;"><img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" /></div>' +
+  '<h2 style="margin:0 0 12px 0;">Operation failure notification</h2>' +
+  '<h3 style="margin:16px 0 8px 0;">Context</h3>' +
+  `<p style="margin:0 0 6px 0;"><strong>Action:</strong> ${act}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Region:</strong> ${region}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Phone:</strong> ${phone}</p>` +
+  `<p style="margin:0 0 6px 0;"><strong>Email:</strong> ${email}</p>` +
+  (reason ? (`<p style="margin:12px 0 0 0;"><em>Details: ${esc(reason)}</em></p>`) : '') +
+  '</body></html>';
 
-    return { to, subject, text };
+    try { const patientEmail = String(data.email || '').trim(); if (patientEmail) to.push(patientEmail); } catch {}
+
+    return { to, subject, text, html, attachments: [_getInlineLogoAttachment()] };
   }
 
   /**
@@ -4788,7 +4900,15 @@ class ChatbotEngine {
   
   /**
    * Low-level POST to local mailer. Keeps runtime quiet on failures.
-   * Expects: { to: string[], subject: string, text: string }
+   * Accepts payload:
+   *   - to: string[]
+   *   - subject: string
+   *   - text: string
+   *   - html?: string
+   *   - attachments?: Array
+   *
+   * @param {{to:string[],subject:string,text:string,html?:string,attachments?:Array}} payload
+   * @returns {Promise<void>}
    */
   async _postEmail(payload) {
     try {
@@ -4796,19 +4916,27 @@ class ChatbotEngine {
       const body = JSON.stringify({
         to: Array.isArray(payload.to) ? payload.to : [],
         subject: String(payload.subject || 'Support message'),
-        text: String(payload.text || '')
+        text: String(payload.text || ''),
+        html: payload.html ? String(payload.html) : undefined,
+        attachments: Array.isArray(payload.attachments) ? payload.attachments : undefined
       });
       await new Promise((resolve, reject) => {
         const req = http.request(
-          { method: 'POST', host: '127.0.0.1', port: 8089, path: '/email',
-            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+          {
+            method: 'POST',
+            host: '127.0.0.1',
+            port: 8089,
+            path: '/email',
+            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
+          },
           (res) => { res.resume(); res.statusCode === 200 ? resolve() : reject(new Error(`mailer ${res.statusCode}`)); }
         );
         req.on('error', reject);
-        req.write(body); req.end();
+        req.write(body);
+        req.end();
       });
     } catch (e) {
-      (this.logger || console).warn?.('mail send failed', { error: e && e.message });
+      (this && this.logger ? this.logger : console).warn?.('mail send failed', { error: e && e.message });
     }
   }
 

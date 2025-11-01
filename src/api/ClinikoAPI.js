@@ -80,6 +80,52 @@ class ClinikoAPI {
   }
 
   /**
+   * Find a patient by email and DOB (YYYY-MM-DD).
+   * - First tries exact email+DOB match.
+   * - If DOB not provided or no match, falls back to email-only search (to preserve legacy flows).
+   *
+   * @param {string} email
+   * @param {string|null} date_of_birth - 'YYYY-MM-DD' or null/empty to skip DOB filter
+   * @returns {Promise<Object|null>}
+   */
+  async findPatientByEmailAndDob(email, date_of_birth) {
+    const safeEmail = String(email || '').trim().toLowerCase();
+    const safeDob = String(date_of_birth || '').trim();
+    try {
+      const params = new URLSearchParams();
+      params.append('q[]', `email:=${safeEmail}`);
+      if (safeDob) params.append('q[]', `date_of_birth:=${safeDob}`);
+      const data = await new SendMessage(`/patients?${params.toString()}`, {}).get();
+
+      // Exact path: with DOB filter, any row means success
+      if (safeDob && Array.isArray(data?.patients) && data.patients.length > 0) {
+        return data.patients[0];
+      }
+
+      // Fallback: email-only if no DOB provided or no exact match
+      if (!safeDob) {
+        return data.patients?.[0] || null;
+      }
+
+      // If DOB provided but no direct match was returned by API, try a lenient filter:
+      // Fetch email-only and then filter client-side on DOB (in case API ignores DOB filter in some tenants)
+      try {
+        const p2 = new URLSearchParams();
+        p2.append('q[]', `email:=${safeEmail}`);
+        const d2 = await new SendMessage(`/patients?${p2.toString()}`, {}).get();
+        const rows = Array.isArray(d2?.patients) ? d2.patients : [];
+        const found = rows.find(r => String(r?.date_of_birth || '').slice(0,10) === safeDob);
+        return found || null;
+      } catch {
+        return null;
+      }
+    } catch (error) {
+      this.logger.error(`findPatientByEmailAndDob failed for ${safeEmail}/${safeDob || '—'}`);
+      return null;
+    }
+  }
+
+  /**
    * Get next available appointment slots for all practitioners in a business.
    * @param {Object} options
    * @param {string} options.business_id
@@ -815,6 +861,55 @@ class ClinikoAPI {
     } catch (error) {
       this.logger.error(`getBusinessById failed for ${businessId}: ${error}`);
       return null;
+    }
+  }
+
+  /**
+   * List patient forms with optional filters.
+   * Wraps GET /patient_forms according to Cliniko API (List patient forms).
+   *
+   * Notes:
+   * - Returns an array of patient_forms (empty array on error).
+   * - Supports API-documented filters via q[] plus sort, page, per_page.
+   *
+   * @param {Object} [opts]
+   * @param {string|number} [opts.patient_id]                 - Filter by patient_id
+   * @param {string|number} [opts.patient_form_template_id]   - Filter by template id
+   * @param {string|number} [opts.id]                         - Filter by id
+   * @param {string}        [opts.archived_at]                - date-time (ISO)
+   * @param {string}        [opts.completed_at]               - date-time (ISO)
+   * @param {string}        [opts.created_at]                 - date-time (ISO)
+   * @param {string}        [opts.updated_at]                 - date-time (ISO)
+   * @param {string}        [opts.sort]                       - e.g., 'created_at:desc'
+   * @param {number}        [opts.page]                       - page number
+   * @param {number}        [opts.per_page]                   - per page [1..100]
+   * @returns {Promise<Array>} patient_forms[]
+   */
+  async getPatientForms(opts = {}) {
+    try {
+      const params = new URLSearchParams();
+
+      // Filtering via q[]
+      if (opts.patient_id != null) params.append('q[]', `patient_id:=${opts.patient_id}`);
+      if (opts.patient_form_template_id != null) params.append('q[]', `patient_form_template_id:=${opts.patient_form_template_id}`);
+      if (opts.id != null) params.append('q[]', `id:=${opts.id}`);
+      if (opts.archived_at) params.append('q[]', `archived_at:=${opts.archived_at}`);
+      if (opts.completed_at) params.append('q[]', `completed_at:=${opts.completed_at}`);
+      if (opts.created_at) params.append('q[]', `created_at:=${opts.created_at}`);
+      if (opts.updated_at) params.append('q[]', `updated_at:=${opts.updated_at}`);
+
+      // Sort and pagination
+      if (opts.sort) params.append('sort', String(opts.sort));
+      if (Number.isFinite(opts.page)) params.append('page', String(opts.page));
+      if (Number.isFinite(opts.per_page)) params.append('per_page', String(Math.max(1, Math.min(100, opts.per_page))));
+
+      const url = `/patient_forms?${params.toString()}`;
+      this.logger.debug(`GET ${url}`);
+      const data = await new SendMessage(url, {}).get();
+      return Array.isArray(data?.patient_forms) ? data.patient_forms : [];
+    } catch (error) {
+      this.logger.error(`getPatientForms failed: ${error?.message || error}`);
+      return [];
     }
   }
 
