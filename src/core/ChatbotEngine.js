@@ -1434,80 +1434,6 @@ class ChatbotEngine {
       );
     }
   }
-  async handleVerifyState(session, message) {
-    let data = {};
-    try {
-      data = typeof session.data === 'string'
-        ? JSON.parse(session.data)
-        : session.data || {};
-    } catch (e) {
-      data = {};
-    }
-
-    const textRaw = message || '';
-    const text = textRaw.trim().toLowerCase();
-
-    // Allow user to go back to Intro menu at any time
-    if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO
-      });
-      const updated = await this.sessionManager.getSession(session.id);
-      return await this.renderMainMenu(updated);
-    }
-
-    // First prompt: ask for email
-    if (!data.awaiting_email) {
-      const updatedData = { ...data, awaiting_email: true };
-      await this.sessionManager.updateSession(session.id, {
-        data: JSON.stringify(updatedData)
-      });
-      return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
-    }
-
-    // Validate email input
-    const email = textRaw.trim().toLowerCase();
-    if (!email.includes('@') || !email.includes('.')) {
-      return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
-    }
-
-    // Attempt verification
-    const patient = await this.clinikoAPI.findPatientByEmail(email);
-    const clearedData = { ...data };
-    delete clearedData.awaiting_email;
-
-    if (patient) {
-      try {
-        if (typeof this.saveEmailToSessionContext === 'function') {
-          await this.saveEmailToSessionContext(session, email);
-        }
-      } catch (e) {
-        // deliberate noop
-      }
-      await this.sessionManager.updateSession(session.id, {
-        verified: true,
-        patient_id: patient.id,
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(clearedData)
-      });
-      const updatedSession = await this.sessionManager.getSession(session.id);
-      return 'Verification successful!\n\n' + await this.goToInteractiveMenu(updatedSession);
-    } else {
-      // Verification failed: go back to Intro, show region-specific support info
-      await this.sessionManager.updateSession(session.id, {
-        verified: false,
-        conversation_state: this.STATES.INTRO,
-        data: JSON.stringify(clearedData)
-      });
-      const region = this._getSessionRegion(session);
-      const support = getSupportInfo(region);
-      return (
-        "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
-        support + "\n\n" +
-        await this.renderMainMenu(session)
-      );
-    }
-  }
 
   /**
    * Handle the Book/Manage options menu (after verification).
@@ -3779,8 +3705,8 @@ class ChatbotEngine {
 
       if (!data.first_name)     return "Please tell me your first name:\n(0️⃣ Back)";
       if (!data.last_name)      return "Got it. What's your last name?\n(0️⃣ Back)";
-      if (!data.email)          return "Thanks. Lastly, what's your email address?\n(0️⃣ Back)";
-      if (!data.date_of_birth)  return "Please enter your date of birth (dd mm yyyy):\n(0️⃣ Back)";
+      if (!data.email)          return "Thanks. What's your email address?\n(0️⃣ Back)";
+      if (!data.date_of_birth)  return "Lastly, please enter your date of birth (dd mm yyyy):\n(0️⃣ Back)";
     }
 
     // All fields collected → register
