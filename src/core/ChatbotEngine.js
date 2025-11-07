@@ -35,9 +35,9 @@ const REGION_SUPPORT_INFO = {
 
 /**
  * Resolve support email recipients based on existing REGION_SUPPORT_INFO.
- * - Uses REGION_SUPPORT_INFO[region].email if available.
- * - Accepts comma-separated list in REGION_SUPPORT_INFO to support multiple recipients.
- * - Falls back to REGION_SUPPORT_INFO.SG if region is missing or not found (consistent with getSupportInfo).
+ * Uses REGION_SUPPORT_INFO[region].email if available.
+ * Accepts comma-separated list in REGION_SUPPORT_INFO to support multiple recipients.
+ * Falls back to REGION_SUPPORT_INFO.SG if region is missing or not found (consistent with getSupportInfo).
  *
  * No other hardcoding or environment variables are used here.
  *
@@ -3773,14 +3773,14 @@ class ChatbotEngine {
           const payload = await this._composeSupportEmailPayloadBooked(sessionRow, { email: patient.email }, apptLike, false);
           if (payload) {
             // const extra = `\n\n— Next Step —\n${formMsg}`;
-            const extra = `\n\n— Next Step —\n`;
-            payload.text = (payload.text || '') + extra;
-            if (payload.html) {
-              const safe = (s) => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+            //const extra = `\n\n— Next Step —\n`;
+            //payload.text = (payload.text || '') + extra;
+            //if (payload.html) {
+            //  const safe = (s) => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
               //const injected = `<h3 style="margin:16px 0 8px 0;">Next Step</h3><p style="margin:0;">${safe(formMsg).replace(/\n/g,'<br/>')}</p>`;
-              const injected = `<h3 style="margin:16px 0 8px 0;">Next Step</h3><p style="margin:0;"></p>`;
-              payload.html = payload.html.replace('</body></html>', injected + '</body></html>');
-            }
+            //  const injected = `<h3 style="margin:16px 0 8px 0;">Next Step</h3><p style="margin:0;"></p>`;
+            //  payload.html = payload.html.replace('</body></html>', injected + '</body></html>');
+            //}
             if (Array.isArray(payload.to) && payload.to.length) {
               await this._postEmail(payload);
             }
@@ -4883,46 +4883,496 @@ class ChatbotEngine {
     }
   }
 
-  /**
-   * Wrapper for “no slots” email using your existing composer.
-   * Safe to call anywhere once user requested a callback.
-   */
-  async _sendNoSlotsEmail(sessionRow, data) {
-    if (typeof this._composeSupportEmailPayloadNoSlots !== 'function') return;
-    const payload = await this._composeSupportEmailPayloadNoSlots(sessionRow, data || {});
-    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  /************************************************************
+   * EMAIL TEMPLATES: Builders + Wrapper Senders (drop-in)
+   * Seamlessly plugs into your existing ChatbotEngine class.
+   ************************************************************/
+
+  /* =========================
+     Small internal helpers
+     ========================= */
+
+  _safeJSON(v) {
+    try {
+      return typeof v === 'string' ? JSON.parse(v || '{}') : (v || {});
+    } catch {
+      return {};
+    }
+  }
+
+  _pickFirst(...vals) {
+    for (const v of vals) {
+      if (typeof v === 'string') {
+        const t = v.trim();
+        if (t) return t;
+      }
+    }
+    return '';
+  }
+
+  _normalizeName(name) {
+    if (!name) return '';
+    return String(name).replace(/\s+/g, ' ').trim();
   }
 
   /**
-   * Wrapper for “cancelled” email using your existing composer.
+   * Derive clinic meta (name/phone/location) from session context and/or payload.
+   * Does not override explicit payload fields.
    */
-  async _sendCancelledEmail(sessionRow, data, appt) {
-    if (typeof this._composeSupportEmailPayloadCancelled !== 'function') return;
-    const payload = await this._composeSupportEmailPayloadCancelled(sessionRow, data || {}, appt || {});
-    console.log('DBG context raw:', sessionRow && sessionRow.context);
-    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  _deriveClinicMeta(ctx, payload = {}) {
+    const c = ctx || {};
+    const p = payload || {};
+
+    const businessName = this._pickFirst(
+      c?.enrichedSlot?._business_display,
+      c?.enrichedAppointment?.business?.name,
+      c?.business?.displayName,
+      c?.business?.name,
+      c?.clinic?.displayName,
+      c?.clinic?.name,
+      c?.organization?.displayName,
+      c?.organization?.name,
+      c?.meta?.clinicName,
+      c?.branch,
+      c?.site
+    );
+
+    const locationName = this._pickFirst(
+      c?.enrichedSlot?._location_display,
+      c?.enrichedAppointment?.location?.name,
+      c?.location?.displayName,
+      c?.location?.name,
+      c?.meta?.locationName
+    );
+
+    const clinicName = this._normalizeName(this._pickFirst(businessName, locationName, p.clinicName));
+
+    const clinicPhone = this._pickFirst(
+      c?.enrichedAppointment?.business?.phone,
+      c?.enrichedAppointment?.location?.phone,
+      c?.business?.phone,
+      c?.clinic?.phone,
+      c?.location?.phone,
+      c?.meta?.clinicPhone,
+      p.clinicPhone
+    );
+
+    const formattedAddr = this._pickFirst(
+      c?.enrichedAppointment?.location?.address?.formatted,
+      c?.location?.address?.formatted
+    );
+
+    const joinedAddr = [c?.location?.address?.line1, c?.location?.address?.line2, c?.location?.address?.city, c?.location?.address?.country]
+      .filter(Boolean).join(', ');
+
+    const clinicLocation = this._pickFirst(
+      formattedAddr,
+      joinedAddr,
+      c?.enrichedSlot?._location_display,
+      c?.meta?.clinicLocation,
+      p.clinicLocation
+    );
+
+    return {
+      clinicName: clinicName || undefined,
+      clinicPhone: clinicPhone || undefined,
+      clinicLocation: clinicLocation || undefined
+    };
   }
 
+  _withDerivedClinicMeta(ctx, payload) {
+    const derived = this._deriveClinicMeta(ctx, payload || {});
+    return {
+      ...payload,
+      clinicName: payload?.clinicName || derived.clinicName,
+      clinicPhone: payload?.clinicPhone || derived.clinicPhone,
+      clinicLocation: payload?.clinicLocation || derived.clinicLocation
+    };
+  }
+
+  /* =========================
+     Email Builders (pure)
+     ========================= */
+
+  _buildEmail_NewBookingFD(params = {}) {
+    const {
+      patientName = '',
+      date = '',
+      time = '',
+      physioName = '',
+      appointmentType = '',
+      isEmailSentToPatient = true,
+      isNewPatient = false, // NEW: toggles subject for new patient registration
+      clinicName
+    } = params;
+
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const sent = (isEmailSentToPatient === false) ? 'Email confirmation pending.' : 'Email confirmation sent to patient.';
+    const clinicPrefix = clinicName ? `[${clinicName}] ` : '';
+
+    // NEW: Subject logic for new patient registration
+    const subject = isNewPatient
+      ? `${clinicPrefix}Welcome To Prohealth Asia`
+      : `${clinicPrefix}NEW BOOKING: ${patientName} added to ${physioName}'s Schedule`;
+
+    const text =
+  `Hi Team,
+  A new appointment has been confirmed in Cliniko:
+  Patient: ${patientName}
+  Date: ${date}
+  Time: ${time}
+  Physio: ${physioName}
+  Type: ${appointmentType}
+  Confirmation Status: ${sent}
+
+  FD Action:
+  If new patient, confirm registration form link has been sent.
+  Check for any insurance notes or special requests.
+
+  Regards, FD System Alert`;
+
+    const html =
+  `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+  <body style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#222;">
+  <div style="text-align:center;margin-bottom:16px;">
+    <img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" />
+  </div>
+  <p>Hi Team,</p>
+  <p>A new appointment has been confirmed in Cliniko:</p>
+  <p><strong>Patient:</strong> ${esc(patientName)}<br/>
+  <strong>Date:</strong> ${esc(date)}<br/>
+  <strong>Time:</strong> ${esc(time)}<br/>
+  <strong>Physio:</strong> ${esc(physioName)}<br/>
+  <strong>Type:</strong> ${esc(appointmentType)}<br/>
+  <strong>Confirmation Status:</strong> ${esc(sent)}</p>
+  <p><strong>FD Action:</strong></p>
+  <ul>
+    <li>If new patient, confirm registration form link has been sent.</li>
+    <li>Check for any insurance notes or special requests.</li>
+  </ul>
+  </body></html>`;
+
+    return { subject, text, html };
+  }
+
+  _buildEmail_CancellationConfirmed(params = {}) {
+    const { patientName = '', physioName = '', date = '', time = '', clinicPhone, clinicName } = params;
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const clinicPrefix = clinicName ? `[${clinicName}] ` : '';
+    const subject = `${clinicPrefix}Cancellation Confirmed: Your Appointment on ${date}`;
+
+    const text =
+  `Dear ${patientName},
+  This email confirms the cancellation of your appointment with ${physioName} previously scheduled for ${date} at ${time}.
+  We understand plans change. We are happy to help you find a new time when you are ready.
+  To reschedule, please reply to this email${clinicPhone ? ` or call us at ${clinicPhone}` : ''}.
+  We hope to see you soon!
+  Best regards, The Clinic Team`;
+
+    const html =
+  `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+  <body style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#222;">
+  <div style="text-align:center;margin-bottom:16px;">
+    <img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" />
+  </div>
+  <p>Dear ${esc(patientName)},</p>
+  <p>This email confirms the cancellation of your appointment with <strong>${esc(physioName)}</strong> previously scheduled for <strong>${esc(date)}</strong> at <strong>${esc(time)}</strong>.</p>
+  <p>We understand plans change. We are happy to help you find a new time when you are ready.</p>
+  <p>To reschedule, please reply to this email${clinicPhone ? ` or call us at <strong>${esc(clinicPhone)}</strong>` : ''}.</p>
+  <p>We hope to see you soon!<br/>Best regards, The Clinic Team</p>
+  </body></html>`;
+
+    return { subject, text, html };
+  }
+
+  _buildEmail_RescheduleConfirmed(params = {}) {
+    const { patientName = '', physioName = '', newDate = '', newTime = '', oldDate, oldTime, clinicLocation, clinicName } = params;
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const oldLineText = (oldDate || oldTime)
+      ? `Your previous appointment on ${oldDate || ''} at ${oldTime || ''} has been cancelled, and your new details are as follows:`
+      : `We have successfully rescheduled your session. Your new details are as follows:`;
+    const locationHtml = clinicLocation ? `<p><strong>Location:</strong> ${esc(clinicLocation)}</p>` : '';
+    const clinicPrefix = clinicName ? `[${clinicName}] ` : '';
+    const subject = `${clinicPrefix}Reschedule Confirmed: Your New Appointment Details`;
+
+    const text =
+  `Dear ${patientName},
+  We have successfully rescheduled your session. ${oldLineText}
+  Your New Appointment Summary
+  Date: ${newDate}
+  Time: ${newTime}
+  Therapist: ${physioName}
+  ${clinicLocation ? `Location: ${clinicLocation}\n` : ''}Please make a note of this new time. We kindly remind you that changes or cancellations require at least 24 hours’ notice.
+  We look forward to seeing you then!
+  Best regards, The Clinic Team`;
+
+    const html =
+  `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+  <body style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#222;">
+  <div style="text-align:center;margin-bottom:16px;">
+    <img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" />
+  </div>
+  <p>Dear ${esc(patientName)},</p>
+  <p>We have successfully rescheduled your session. ${esc(oldLineText)}</p>
+  <p><strong>Your New Appointment Summary</strong></p>
+  <p><strong>Date:</strong> ${esc(newDate)}<br/>
+  <strong>Time:</strong> ${esc(newTime)}<br/>
+  <strong>Therapist:</strong> ${esc(physioName)}</p>
+  ${locationHtml}
+  <p>Please make a note of this new time. We kindly remind you that changes or cancellations require at least 24 hours’ notice.</p>
+  <p>We look forward to seeing you then!<br/>Best regards, The Clinic Team</p>
+  </body></html>`;
+
+    return { subject, text, html };
+  }
+
+  _buildEmail_NoSlotsAvailable(params = {}) {
+    const {
+      patientName = '',
+      physioName = '',
+      requestedSlotLabel = '',
+      alternativeOptions,
+      includeWaitlistLine = true,
+      clinicName
+    } = params;
+
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const altHtmlList = Array.isArray(alternativeOptions) && alternativeOptions.length
+      ? `<ul>${alternativeOptions.map(o => `<li><strong>${esc(o.date)}</strong>, ${esc(o.time)}</li>`).join('')}</ul>`
+      : '<p>(None at the moment)</p>';
+    const altTextLines = Array.isArray(alternativeOptions) && alternativeOptions.length
+      ? alternativeOptions.map(o => `- ${o.date}, ${o.time}`).join('\n')
+      : '- (None at the moment)';
+    const clinicPrefix = clinicName ? `[${clinicName}] ` : '';
+    const subject = `${clinicPrefix}Re: Your Appointment Request for ${requestedSlotLabel}`;
+
+    const text =
+  `Dear ${patientName},
+  Thank you for reaching out to book a session with ${physioName}.
+  We sincerely apologise, but the requested time slot(s) on ${requestedSlotLabel} are currently fully booked.
+  ${includeWaitlistLine ? 'We would be happy to add you to our waitlist in case of a last-minute cancellation.\n' : ''}Current Alternative Availability with ${physioName}:
+  ${altTextLines}
+  Please let us know if either of these options work for you, or if you would like to be placed on the waitlist for your preferred time. We will notify you immediately if a slot opens up!
+  Warm Regards, The Clinic Team`;
+
+    const html =
+  `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
+  <body style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#222;">
+  <div style="text-align:center;margin-bottom:16px;">
+    <img src="cid:prohealth-logo" alt="ProHealth" style="max-width:220px;height:auto;display:inline-block" />
+  </div>
+  <p>Dear ${esc(patientName)},</p>
+  <p>Thank you for reaching out to book a session with <strong>${esc(physioName)}</strong>.</p>
+  <p>We sincerely apologise, but the requested time slot(s) on <strong>${esc(requestedSlotLabel)}</strong> are currently fully booked.</p>
+  ${includeWaitlistLine ? '<p>We would be happy to add you to our waitlist in case of a last-minute cancellation.</p>' : ''}
+  <p><strong>Current Alternative Availability with ${esc(physioName)}:</strong></p>
+  ${altHtmlList}
+  <p>Please let us know if either of these options work for you, or if you would like to be placed on the waitlist for your preferred time. We will notify you immediately if a slot opens up!</p>
+  <p>Warm Regards, The Clinic Team</p>
+  </body></html>`;
+
+    return { subject, text, html };
+  }
+
+  /* =========================
+     Wrapper Senders (class API)
+     =========================
+     These implement your existing method names so handlers remain unchanged.
+     They use:
+       - resolveSupportEmails(region) from your file
+       - this._getInlineLogoAttachment()
+       - this._postEmail(...)
+  ========================= */
+
   /**
-   * Wrapper for “booked” email using your existing composer.
+   * BOOKED (FD alert; optional patient CC if desired later)
+   * Signature kept: _sendBookedEmail(sessionRow, data, appt)
+   * appt: { id, starts_at, appointment_type, practitioner, clinic }
    */
   async _sendBookedEmail(sessionRow, data, appt) {
-    if (typeof this._composeSupportEmailPayloadBooked !== 'function') return;
-    const payload = await this._composeSupportEmailPayloadBooked(sessionRow, data || {}, appt || {});
-    console.log('DBG context raw:', sessionRow && sessionRow.context);
-    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+    try {
+      const ctx = this._safeJSON(sessionRow?.context);
+      const region = String((ctx?.region || 'SG')).toUpperCase();
+
+      // Expect your helper to return an array; fallback to []
+      const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
+
+      // Date/time
+      let date = '', time = '';
+      try {
+        if (appt?.starts_at) {
+          const t = new Date(appt.starts_at).toLocaleString('en-GB');
+          date = t.split(',')[0].trim();
+          time = t.split(',').slice(1).join(',').trim();
+        }
+      } catch {}
+
+      // Names and type (simple fallbacks, no extra complexity)
+      const patientName = data?.patient_name || data?.patientName || appt?.patient_name || '';
+      const physioName = data?.physio_name || data?.physioName || appt?.practitioner_name || appt?.practitioner || '';
+      const appointmentType = data?.appointment_type || data?.appointmentType || appt?.appointment_type?.name || appt?.appointment_type || '';
+
+      const isNewPatient = Boolean(data?.is_new_patient || data?.isNewPatient || ctx?.is_new_patient || ctx?.patient?.is_new);
+
+      const payload = this._withDerivedClinicMeta(ctx, {
+        patientName, date, time, physioName, appointmentType, isEmailSentToPatient: true, isNewPatient
+      });
+
+      const built = this._buildEmail_NewBookingFD(payload);
+
+      const out = {
+        to: fd,
+        subject: built.subject,
+        text: built.text,
+        html: built.html,
+        attachments: [_getInlineLogoAttachment()]
+      };
+      if (out.to && out.to.length) await this._postEmail(out);
+      else this.logger?.warn?.('_sendBookedEmail: resolveSupportEmails returned empty', { region });
+    } catch (e) {
+      this.logger?.warn?.('_sendBookedEmail failed', { err: e?.message || e });
+    }
+  }
+  
+
+  /**
+   * CANCELLED (patient + FD)
+   * Signature kept: _sendCancelledEmail(sessionRow, data, appt)
+   */
+  async _sendCancelledEmail(sessionRow, data, appt) {
+    try {
+      const ctx = this._safeJSON(sessionRow?.context);
+      const region = String((ctx?.region || 'SG')).toUpperCase();
+      const patientEmail = String(ctx?.email || data?.email || '').trim();
+
+      // Expect your helper to return an array; fallback to []
+      const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
+
+      let date = '', time = '';
+      try {
+        if (appt?.starts_at) {
+          const t = new Date(appt.starts_at).toLocaleString('en-GB');
+          date = t.split(',')[0].trim();
+          time = t.split(',').slice(1).join(',').trim();
+        }
+      } catch {}
+
+      const patientName = data?.patient_name || data?.patientName || appt?.patient_name || '';
+      const physioName = data?.physio_name || data?.physioName || appt?.practitioner_name || appt?.practitioner || '';
+
+      const payload = this._withDerivedClinicMeta(ctx, {
+        patientName, physioName, date, time
+      });
+
+      const built = this._buildEmail_CancellationConfirmed(payload);
+
+      // Send to FD and patient
+      const to = [...fd, ...(patientEmail ? [patientEmail] : [])];
+
+      const out = {
+        to,
+        subject: built.subject,
+        text: built.text,
+        html: built.html,
+        attachments: [_getInlineLogoAttachment()]
+      };
+      if (out.to && out.to.length) await this._postEmail(out);
+      else this.logger?.warn?.('_sendCancelledEmail: resolveSupportEmails returned empty and no patient email', { region });
+    } catch (e) {
+      this.logger?.warn?.('_sendCancelledEmail failed', { err: e?.message || e });
+    }
+  }
+  
+
+  /**
+   * RESCHEDULED (patient + FD)
+   * Signature kept: _sendRescheduledEmail(sessionRow, data, oldAppt, newAppt)
+   */
+  async _sendRescheduledEmail(sessionRow, data, oldAppt, newAppt) {
+    try {
+      const ctx = this._safeJSON(sessionRow?.context);
+      const region = String((ctx.region || 'SG')).toUpperCase();
+      const patientEmail = String(ctx.email || data?.email || '').trim();
+
+      const fmt = (iso) => {
+        if (!iso) return { date: '', time: '' };
+        try {
+          const t = new Date(iso).toLocaleString('en-GB');
+          return { date: t.split(',')[0].trim(), time: t.split(',').slice(1).join(',').trim() };
+        } catch { return { date: '', time: '' }; }
+      };
+
+      const oldFmt = fmt(oldAppt?.starts_at);
+      const newFmt = fmt(newAppt?.starts_at);
+
+      const payload = this._withDerivedClinicMeta(ctx, {
+        patientName: data?.patient_name || data?.patientName || '',
+        physioName: newAppt?.practitioner || oldAppt?.practitioner || '',
+        newDate: newFmt.date,
+        newTime: newFmt.time,
+        oldDate: oldFmt.date,
+        oldTime: oldFmt.time
+      });
+
+      const built = this._buildEmail_RescheduleConfirmed(payload);
+      const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
+      const toSet = new Set(fd || []);
+      if (patientEmail) toSet.add(patientEmail);
+
+      const out = {
+        to: Array.from(toSet),
+        subject: built.subject,
+        text: built.text,
+        html: built.html,
+        attachments: [_getInlineLogoAttachment()]
+      };
+      if (out.to && out.to.length) await this._postEmail(out);
+    } catch (e) {
+      this.logger?.warn?.('_sendRescheduledEmail failed', { err: e?.message || e });
+    }
   }
 
   /**
-   * Wrapper for “rescheduled” email using your existing composer.
+   * NO SLOTS (patient only)
+   * Signature kept: _sendNoSlotsEmail(sessionRow, data)
    */
-  async _sendRescheduledEmail(sessionRow, data, oldAppt, newAppt) {
-    if (typeof this._composeSupportEmailPayloadRescheduled !== 'function') return;
-    const payload = await this._composeSupportEmailPayloadRescheduled(sessionRow, data || {}, oldAppt || {}, newAppt || {});
-    console.log('DBG context raw:', sessionRow && sessionRow.context);
-    if (payload && Array.isArray(payload.to) && payload.to.length) await this._postEmail(payload);
+  async _sendNoSlotsEmail(sessionRow, data) {
+    try {
+      const ctx = this._safeJSON(sessionRow?.context);
+      const patientEmail = String(ctx.email || data?.email || '').trim();
+      if (!patientEmail) return;
+
+      const physioName = (data?.selected_physio?.display_name) ||
+                         (data?.selected_physio?.first_name ? [data.selected_physio.first_name, data.selected_physio.last_name].filter(Boolean).join(' ') : '') ||
+                         (data?.selected_physio?.name) || '';
+      const requestedSlotLabel =
+        data?.selected_date
+          ? new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString('en-GB')
+          : 'your requested time';
+
+      const payload = this._withDerivedClinicMeta(ctx, {
+        patientName: data?.patient_name || data?.patientName || '',
+        physioName,
+        requestedSlotLabel
+        // optional: alternativeOptions: [{ date, time }]
+      });
+
+      const built = this._buildEmail_NoSlotsAvailable(payload);
+
+      const out = {
+        to: [patientEmail],
+        subject: built.subject,
+        text: built.text,
+        html: built.html,
+        attachments: [_getInlineLogoAttachment()]
+      };
+      if (out.to && out.to.length) await this._postEmail(out);
+    } catch (e) {
+      this.logger?.warn?.('_sendNoSlotsEmail failed', { err: e?.message || e });
+    }
   }
-   
+
+  
 
 } // End of Class
 

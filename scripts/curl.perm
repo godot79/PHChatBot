@@ -2,4 +2,4 @@ curl -X POST "https://graph.facebook.com/v19.0/oauth/access_token" \
   -d "grant_type=fb_exchange_token" \
   -d "client_id=1096518285630314" \
   -d "client_secret=116dcb4d6e9b495ff5a7a93b77e870de" \
-  -d "fb_exchange_token=EAAPlRw7nm2oBPS2cyuZApgvdwzVdZBHGPzyO0aDqyokDd8dmM5h6idTrewYqGCSUuJhRuM1jAXyrQfiAtQy0CkINziXBkfKYYsVGZCazIoTTXSMZB3ZBCYTZChmuCNZCZC8oXxb90HWAAIWW6Bz3DgTerbBsZBUHEvBkaO0EC3omq1kNfvZCuIu3OhQscVOGhR3t1Wq6ldv0lEJRRAkBtfUOqX0CVmSZB40hxTidTvvAK40WNYFjUgZD"
+  -d "fb_exchange_token=EAAPlRw7nm2oBP4kcKdiZBr6z34n2xkXKxnmFSYPTgC0r9DWUTy1shQgeaorBCF73qW5iIZBpOSCtn1WmabYuSvYZBn7HNnZBYA47tUMZC2HTM0Hw55MCa2ejli81yRbRrYgHlhQgvvE66w3ePVY6vZCmVbcMnrjpuorZCrsvfmRyK2YDHZCXpaMtdgjWoSqzmzOafuIyli8IShgK0GfmWvZCuJJf0Hnqd7BmMZA7alsiWWjiOhyEjJIXz8wLsGW9MbeHXsGTHP5F9bDJ3P3wipCdSSvKYi"
