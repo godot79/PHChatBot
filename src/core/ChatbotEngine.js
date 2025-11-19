@@ -5191,7 +5191,7 @@ class ChatbotEngine {
       const ctx = this._safeJSON(sessionRow?.context);
       const region = String((ctx?.region || 'SG')).toUpperCase();
 
-      // Expect your helper to return an array; fallback to []
+      // Expect helper to return an array; fallback to []
       const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
 
       // Date/time
@@ -5204,12 +5204,33 @@ class ChatbotEngine {
         }
       } catch {}
 
-      // Names and type (simple fallbacks, no extra complexity)
-      const patientName = data?.patient_name || data?.patientName || appt?.patient_name || '';
-      const physioName = data?.physio_name || data?.physioName || appt?.practitioner_name || appt?.practitioner || '';
-      const appointmentType = data?.appointment_type || data?.appointmentType || appt?.appointment_type?.name || appt?.appointment_type || '';
+      // Name fallbacks: prefer data, then Cliniko appointment-level fields
+      const patientName =
+        data?.patient_name ||
+        data?.patientName ||
+        appt?.patient_name || // from Cliniko “appointment.patient_name”
+        '';
 
-      const isNewPatient = Boolean(data?.is_new_patient || data?.isNewPatient || ctx?.is_new_patient || ctx?.patient?.is_new);
+      const physioName =
+        data?.physio_name ||
+        data?.physioName ||
+        appt?.practitioner_name || // from Cliniko “appointment.practitioner_name”
+        appt?.practitioner ||
+        '';
+
+      const appointmentType =
+        data?.appointment_type ||
+        data?.appointmentType ||
+        appt?.appointment_type?.name ||
+        appt?.appointment_type ||
+        '';
+
+      const isNewPatient = Boolean(
+        data?.is_new_patient ||
+        data?.isNewPatient ||
+        ctx?.is_new_patient ||
+        ctx?.patient?.is_new
+      );
 
       const payload = this._withDerivedClinicMeta(ctx, {
         patientName, date, time, physioName, appointmentType, isEmailSentToPatient: true, isNewPatient
@@ -5230,7 +5251,6 @@ class ChatbotEngine {
       this.logger?.warn?.('_sendBookedEmail failed', { err: e?.message || e });
     }
   }
-  
 
   /**
    * CANCELLED (patient + FD)
@@ -5242,7 +5262,7 @@ class ChatbotEngine {
       const region = String((ctx?.region || 'SG')).toUpperCase();
       const patientEmail = String(ctx?.email || data?.email || '').trim();
 
-      // Expect your helper to return an array; fallback to []
+      // Expect helper to return an array; fallback to []
       const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
 
       let date = '', time = '';
@@ -5254,8 +5274,19 @@ class ChatbotEngine {
         }
       } catch {}
 
-      const patientName = data?.patient_name || data?.patientName || appt?.patient_name || '';
-      const physioName = data?.physio_name || data?.physioName || appt?.practitioner_name || appt?.practitioner || '';
+      // Name fallbacks: prefer data, then Cliniko appointment-level fields
+      const patientName =
+        data?.patient_name ||
+        data?.patientName ||
+        appt?.patient_name || // from Cliniko “appointment.patient_name”
+        '';
+
+      const physioName =
+        data?.physio_name ||
+        data?.physioName ||
+        appt?.practitioner_name || // from Cliniko “appointment.practitioner_name”
+        appt?.practitioner ||
+        '';
 
       const payload = this._withDerivedClinicMeta(ctx, {
         patientName, physioName, date, time
@@ -5279,7 +5310,6 @@ class ChatbotEngine {
       this.logger?.warn?.('_sendCancelledEmail failed', { err: e?.message || e });
     }
   }
-  
 
   /**
    * RESCHEDULED (patient + FD)
@@ -5291,6 +5321,10 @@ class ChatbotEngine {
       const region = String((ctx.region || 'SG')).toUpperCase();
       const patientEmail = String(ctx.email || data?.email || '').trim();
 
+      // Expect helper to return an array; fallback to []
+      const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
+
+      // Date/time formatters
       const fmt = (iso) => {
         if (!iso) return { date: '', time: '' };
         try {
@@ -5298,13 +5332,29 @@ class ChatbotEngine {
           return { date: t.split(',')[0].trim(), time: t.split(',').slice(1).join(',').trim() };
         } catch { return { date: '', time: '' }; }
       };
-
       const oldFmt = fmt(oldAppt?.starts_at);
       const newFmt = fmt(newAppt?.starts_at);
 
+      // Name fallbacks (align with your pattern)
+      const patientName =
+        data?.patient_name ||
+        data?.patientName ||
+        newAppt?.patient_name ||
+        oldAppt?.patient_name ||
+        '';
+
+      const physioName =
+        data?.physio_name ||
+        data?.physioName ||
+        newAppt?.practitioner_name ||
+        newAppt?.practitioner ||
+        oldAppt?.practitioner_name ||
+        oldAppt?.practitioner ||
+        '';
+
       const payload = this._withDerivedClinicMeta(ctx, {
-        patientName: data?.patient_name || data?.patientName || '',
-        physioName: newAppt?.practitioner || oldAppt?.practitioner || '',
+        patientName,
+        physioName,
         newDate: newFmt.date,
         newTime: newFmt.time,
         oldDate: oldFmt.date,
@@ -5312,7 +5362,8 @@ class ChatbotEngine {
       });
 
       const built = this._buildEmail_RescheduleConfirmed(payload);
-      const fd = (resolveSupportEmails && resolveSupportEmails(region)) || [];
+
+      // FD + patient
       const toSet = new Set(fd || []);
       if (patientEmail) toSet.add(patientEmail);
 
