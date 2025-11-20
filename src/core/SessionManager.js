@@ -990,32 +990,74 @@ class SessionManager {
     }
 
     /**
-     * Extract region/country from phone number (supports HK, SG, IN, PH, fallback: undefined)
-     * Returns: { region: 'HK'|'SG'|'IN'|'PH'|undefined, countryCode, nationalNumber }
+     * Extract region/country from phone number.
+     * -------------------------------------------------------------
+     * Handles international (+NN / 00NN) and local formats.
+     * - Recognizes prefixes: +65/+852/+91/+63 and domestic formats.
+     * - Handles 0065… , 0091… , 0063… equivalents.
+     * - Differentiates HK vs SG by prefix when ambiguous 8‑digit number.
+     * -------------------------------------------------------------
+     * @param {string} phoneNumber
+     * @returns {{region:'HK'|'SG'|'IN'|'PH'|undefined, countryCode:string|undefined, nationalNumber:string|undefined}}
      */
     getRegionFromPhoneNumber(phoneNumber) {
-        if (!phoneNumber) return { region: undefined, countryCode: undefined, nationalNumber: undefined };
-        // Remove all non-digit chars
-        const digits = phoneNumber.replace(/\D/g, '');
-        // HK: +852, 8 digits
-        if ((digits.startsWith('852') && digits.length === 11) || (digits.length === 8 && !digits.startsWith('0'))) {
-            return { region: 'HK', countryCode: '852', nationalNumber: digits.slice(-8) };
-        }
-        // SG: +65, 8 digits
-        if ((digits.startsWith('65') && digits.length === 10) || (digits.length === 8 && !digits.startsWith('0'))) {
-            return { region: 'SG', countryCode: '65', nationalNumber: digits.slice(-8) };
-        }
-        // India: +91, 10 digits
-        if ((digits.startsWith('91') && digits.length === 12) || (digits.length === 10 && !digits.startsWith('0'))) {
-            return { region: 'IN', countryCode: '91', nationalNumber: digits.slice(-10) };
-        }
-        // Philippines: +63, 10 digits (mobile: 9xx..., landline: 2xx...)
-        if ((digits.startsWith('63') && (digits.length === 12 || digits.length === 11))) {
-            return { region: 'PH', countryCode: '63', nationalNumber: digits.slice(2) };
-        }
-        // fallback: undefined
-        return { region: undefined, countryCode: undefined, nationalNumber: undefined };
+      // 🔒 environment override
+      if (process.env.FORCE_REGION_SG === 'true') {
+        this.logger.debug('[getRegionFromPhoneNumber] Forced to SG via env', { phoneNumber });
+        const digits = (phoneNumber || '').replace(/\D/g, '');
+        const national = digits ? digits.slice(-8) : undefined;
+        return { region: 'SG', countryCode: '65', nationalNumber: national };
+      }
+
+      if (!phoneNumber) return { region: undefined, countryCode: undefined, nationalNumber: undefined };
+      const digits = phoneNumber.replace(/\D/g, '');
+
+      // Normalize 00‑prefixed numbers to + form
+      const normalized = digits.startsWith('00') ? digits.slice(2) : digits;
+
+      // ---- India 🇮🇳 ----
+      if (normalized.startsWith('91') && normalized.length >= 12) {
+        return { region: 'IN', countryCode: '91', nationalNumber: normalized.slice(-10) };
+      }
+      // 0XXXXXXXXXX (11 digits, local)
+      if (/^0\d{10}$/.test(digits)) {
+        return { region: 'IN', countryCode: '91', nationalNumber: digits.slice(-10) };
+      }
+      if (/^\d{10}$/.test(digits)) {
+        return { region: 'IN', countryCode: '91', nationalNumber: digits };
+      }
+
+      // ---- Philippines 🇵🇭 ----
+      if (normalized.startsWith('63') && (normalized.length === 12 || normalized.length === 11)) {
+        return { region: 'PH', countryCode: '63', nationalNumber: normalized.slice(2) };
+      }
+      // Local 09XXXXXXXXX (11 digits)
+      if (/^09\d{9}$/.test(digits)) {
+        return { region: 'PH', countryCode: '63', nationalNumber: digits.slice(1) };
+      }
+
+      // ---- Singapore 🇸🇬 ----
+      if (normalized.startsWith('65') && normalized.length >= 10) {
+        return { region: 'SG', countryCode: '65', nationalNumber: normalized.slice(-8) };
+      }
+      // Local 8‑digit not starting with 0 or 1
+      if (/^[89]\d{7}$/.test(digits)) {
+        return { region: 'SG', countryCode: '65', nationalNumber: digits };
+      }
+
+      // ---- Hong Kong 🇭🇰 ----
+      if (normalized.startsWith('852') && normalized.length >= 11) {
+        return { region: 'HK', countryCode: '852', nationalNumber: normalized.slice(-8) };
+      }
+      // Local 8‑digit starting with 5‑9 but not 0
+      if (/^[5-9]\d{7}$/.test(digits)) {
+        return { region: 'HK', countryCode: '852', nationalNumber: digits };
+      }
+
+      // fallback
+      return { region: undefined, countryCode: undefined, nationalNumber: undefined };
     }
+    
 }
 
 module.exports = SessionManager;

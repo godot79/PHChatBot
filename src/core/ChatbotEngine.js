@@ -769,6 +769,8 @@ function getNextAvailableDates(startFrom = new Date(), count = MAX_DATE_ITEMS, m
   }
   return result;
 }
+
+
 /**
  * Main Chatbot conversation engine for WhatsApp/Cliniko integration.
  */
@@ -777,6 +779,7 @@ class ChatbotEngine {
     this.sessionManager = new SessionManager();
     this.clinikoAPI = new ClinikoAPI();
     this.logger = new Logger('ChatbotEngine');
+    this._restrictAppointmentTypesWrapper();
     this.isInitialized = false;
     this.STATES = {
       INTRO: 'INTRO',
@@ -803,6 +806,85 @@ class ChatbotEngine {
     };
     this.stateHandlers = {};
     this.initializeFlows();
+  }
+
+  _setCurrentSessionId(id) {
+    this._currentSessionId = id;
+  }
+
+  _clearCurrentSessionId(id) {
+    // Clear only if it matches what we set (safety on concurrent runs)
+    if (this._currentSessionId === id) {
+      this._currentSessionId = null;
+    }
+  }
+  /**
+   * Appointment-type restriction (auto‑injects current session)
+   * ------------------------------------------------------------
+   * Activated by RESTRICT_APPT_TYPES=true.
+   *  New patient IDs   : 1704018233683609399
+   *  Returning patient : 1802660105842328931,1704019452481242941,1802660655489090916
+   */
+  _restrictAppointmentTypesWrapper() {
+    if (process.env.RESTRICT_APPT_TYPES !== 'true') {
+      this.logger.info('[ChatbotEngine] Appt-type restriction disabled');
+      return;
+    }
+
+    const IDS_NEW = ['1704018233683609399'];
+    const IDS_RET = ['1802660105842328931','1704019452481242941','1802660655489090916'];
+    const orig = this.clinikoAPI.getAppointmentTypes.bind(this.clinikoAPI);
+    const log = this.logger;
+    const sm  = this.sessionManager;
+    const api = this.clinikoAPI;
+
+    this.clinikoAPI.getAppointmentTypes = async (opts = {}) => {
+      // Auto‑inject the active session id if the engine currently has one
+      const sid = this._currentSessionId;
+      if (sid && !opts.sessionId) opts.sessionId = sid;
+
+      const all = await orig(opts);
+      if (!sid || process.env.RESTRICT_APPT_TYPES !== 'true') return all;
+
+      try {
+        const session = await sm.getSession(sid);
+        if (!session) return all;
+
+        const { patient_id, recentlyRegistered, recentPatient } = session;
+        let isNew;
+
+        if (typeof recentPatient === 'boolean') {
+          isNew = !recentPatient;
+        } else if (recentlyRegistered) {
+          isNew = true;
+          await sm.updateSession(sid, { recentPatient: false });
+        } else if (patient_id) {
+          const bookings = await api.getBookingsByPatientId(String(patient_id), {
+            statusMode: 'active', when: 'past'
+          });
+          isNew = !(Array.isArray(bookings) && bookings.length);
+          await sm.updateSession(sid, { recentPatient: !isNew });
+        } else {
+          isNew = true;
+        }
+
+        if (process.env.FORCE_NEW_PATIENT_ONLY === 'true') isNew = true;
+        if (process.env.FORCE_RETURNING_ONLY === 'true') isNew = false;
+
+        const allowed = isNew ? IDS_NEW : IDS_RET;
+        const filtered = (Array.isArray(all) ? all : []).filter(t =>
+          allowed.includes(String(t.id))
+        );
+
+        log.info(`[ApptTypeFilter] session:${sid} → ${isNew ? 'NEW' : 'RETURNING'} → IDs:${allowed.join(',')}`);
+        return filtered;
+      } catch (err) {
+        log.error('[ApptTypeFilter] filtering failed', err);
+        return all;
+      }
+    };
+
+    this.logger.info('[ChatbotEngine] Appt-type restriction ENABLED (auto session enrichment)');
   }
 
   /**
@@ -1065,10 +1147,19 @@ class ChatbotEngine {
         return await this.handleFallbackState(session, message);
       }
 
-      // 🔐 Region-binding wrapper: all downstream Cliniko calls use the session's region
+      // ✅ Expose this session id for interceptors
+      this._setCurrentSessionId(session.id);
+
       const response = await this.withSessionRegion(session, async () => {
-        return await this.stateHandlers[currentState](session, message);
+        const out = await handler(session, message);
+        // Clean up right after handler completes
+        this._clearCurrentSessionId(session.id);
+        return out;
       });
+      // 🔐 Region-binding wrapper: all downstream Cliniko calls use the session's region
+      //const response = await this.withSessionRegion(session, async () => {
+      //  return await this.stateHandlers[currentState](session, message);
+      //});
 
       if (session.id) {
         await this.sessionManager.db.addChatHistory(session.id, message, response);
