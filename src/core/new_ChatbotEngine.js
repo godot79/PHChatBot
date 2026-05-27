@@ -826,21 +826,19 @@ class ChatbotEngine {
         this.logger.warn(`Failed to create session for ${phoneNumber}`);
         return 'Sorry, there was an issue starting your session. Please try again.';
       }
-
-      // FIXED: First message always starts in INTRO (this restores the original working flow)
+      // If first message, always start at INTRO unless already set
       if (!session.conversation_state) {
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.INTRO
         });
         session.conversation_state = this.STATES.INTRO;
       }
-
       const currentState = session.conversation_state || this.STATES.INTRO;
       if (!this.stateHandlers[currentState]) {
         return await this.handleFallbackState(session, message);
       }
 
-      // Region-binding wrapper
+      // 🔐 Region-binding wrapper: all downstream Cliniko calls use the session's region
       const response = await this.withSessionRegion(session, async () => {
         return await this.stateHandlers[currentState](session, message);
       });
@@ -866,6 +864,7 @@ class ChatbotEngine {
     }
   }
 
+
   // ====== STATE HANDLERS ======
 
   /**
@@ -888,12 +887,13 @@ class ChatbotEngine {
     };
     const regionCodes = Object.keys(regionLabels);
 
+    // Parse context safely
     let context = (session.context && typeof session.context === 'string')
       ? JSON.parse(session.context)
       : (session.context || {});
     const text = (message || '').trim().toLowerCase();
 
-    // Auto-estimate region from phone if not set
+    // If region not set, try auto-detect
     if (!context.region) {
       const phone = session.phone_number || session.phoneNumber;
       if (typeof this.sessionManager.getRegionFromPhoneNumber === 'function') {
@@ -905,15 +905,17 @@ class ChatbotEngine {
       }
     }
 
-    // Show region selection if needed
+    // If region not set or user typed "region", show region selection menu
     if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
       context.awaiting_region_selection = true;
+      // Handle selection input
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < regionCodes.length) {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
           await this.sessionManager.updateSession(session.id, { context });
+          // Return main menu immediately after setting region
           return await this.renderMainMenu(session);
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
@@ -921,20 +923,28 @@ class ChatbotEngine {
         context.region = found;
         delete context.awaiting_region_selection;
         await this.sessionManager.updateSession(session.id, { context });
+        // Return main menu immediately after setting region
         return await this.renderMainMenu(session);
       }
 
-      const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
-      await this.sessionManager.updateSession(session.id, { context });
-      return `Please select your region:\n\n${menu}\n\nReply with the number.`;
+      if (!context.region || context.awaiting_region_selection) {
+        const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
+        await this.sessionManager.updateSession(session.id, { context });
+        return `Please select your region:\n\n${menu}\n\nReply with the number.`;
+      }
     }
 
-    // Region is set → show Intro main menu for non-verified user
-    if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
+    // From here, region is set. Proceed with your existing menu logic, using renderMainMenu.
+    if (session.verified) {
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS
+      });
       return await this.renderMainMenu(session);
     }
 
-    // Only "1" (book/manage) transitions to VERIFY (email + DOB)
+    if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
+      return await this.renderMainMenu(session);
+    }
     if (text === '1' || text.includes('book') || text.includes('manage')) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.VERIFY,
@@ -943,22 +953,26 @@ class ChatbotEngine {
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.handleVerifyState(updatedSession, '');
     }
-
-    // Other options stay in Intro and call their handlers
     if (text === '2' || text.includes('fee')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_FEES });
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.VIEW_FEES
+      });
       return await this.handleViewFeesState(session, '');
     }
     if (text === '3' || text.includes('location')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_LOCATIONS });
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.VIEW_LOCATIONS
+      });
       return await this.handleViewLocationsState(session, '');
     }
     if (text === '4' || text.includes('register')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.REGISTER_PATIENT });
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.REGISTER_PATIENT
+      });
       return await this.handleRegisterPatientState(session, '');
     }
-
-    return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
+    return `Sorry, I didn't understand that.\n\n` +
+      await this.renderMainMenu(session);
   }
 
   /**
