@@ -596,6 +596,26 @@ function getNextAvailableDates(startFrom = new Date(), count = MAX_DATE_ITEMS, m
   }
   return result;
 }
+
+/**
+ * Sort appointment types: New/Initial first, Follow-Up second, everything else third.
+ * Within each group, sort alphabetically.
+ * @param {Array<{name: string}>} types
+ * @returns {Array<{name: string}>}
+ */
+function sortAppointmentTypes(types) {
+  const rank = (name) => {
+    const n = String(name || "").toLowerCase();
+    if (/\b(new|initial)\b/.test(n)) return 0;
+    if (/\bfollow.?up\b/.test(n)) return 1;
+    return 2;
+  };
+  return [...types].sort((a, b) => {
+    const rd = rank(a.name) - rank(b.name);
+    if (rd !== 0) return rd;
+    return String(a.name).localeCompare(String(b.name));
+  });
+}
 /**
  * Main Chatbot conversation engine for WhatsApp/Cliniko integration.
  */
@@ -893,6 +913,12 @@ class ChatbotEngine {
       : (session.context || {});
     const text = (message || '').trim().toLowerCase();
 
+    // Helper: re-fetch session and render main menu with fresh context
+    const renderMenuFresh = async () => {
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.renderMainMenu(fresh || session);
+    };
+
     // Auto-estimate region from phone if not set
     if (!context.region) {
       const phone = session.phone_number || session.phoneNumber;
@@ -914,14 +940,14 @@ class ChatbotEngine {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
           await this.sessionManager.updateSession(session.id, { context });
-          return await this.renderMainMenu(session);
+          return await renderMenuFresh();
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
         await this.sessionManager.updateSession(session.id, { context });
-        return await this.renderMainMenu(session);
+        return await renderMenuFresh();
       }
 
       const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
@@ -947,15 +973,18 @@ class ChatbotEngine {
     // Other options stay in Intro and call their handlers
     if (text === '2' || text.includes('fee')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_FEES });
-      return await this.handleViewFeesState(session, '');
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleViewFeesState(fresh, '');
     }
     if (text === '3' || text.includes('location')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_LOCATIONS });
-      return await this.handleViewLocationsState(session, '');
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleViewLocationsState(fresh, '');
     }
     if (text === '4' || text.includes('register')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.REGISTER_PATIENT });
-      return await this.handleRegisterPatientState(session, '');
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleRegisterPatientState(fresh, '');
     }
 
     return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
@@ -978,69 +1007,136 @@ class ChatbotEngine {
    * @param {string} message
    */
   async handleVerifyState(session, message) {
+    // Safe parse session.data
     let data = {};
     try {
-      data = typeof session.data === 'string'
-        ? JSON.parse(session.data)
-        : session.data || {};
-    } catch (e) {
-      data = {};
-    }
+      data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    } catch { data = {}; }
 
-    const textRaw = message || '';
-    const text = textRaw.trim().toLowerCase();
+    const textRaw = (message || '').trim();
+    const text = textRaw.toLowerCase();
 
-    // Allow user to go back to Intro menu at any time
+    // Back/menu at any time -> Intro + main menu
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO
-      });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updated);
     }
 
-    // First prompt: ask for email
-    if (!data.awaiting_email) {
-      const updatedData = { ...data, awaiting_email: true };
-      await this.sessionManager.updateSession(session.id, {
-        data: JSON.stringify(updatedData)
-      });
-      return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+    // DOB parser: accepts "dd mm yyyy", "dd/mm/yyyy", "dd-mm-yyyy", "dd.mm.yyyy"
+    const parseDob = (raw) => {
+      const m = String(raw || '').trim().match(/^(\d{1,2})(?:[\s\/\-\.])+(\d{1,2})(?:[\s\/\-\.])+(\d{4})$/);
+      if (!m) return null;
+      const [, dd, mm, yyyy] = m;
+      const d = new Date(Date.UTC(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10)));
+      return isNaN(d.getTime()) ? null : `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    };
+
+    const FAIL_PROMPT =
+      "We couldn't verify those details. Please check your email and date of birth and try again.\n\n" +
+      "1. Try again\n" +
+      "2. Have someone reach out\n" +
+      "3. Go to main menu\n\n" +
+      "(Reply 1, 2, or 3. 0⃣ Back)";
+
+    // Handle the post-failure 3-option prompt
+    if (data.verify_error_prompt === true) {
+      if (text === '1') {
+        // Restart from email
+        const fresh = { verify_error_prompt: false, awaiting_email: true };
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(fresh) });
+        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+      }
+      if (text === '2') {
+        // Log outreach request and return to main menu
+        const region = this._getSessionRegion(session);
+        const support = getSupportInfo(region);
+        this.logger.info('[Verify] User requested outreach after failed verification', { sessionId: session.id, region });
+        delete data.verify_error_prompt;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
+        const updated = await this.sessionManager.getSession(session.id);
+        return `Our support team will reach out to you shortly. ${support}\n\n` + await this.renderMainMenu(updated);
+      }
+      if (text === '3') {
+        delete data.verify_error_prompt;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
+        const updated = await this.sessionManager.getSession(session.id);
+        return await this.renderMainMenu(updated);
+      }
+      // Unknown input in fail prompt — reprint it
+      return FAIL_PROMPT;
     }
 
-    // Validate email input
-    const email = textRaw.trim().toLowerCase();
-    if (!email.includes('@') || !email.includes('.')) {
-      return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+    // Step 1: ask for email
+    if (!data.verify_email) {
+      if (!data.awaiting_email) {
+        data.awaiting_email = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+      }
+      // Validate and store email
+      const email = textRaw.toLowerCase();
+      if (!email.includes('@') || !email.includes('.')) {
+        return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+      }
+      data.verify_email = email;
+      delete data.awaiting_email;
+      data.awaiting_dob = true;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return 'Thanks. Now please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
     }
 
-    // Attempt verification
-    const patient = await this.clinikoAPI.findPatientByEmail(email);
-    const clearedData = { ...data };
-    delete clearedData.awaiting_email;
+    // Step 2: collect and validate DOB
+    if (!data.verify_dob) {
+      if (!textRaw) {
+        return 'Please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
+      }
+      const parsed = parseDob(textRaw);
+      if (!parsed) {
+        return 'That doesn\'t look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Back to menu)';
+      }
+      data.verify_dob = parsed; // stored as YYYY-MM-DD
+      delete data.awaiting_dob;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    }
 
-    if (patient) {
-      await this.sessionManager.updateSession(session.id, {
-        verified: true,
-        patient_id: patient.id,
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(clearedData)
-      });
-      return 'Verification successful!\n\nWhat would you like to do?\n\n1️⃣ Book Appointment\n2️⃣ Cancel Appointment\n3️⃣ Reschedule Appointment\n\nReply with the number or a keyword.';
-    } else {
-      // Verification failed: go back to Intro, show region-specific support info
-      await this.sessionManager.updateSession(session.id, {
-        verified: false,
-        conversation_state: this.STATES.INTRO,
-        data: JSON.stringify(clearedData)
-      });
+    // Step 3: verify with API (email + dob in YYYY-MM-DD)
+    const emailToFind = data.verify_email;
+    const dobToFind   = data.verify_dob;
+
+    const cleared = { ...data };
+    delete cleared.awaiting_email;
+    delete cleared.awaiting_dob;
+    delete cleared.verify_email;
+    delete cleared.verify_dob;
+
+    try {
+      const patient = await this.clinikoAPI.findPatientByEmailAndDob(emailToFind, dobToFind);
+
+      if (patient && patient.id) {
+        await this.sessionManager.updateSession(session.id, {
+          verified: true,
+          patient_id: patient.id,
+          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          data: JSON.stringify(cleared)
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        return 'Verification successful!\n\n' + await this.goToInteractiveMenu(updated);
+      }
+
+      // Verification failed — show 3-option prompt, stay in VERIFY state
+      cleared.verify_error_prompt = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
       const region = this._getSessionRegion(session);
       const support = getSupportInfo(region);
-      return (
-        "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
-        support + "\n\n" +
-        await this.renderMainMenu(session)
-      );
+      return `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}\n\n` +
+        "1. Try again\n2. Have someone reach out\n3. Go to main menu\n\n(Reply 1, 2, or 3. 0️⃣ Back)";
+
+    } catch (e) {
+      this.logger.error('[handleVerifyState] API error during verification', { err: e?.message });
+      cleared.verify_error_prompt = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
+      return FAIL_PROMPT;
     }
   }
 
@@ -1066,7 +1162,7 @@ class ChatbotEngine {
     }
 
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      // Verified users stay on the verified menu; going to INTRO would show the unverified landing
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updatedSession);
     }
@@ -1076,9 +1172,16 @@ class ChatbotEngine {
         session.phone_number || session.phoneNumber,
         true
       );
-      updatedSession.verified = false;
+      // Explicitly clear any seeded verified state from prior sessions
+      await this.sessionManager.updateSession(updatedSession.id, {
+        verified: false,
+        verification_status: 'unverified',
+        patient_id: null,
+        conversation_state: this.STATES.INTRO
+      });
+      const freshSession = await this.sessionManager.getSession(updatedSession.id);
       return '✅ All your data has been deleted and you are logged out.\n\n' +
-        (await this.goToInteractiveMenu(updatedSession));
+        await this.renderMainMenu(freshSession);
     }
 
     if (text === '1' || text.includes('book')) {
@@ -1119,7 +1222,7 @@ class ChatbotEngine {
 
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return 'What would you like to do?\n\n' + (await this.goToInteractiveMenu(session));
+      return await this.goToInteractiveMenu(session);
     }
     if (text === '1' || text.includes('history')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
@@ -1452,9 +1555,10 @@ class ChatbotEngine {
           buckets.get(n).ids.add(String(t.id));
         }
 
-        data.appointment_type_list = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
-          .sort((a, b) => a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
+        );
+        data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries(
           (data.appointment_type_list || []).map(x => [x.norm_name, x.ids])
         );
@@ -1467,7 +1571,13 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookHistory(session, '');
       }
 
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      }
+
       if (/^\d+$/.test(text)) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(text, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx < 0 || idx >= list.length) return 'Invalid appointment type selection.';
@@ -1481,9 +1591,9 @@ class ChatbotEngine {
       const reply2 = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a, i) => `${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply2;
@@ -1832,7 +1942,7 @@ class ChatbotEngine {
       const { advanced } = planForward(data, 'choose_type', apptTypes.length, () => { data.selected_appt_type = apptTypes[0]; });
 
       if (!advanced && /^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx < 0 || idx >= apptTypes.length) return 'Invalid appointment type selection. Reply with a number from the list.';
         data.selected_appt_type = apptTypes[idx];
         await sync();
@@ -1900,7 +2010,7 @@ class ChatbotEngine {
       const page = data.practitioner_page || 0;
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx < 0 || idx >= practitionerList.length) return 'Invalid practitioner selection. Reply with a number from the list.';
         data.selected_physio = practitionerList[idx];
         data.selection_step = 'choose_clinic';
@@ -1988,7 +2098,7 @@ class ChatbotEngine {
       const page = data.clinic_page || 0;
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx < 0 || idx >= clinics.length) return 'Invalid clinic selection. Reply with a number from the list.';
         data.selected_clinic = clinics[idx];
         await sync();
@@ -2085,7 +2195,11 @@ class ChatbotEngine {
 
     const raw = String(message || '');
     const text = raw.trim().toLowerCase();
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const sync = async (patch = {}) => {
+      session.data = JSON.stringify(data);
+      if (patch.conversation_state) session.conversation_state = patch.conversation_state;
+      await this.sessionManager.updateSession(session.id, { ...patch, data: session.data });
+    };
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
     const ymdLocal = (d) => { const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
 
@@ -2163,7 +2277,7 @@ class ChatbotEngine {
             }
             data.appointment_type_list = Array.from(buckets.values())
               .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
-              .sort((a,b)=>a.name.localeCompare(b.name));
+              data.appointment_type_list = sortAppointmentTypes(data.appointment_type_list);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           }
 
@@ -2173,7 +2287,7 @@ class ChatbotEngine {
             formatFn: (a,i)=>`${i}. ${a.name}`,
             page: 0,
             pageSize: MAX_SLOT_ITEMS,
-            moreLabel: null,
+            moreLabel: 'M. More types',
             header: `Select visit type for ${headerDate}:`
           }) + `\n\nReply with number. (0️⃣ Back)`;
           return reply;
@@ -2224,14 +2338,21 @@ class ChatbotEngine {
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
           buckets.get(n).ids.add(String(t.id));
         }
-        data.appointment_type_list = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
-          .sort((a,b)=>a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+        );
+        data.appt_type_page = 0;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      }
+
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
       const numOnly = text.replace(/[^\d]/g, '');
       if (numOnly) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(numOnly, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
@@ -2247,9 +2368,9 @@ class ChatbotEngine {
       const reply = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a,i)=>`${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Select visit type for ${headerDate}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply;
@@ -2268,7 +2389,7 @@ class ChatbotEngine {
       }
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2310,7 +2431,7 @@ class ChatbotEngine {
 
       if (/^\d+$/.test(text)) {
         const list = data.clinic_list || [];
-        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
           data.selection_step = 'view_slots';
@@ -2394,7 +2515,11 @@ class ChatbotEngine {
 
     const textRaw = String(message || '');
     const text = textRaw.trim().toLowerCase();
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const sync = async (patch = {}) => {
+      session.data = JSON.stringify(data);
+      if (patch.conversation_state) session.conversation_state = patch.conversation_state;
+      await this.sessionManager.updateSession(session.id, { ...patch, data: session.data });
+    };
 
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
 
@@ -2441,8 +2566,13 @@ class ChatbotEngine {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
+      if (/^m(ore)?$/i.test(text)) {
+        data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
+
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text,10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text,10) - 1;
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2478,11 +2608,20 @@ class ChatbotEngine {
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
           buckets.get(n).ids.add(String(t.id));
         }
-        data.appointment_type_list = Array.from(buckets.values()).map(v=>({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) })).sort((a,b)=>a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+        );
+        data.appt_type_page = 0;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
+
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
       if (/^\d+$/.test(text)) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(text,10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
@@ -2497,9 +2636,9 @@ class ChatbotEngine {
       const reply = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a,i)=>`${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Select visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply;
@@ -2524,7 +2663,7 @@ class ChatbotEngine {
 
       if (/^\d+$/.test(text)) {
         const list = data.clinic_list || [];
-        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
           data.selection_step = 'view_slots';
@@ -2629,7 +2768,11 @@ class ChatbotEngine {
     const textRaw = String(message || '');
     const text = textRaw.trim().toLowerCase();
     const numStr = text.replace(/[^0-9]/g, '');
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const sync = async (patch = {}) => {
+      session.data = JSON.stringify(data);
+      if (patch.conversation_state) session.conversation_state = patch.conversation_state;
+      await this.sessionManager.updateSession(session.id, { ...patch, data: session.data });
+    };
 
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
 
@@ -2687,7 +2830,7 @@ class ChatbotEngine {
       }
 
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(numStr, 10) - 1;
         const list = data.clinic_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
@@ -2731,9 +2874,10 @@ class ChatbotEngine {
             buckets.get(n).ids.add(String(t.id));
           }
         }
-        data.appointment_type_list = Array.from(buckets.values())
-          .map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
-          .sort((a, b) => a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
+        );
+        data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries((data.appointment_type_list || []).map(x => [x.norm_name, x.ids]));
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_type', data.appointment_type_list.length, () => {
@@ -2744,7 +2888,13 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
-      if (numStr) {
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      }
+
+      if (numStr && !data.selected_appt_type) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(numStr, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
@@ -2759,9 +2909,9 @@ class ChatbotEngine {
       const replyTypes = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a, i) => `${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Select visit type for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return replyTypes;
@@ -2801,7 +2951,7 @@ class ChatbotEngine {
       }
 
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(numStr, 10) - 1;
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -3189,28 +3339,34 @@ class ChatbotEngine {
   // ========== VIEW FEES / LOCATIONS / REGISTER (REUSE) ==========
 
   async handleViewFeesState(session, message) {
-    // (re-use your static display or API as before)
-    const fees = `
-💰 *Fee Structure by Clinic*
+    const region = this._getSessionRegion(session);
 
-🏥 *Prohealth Physiofocus Pte Ltd*
-• Initial: SGD 180
-• Follow-up: SGD 150
+    const FEE_DATA = {
+      SG: [
+        { name: 'Prohealth In Touch Physiotherapy', initial: 'SGD 190', followup: 'SGD 160' },
+        { name: 'UWC East',  initial: 'SGD 170', followup: 'SGD 140' },
+        { name: 'UWC Dover', initial: 'SGD 175', followup: 'SGD 145' },
+      ],
+      HK: [
+        { name: 'Prohealth Hong Kong', initial: 'HKD 1,200', followup: 'HKD 900' },
+      ],
+      IN: [
+        { name: 'Prohealth India', initial: 'INR 2,500', followup: 'INR 1,800' },
+      ],
+      PH: [
+        { name: 'Prohealth Philippines', initial: 'PHP 2,800', followup: 'PHP 2,200' },
+      ],
+    };
 
-🏥 *Prohealth In Touch Physiotherapy*
-• Initial: SGD 190
-• Follow-up: SGD 160
+    const clinics = FEE_DATA[region] || FEE_DATA.SG;
+    const lines = clinics.map(c =>
+      `🏥 *${c.name}*\n• Initial: ${c.initial}\n• Follow-up: ${c.followup}`
+    ).join('\n\n');
 
-🏥 *UWC East*
-• Initial: SGD 170
-• Follow-up: SGD 140
-
-🏥 *UWC Dover*
-• Initial: SGD 175
-• Follow-up: SGD 145
-    `.trim();
+    const fees = `💰 *Fee Structure by Clinic*\n\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-    return fees + '\n\n' + await this.renderMainMenu(session);
+    const fresh = await this.sessionManager.getSession(session.id);
+    return fees + '\n\n' + await this.renderMainMenu(fresh);
   }
 
   async handleViewLocationsState(session, message) {
@@ -3219,7 +3375,8 @@ class ChatbotEngine {
       `${idx + 1}. ${c.business_name}\n `
     ).join('\n');
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(session);
+    const fresh = await this.sessionManager.getSession(session.id);
+    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(fresh);
   }
 
   /**
