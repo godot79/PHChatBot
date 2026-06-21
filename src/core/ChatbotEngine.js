@@ -6,6 +6,7 @@ const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
+const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('/opt/prohealth-mailer/EmailTemplates');
 
 // Code Constants
 const WHATSAPP_MAX_MESSAGE_LENGTH = 4096;
@@ -217,13 +218,12 @@ function normalizeDateWindow(fromISO, toISO, maxSpanDays = 7) {
   if (from < nextDay) from = new Date(nextDay);
   if (to < from) to = new Date(from);
 
-  // Clamp to max span
+  // Clamp to max span from 'from'. Do NOT clamp against lastDay — lastDay is computed
+  // relative to today+1 and would silently move 'to' before 'from' for any future date
+  // beyond the default window (e.g. booking on 2026-06-10 when today is 2026-06-05).
   const maxTo = new Date(from);
   maxTo.setUTCDate(from.getUTCDate() + (maxSpanDays - 1));
   if (to > maxTo) to = maxTo;
-
-  // Also do not exceed global allowed lastDay bound
-  if (to > lastDay) to = new Date(lastDay);
 
   const toISODate = d => {
     const yyyy = d.getUTCFullYear();
@@ -352,9 +352,30 @@ function getSupportInfo(region) {
   return `Need help? Call us at ${info.phone} or email ${info.email}`;
 }
 
+/**
+ * Format a Date or ISO string for display in WhatsApp slot lists and confirmation
+ * messages. Uses a fixed locale (en-GB) and explicit options so output is identical
+ * regardless of the Node.js process locale on any server: e.g. "17 Jun 2026, 08:00"
+ *
+ * @param {Date|string} dateOrIso
+ * @returns {string}
+ */
+function formatSlotDateTime(dateOrIso) {
+  const dt = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (isNaN(dt.getTime())) return String(dateOrIso);
+  return dt.toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
 function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
-  return `${idx}. ${dt.toLocaleString()}`;
+  return `${idx}. ${formatSlotDateTime(dt)}`;
 }
 
 /**
@@ -505,7 +526,7 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
     appt._practitioner_display = getPractitionerDisplayName(practitionerObj);
     appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj);
     appt._business_display = getBusinessDisplayName(businessObj);
-    appt._display_dt = new Date(appt.starts_at).toLocaleString();
+    appt._display_dt = formatSlotDateTime(appt.starts_at);
   }
 
   // Single summary log at the end
@@ -595,6 +616,26 @@ function getNextAvailableDates(startFrom = new Date(), count = MAX_DATE_ITEMS, m
     checked++;
   }
   return result;
+}
+
+/**
+ * Sort appointment types: New/Initial first, Follow-Up second, everything else third.
+ * Within each group, sort alphabetically.
+ * @param {Array<{name: string}>} types
+ * @returns {Array<{name: string}>}
+ */
+function sortAppointmentTypes(types) {
+  const rank = (name) => {
+    const n = String(name || "").toLowerCase();
+    if (/\b(new|initial)\b/.test(n)) return 0;
+    if (/\bfollow.?up\b/.test(n)) return 1;
+    return 2;
+  };
+  return [...types].sort((a, b) => {
+    const rd = rank(a.name) - rank(b.name);
+    if (rd !== 0) return rd;
+    return String(a.name).localeCompare(String(b.name));
+  });
 }
 /**
  * Main Chatbot conversation engine for WhatsApp/Cliniko integration.
@@ -893,6 +934,12 @@ class ChatbotEngine {
       : (session.context || {});
     const text = (message || '').trim().toLowerCase();
 
+    // Helper: re-fetch session and render main menu with fresh context
+    const renderMenuFresh = async () => {
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.renderMainMenu(fresh || session);
+    };
+
     // Auto-estimate region from phone if not set
     if (!context.region) {
       const phone = session.phone_number || session.phoneNumber;
@@ -914,14 +961,14 @@ class ChatbotEngine {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
           await this.sessionManager.updateSession(session.id, { context });
-          return await this.renderMainMenu(session);
+          return await renderMenuFresh();
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
         await this.sessionManager.updateSession(session.id, { context });
-        return await this.renderMainMenu(session);
+        return await renderMenuFresh();
       }
 
       const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
@@ -947,15 +994,18 @@ class ChatbotEngine {
     // Other options stay in Intro and call their handlers
     if (text === '2' || text.includes('fee')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_FEES });
-      return await this.handleViewFeesState(session, '');
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleViewFeesState(fresh, '');
     }
     if (text === '3' || text.includes('location')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_LOCATIONS });
-      return await this.handleViewLocationsState(session, '');
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleViewLocationsState(fresh, '');
     }
     if (text === '4' || text.includes('register')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.REGISTER_PATIENT });
-      return await this.handleRegisterPatientState(session, '');
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleRegisterPatientState(fresh, '');
     }
 
     return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
@@ -978,69 +1028,139 @@ class ChatbotEngine {
    * @param {string} message
    */
   async handleVerifyState(session, message) {
+    // Safe parse session.data
     let data = {};
     try {
-      data = typeof session.data === 'string'
-        ? JSON.parse(session.data)
-        : session.data || {};
-    } catch (e) {
-      data = {};
-    }
+      data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    } catch { data = {}; }
 
-    const textRaw = message || '';
-    const text = textRaw.trim().toLowerCase();
+    const textRaw = (message || '').trim();
+    const text = textRaw.toLowerCase();
 
-    // Allow user to go back to Intro menu at any time
+    // Back/menu at any time -> Intro + main menu
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO
-      });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updated);
     }
 
-    // First prompt: ask for email
-    if (!data.awaiting_email) {
-      const updatedData = { ...data, awaiting_email: true };
-      await this.sessionManager.updateSession(session.id, {
-        data: JSON.stringify(updatedData)
-      });
-      return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+    // DOB parser: accepts "dd mm yyyy", "dd/mm/yyyy", "dd-mm-yyyy", "dd.mm.yyyy"
+    const parseDob = (raw) => {
+      const m = String(raw || '').trim().match(/^(\d{1,2})(?:[\s\/\-\.])+(\d{1,2})(?:[\s\/\-\.])+(\d{4})$/);
+      if (!m) return null;
+      const [, dd, mm, yyyy] = m;
+      const d = new Date(Date.UTC(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10)));
+      return isNaN(d.getTime()) ? null : `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    };
+
+    const FAIL_PROMPT =
+      "We couldn't verify those details. Please check your email and date of birth and try again.\n\n" +
+      "1. Try again\n" +
+      "2. Have someone reach out\n" +
+      "3. Go to main menu\n\n" +
+      "(Reply 1, 2, or 3. 0⃣ Back)";
+
+    // Handle the post-failure 3-option prompt
+    if (data.verify_error_prompt === true) {
+      if (text === '1') {
+        // Restart from email
+        const fresh = { verify_error_prompt: false, awaiting_email: true };
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(fresh) });
+        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+      }
+      if (text === '2') {
+        // Log outreach request and return to main menu
+        const region = this._getSessionRegion(session);
+        const support = getSupportInfo(region);
+        this.logger.info('[Verify] User requested outreach after failed verification', { sessionId: session.id, region });
+        delete data.verify_error_prompt;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
+        const updated = await this.sessionManager.getSession(session.id);
+        return `Our support team will reach out to you shortly. ${support}\n\n` + await this.renderMainMenu(updated);
+      }
+      if (text === '3') {
+        delete data.verify_error_prompt;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
+        const updated = await this.sessionManager.getSession(session.id);
+        return await this.renderMainMenu(updated);
+      }
+      // Unknown input in fail prompt — reprint it
+      return FAIL_PROMPT;
     }
 
-    // Validate email input
-    const email = textRaw.trim().toLowerCase();
-    if (!email.includes('@') || !email.includes('.')) {
-      return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+    // Step 1: ask for email
+    if (!data.verify_email) {
+      if (!data.awaiting_email) {
+        data.awaiting_email = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+      }
+      // Validate and store email
+      const email = textRaw.toLowerCase();
+      if (!email.includes('@') || !email.includes('.')) {
+        return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+      }
+      data.verify_email = email;
+      delete data.awaiting_email;
+      data.awaiting_dob = true;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return 'Thanks. Now please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
     }
 
-    // Attempt verification
-    const patient = await this.clinikoAPI.findPatientByEmail(email);
-    const clearedData = { ...data };
-    delete clearedData.awaiting_email;
+    // Step 2: collect and validate DOB
+    if (!data.verify_dob) {
+      if (!textRaw) {
+        return 'Please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
+      }
+      const parsed = parseDob(textRaw);
+      if (!parsed) {
+        return 'That doesn\'t look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Back to menu)';
+      }
+      data.verify_dob = parsed; // stored as YYYY-MM-DD
+      delete data.awaiting_dob;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    }
 
-    if (patient) {
-      await this.sessionManager.updateSession(session.id, {
-        verified: true,
-        patient_id: patient.id,
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(clearedData)
-      });
-      return 'Verification successful!\n\nWhat would you like to do?\n\n1️⃣ Book Appointment\n2️⃣ Cancel Appointment\n3️⃣ Reschedule Appointment\n\nReply with the number or a keyword.';
-    } else {
-      // Verification failed: go back to Intro, show region-specific support info
-      await this.sessionManager.updateSession(session.id, {
-        verified: false,
-        conversation_state: this.STATES.INTRO,
-        data: JSON.stringify(clearedData)
-      });
+    // Step 3: verify with API (email + dob in YYYY-MM-DD)
+    const emailToFind = data.verify_email;
+    const dobToFind   = data.verify_dob;
+
+    const cleared = { ...data };
+    delete cleared.awaiting_email;
+    delete cleared.awaiting_dob;
+    delete cleared.verify_email;
+    delete cleared.verify_dob;
+
+    try {
+      const patient = await this.clinikoAPI.findPatientByEmailAndDob(emailToFind, dobToFind);
+
+      if (patient && patient.id) {
+        // Merge email into context so it survives subsequent data resets
+        const existingCtx = (() => { try { return typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {}); } catch { return {}; } })();
+        await this.sessionManager.updateSession(session.id, {
+          verified: true,
+          patient_id: patient.id,
+          conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+          context: JSON.stringify({ ...existingCtx, email: patient.email || existingCtx.email || '' }),
+          data: JSON.stringify(cleared)
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        return 'Verification successful!\n\n' + await this.goToInteractiveMenu(updated);
+      }
+
+      // Verification failed — show 3-option prompt, stay in VERIFY state
+      cleared.verify_error_prompt = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
       const region = this._getSessionRegion(session);
       const support = getSupportInfo(region);
-      return (
-        "We couldn't verify that email. Please check the email address and try again, or contact support for assistance.\n\n" +
-        support + "\n\n" +
-        await this.renderMainMenu(session)
-      );
+      return `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}\n\n` +
+        "1. Try again\n2. Have someone reach out\n3. Go to main menu\n\n(Reply 1, 2, or 3. 0️⃣ Back)";
+
+    } catch (e) {
+      this.logger.error('[handleVerifyState] API error during verification', { err: e?.message });
+      cleared.verify_error_prompt = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
+      return FAIL_PROMPT;
     }
   }
 
@@ -1066,7 +1186,7 @@ class ChatbotEngine {
     }
 
     if (['0', 'menu', 'back'].includes(text)) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+      // Verified users stay on the verified menu; going to INTRO would show the unverified landing
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updatedSession);
     }
@@ -1076,9 +1196,16 @@ class ChatbotEngine {
         session.phone_number || session.phoneNumber,
         true
       );
-      updatedSession.verified = false;
+      // Explicitly clear any seeded verified state from prior sessions
+      await this.sessionManager.updateSession(updatedSession.id, {
+        verified: false,
+        verification_status: 'unverified',
+        patient_id: null,
+        conversation_state: this.STATES.INTRO
+      });
+      const freshSession = await this.sessionManager.getSession(updatedSession.id);
       return '✅ All your data has been deleted and you are logged out.\n\n' +
-        (await this.goToInteractiveMenu(updatedSession));
+        await this.renderMainMenu(freshSession);
     }
 
     if (text === '1' || text.includes('book')) {
@@ -1119,7 +1246,7 @@ class ChatbotEngine {
 
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
-      return 'What would you like to do?\n\n' + (await this.goToInteractiveMenu(session));
+      return await this.goToInteractiveMenu(session);
     }
     if (text === '1' || text.includes('history')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
@@ -1217,48 +1344,60 @@ class ChatbotEngine {
     }
 
     if (text === '2') {
-      // Region-specific support email
-      let context = session.context;
-      if (context && typeof context === 'string') {
-        try { context = JSON.parse(context); } catch {}
-      }
-      const region = (context && context.region) || 'SG';
-      const support = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
-      const toEmail = support.email;
-
-      // Patient info (best effort)
-      const patient_id = session.patient_id || null;
-      let patientEmail = null;
-      let patientName = null;
+      // Build and send the support email via the mailer service
+      let emailPayload = null;
       try {
-        if (patient_id && this.clinikoAPI.getPatientById) {
-          const patient = await this.clinikoAPI.getPatientById(patient_id);
-          if (patient) {
-            patientEmail = patient.email || null;
-            patientName = [patient.first_name, patient.last_name].filter(Boolean).join(' ') || null;
-          }
+        emailPayload = await this._composeSupportEmailPayloadNoSlots(session, data);
+      } catch (e) {
+        this.logger.error('[NoSlots] Failed to compose support email payload', { error: e?.message || e, sessionId: session.id });
+      }
+
+      if (emailPayload && Array.isArray(emailPayload.to) && emailPayload.to.length) {
+        try {
+          const body = JSON.stringify({ to: emailPayload.to, subject: emailPayload.subject, text: emailPayload.text });
+          await new Promise((resolve, reject) => {
+            const http = require('http');
+            const req = http.request(
+              {
+                method: 'POST',
+                host: '127.0.0.1',
+                port: 8089,
+                path: '/email',
+                headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
+              },
+              (res) => {
+                res.resume();
+                if (res.statusCode === 200) {
+                  this.logger.info('[NoSlots] Support email sent', { to: emailPayload.to, subject: emailPayload.subject, sessionId: session.id });
+                  resolve();
+                } else {
+                  reject(new Error(`Mailer returned HTTP ${res.statusCode}`));
+                }
+              }
+            );
+            req.on('error', reject);
+            req.write(body);
+            req.end();
+          });
+        } catch (e) {
+          this.logger.error('[NoSlots] Failed to send support email', { error: e?.message || e, sessionId: session.id });
         }
-      } catch (e) {}
+      } else {
+        this.logger.warn('[NoSlots] No recipients resolved for support email — email not sent', { sessionId: session.id });
+      }
 
-      const phone = session.phone_number || session.phoneNumber || '';
-
-      // Log the outreach request for staff to action via the region email
-      this.logger.info('[NoSlots] Outreach requested for manual email', {
-        to: toEmail,
-        sessionId: session.id,
-        patient_id,
-        patientEmail,
-        patientName,
-        phone,
-        region
-      });
+      // Derive display values for confirmation message
+      let context = session.context;
+      if (context && typeof context === 'string') { try { context = JSON.parse(context); } catch {} }
+      const region = (context && context.region) || emailPayload?.meta?.region || 'SG';
+      const phone = session.phone_number || session.phoneNumber || emailPayload?.meta?.phone || '';
 
       delete data.no_slots_prompt;
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(data)
       });
-      return `Thanks! Our ${region} support team (${toEmail}) will reach out to you at ${patientEmail || phone || 'your contact'} shortly.\n\n` + await this.renderMainMenu(session);
+      return `Thanks! Our ${region} support team will reach out to you at ${phone || 'your contact'} shortly.\n\n` + await this.renderMainMenu(session);
     }
 
     if (text === '3') {
@@ -1426,7 +1565,7 @@ class ChatbotEngine {
 
       const reply = formatPaginatedList({
         items: list,
-        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${new Date(p.last_seen).toLocaleString()}`,
+        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${formatSlotDateTime(p.last_seen)}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: null,
@@ -1452,9 +1591,10 @@ class ChatbotEngine {
           buckets.get(n).ids.add(String(t.id));
         }
 
-        data.appointment_type_list = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
-          .sort((a, b) => a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
+        );
+        data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries(
           (data.appointment_type_list || []).map(x => [x.norm_name, x.ids])
         );
@@ -1467,7 +1607,13 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookHistory(session, '');
       }
 
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      }
+
       if (/^\d+$/.test(text)) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(text, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx < 0 || idx >= list.length) return 'Invalid appointment type selection.';
@@ -1481,9 +1627,9 @@ class ChatbotEngine {
       const reply2 = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a, i) => `${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply2;
@@ -1570,11 +1716,13 @@ class ChatbotEngine {
         conversation_state: this.STATES.SELECT_SLOT,
         data: JSON.stringify(slotData)
       });
+      session.conversation_state = this.STATES.SELECT_SLOT;
+      session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply4 = formatPaginatedList({
         items: filtered,
-        formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -1832,7 +1980,7 @@ class ChatbotEngine {
       const { advanced } = planForward(data, 'choose_type', apptTypes.length, () => { data.selected_appt_type = apptTypes[0]; });
 
       if (!advanced && /^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx < 0 || idx >= apptTypes.length) return 'Invalid appointment type selection. Reply with a number from the list.';
         data.selected_appt_type = apptTypes[idx];
         await sync();
@@ -1900,7 +2048,7 @@ class ChatbotEngine {
       const page = data.practitioner_page || 0;
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx < 0 || idx >= practitionerList.length) return 'Invalid practitioner selection. Reply with a number from the list.';
         data.selected_physio = practitionerList[idx];
         data.selection_step = 'choose_clinic';
@@ -1988,7 +2136,7 @@ class ChatbotEngine {
       const page = data.clinic_page || 0;
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + (page * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx < 0 || idx >= clinics.length) return 'Invalid clinic selection. Reply with a number from the list.';
         data.selected_clinic = clinics[idx];
         await sync();
@@ -2037,11 +2185,13 @@ class ChatbotEngine {
       };
 
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
+      session.conversation_state = this.STATES.SELECT_SLOT;
+      session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply = formatPaginatedList({
         items: filtered,
-        formatFn: (s, i) => { const dt = new Date(s.slot); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot)}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2085,9 +2235,19 @@ class ChatbotEngine {
 
     const raw = String(message || '');
     const text = raw.trim().toLowerCase();
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const sync = async (patch = {}) => {
+      session.data = JSON.stringify(data);
+      if (patch.conversation_state) session.conversation_state = patch.conversation_state;
+      await this.sessionManager.updateSession(session.id, { ...patch, data: session.data });
+    };
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
     const ymdLocal = (d) => { const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
+
+    // ----- no-slots decision (must run before back/nav to handle "1","2","3" replies) -----
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate, raw);
+      if (ret) return ret;
+    }
 
     // ----- global back/menu -----
     if (text === 'back' || text === 'menu') {
@@ -2163,7 +2323,7 @@ class ChatbotEngine {
             }
             data.appointment_type_list = Array.from(buckets.values())
               .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
-              .sort((a,b)=>a.name.localeCompare(b.name));
+              data.appointment_type_list = sortAppointmentTypes(data.appointment_type_list);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           }
 
@@ -2173,7 +2333,7 @@ class ChatbotEngine {
             formatFn: (a,i)=>`${i}. ${a.name}`,
             page: 0,
             pageSize: MAX_SLOT_ITEMS,
-            moreLabel: null,
+            moreLabel: 'M. More types',
             header: `Select visit type for ${headerDate}:`
           }) + `\n\nReply with number. (0️⃣ Back)`;
           return reply;
@@ -2224,14 +2384,21 @@ class ChatbotEngine {
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
           buckets.get(n).ids.add(String(t.id));
         }
-        data.appointment_type_list = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
-          .sort((a,b)=>a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+        );
+        data.appt_type_page = 0;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      }
+
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
       const numOnly = text.replace(/[^\d]/g, '');
       if (numOnly) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(numOnly, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
@@ -2247,9 +2414,9 @@ class ChatbotEngine {
       const reply = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a,i)=>`${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Select visit type for ${headerDate}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply;
@@ -2268,7 +2435,7 @@ class ChatbotEngine {
       }
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2310,7 +2477,7 @@ class ChatbotEngine {
 
       if (/^\d+$/.test(text)) {
         const list = data.clinic_list || [];
-        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
           data.selection_step = 'view_slots';
@@ -2349,15 +2516,36 @@ class ChatbotEngine {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
+        // Pop view_slots off the nav stack so a single "0" goes back to choose_clinic,
+        // not back into view_slots (which would just re-fail and need a second "0").
+        if (typeof navBack === 'function') navBack(data);
         data.selection_step = 'choose_clinic';
+        delete data.clinic_list; // force clinic list to re-render fresh
+        // Offer support contact option, consistent with other no-slots flows.
+        data.no_slots_prompt = true;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        return 'No slots for that date at this clinic. Pick another clinic or go back (0).';
+        return `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Pick another clinic\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3. (0️⃣ Back)`;
       }
+
+      const slotData = {
+        slot_list: slots,
+        slot_page: 0,
+        last_selection_flow: 'date',
+        prev_state_data: {
+          selected_physio: data.selected_physio,
+          selected_clinic: data.selected_clinic,
+          selected_appt_type: data.selected_appt_type,
+          selected_date: data.selected_date
+        }
+      };
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
+      session.conversation_state = this.STATES.SELECT_SLOT;
+      session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2394,9 +2582,19 @@ class ChatbotEngine {
 
     const textRaw = String(message || '');
     const text = textRaw.trim().toLowerCase();
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const sync = async (patch = {}) => {
+      session.data = JSON.stringify(data);
+      if (patch.conversation_state) session.conversation_state = patch.conversation_state;
+      await this.sessionManager.updateSession(session.id, { ...patch, data: session.data });
+    };
 
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
+
+    // ---------- no-slots decision (must run before back/nav to handle "1","2","3" replies) ----------
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, this.handleBookSpecificPhysio, textRaw);
+      if (ret) return ret;
+    }
 
     // ---------- global back/menu ----------
     if (text === 'back' || text === 'menu') {
@@ -2441,8 +2639,13 @@ class ChatbotEngine {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
+      if (/^m(ore)?$/i.test(text)) {
+        data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
+
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text,10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text,10) - 1;
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2478,11 +2681,20 @@ class ChatbotEngine {
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
           buckets.get(n).ids.add(String(t.id));
         }
-        data.appointment_type_list = Array.from(buckets.values()).map(v=>({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) })).sort((a,b)=>a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+        );
+        data.appt_type_page = 0;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
+
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
       if (/^\d+$/.test(text)) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(text,10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
@@ -2497,9 +2709,9 @@ class ChatbotEngine {
       const reply = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a,i)=>`${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Select visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return reply;
@@ -2524,7 +2736,7 @@ class ChatbotEngine {
 
       if (/^\d+$/.test(text)) {
         const list = data.clinic_list || [];
-        const idx = parseInt(text, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(text, 10) - 1;
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
           data.selection_step = 'view_slots';
@@ -2566,7 +2778,16 @@ class ChatbotEngine {
 
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
-      if (!slots.length) return 'No slots in that window. Pick another option.';
+      if (!slots.length) {
+        data.no_slots_prompt = true;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
+          data: JSON.stringify(data)
+        });
+        session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
+        session.data = JSON.stringify(data);
+        return `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+      }
 
       const slotData = {
         slot_list: slots,
@@ -2579,11 +2800,13 @@ class ChatbotEngine {
         }
       };
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
+      session.conversation_state = this.STATES.SELECT_SLOT;
+      session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s,i)=>{ const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2629,7 +2852,11 @@ class ChatbotEngine {
     const textRaw = String(message || '');
     const text = textRaw.trim().toLowerCase();
     const numStr = text.replace(/[^0-9]/g, '');
-    const sync = async (patch = {}) => this.sessionManager.updateSession(session.id, { ...patch, data: JSON.stringify(data) });
+    const sync = async (patch = {}) => {
+      session.data = JSON.stringify(data);
+      if (patch.conversation_state) session.conversation_state = patch.conversation_state;
+      await this.sessionManager.updateSession(session.id, { ...patch, data: session.data });
+    };
 
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
 
@@ -2687,7 +2914,7 @@ class ChatbotEngine {
       }
 
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1 + ((data.clinic_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(numStr, 10) - 1;
         const list = data.clinic_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_clinic = list[idx];
@@ -2731,9 +2958,10 @@ class ChatbotEngine {
             buckets.get(n).ids.add(String(t.id));
           }
         }
-        data.appointment_type_list = Array.from(buckets.values())
-          .map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
-          .sort((a, b) => a.name.localeCompare(b.name));
+        data.appointment_type_list = sortAppointmentTypes(
+          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
+        );
+        data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries((data.appointment_type_list || []).map(x => [x.norm_name, x.ids]));
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_type', data.appointment_type_list.length, () => {
@@ -2744,7 +2972,13 @@ class ChatbotEngine {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
-      if (numStr) {
+      if (/^m(ore)?$/i.test(text)) {
+        data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      }
+
+      if (numStr && !data.selected_appt_type) {
+        const page = data.appt_type_page || 0;
         const idx = parseInt(numStr, 10) - 1;
         const list = data.appointment_type_list || [];
         if (idx >= 0 && idx < list.length) {
@@ -2759,9 +2993,9 @@ class ChatbotEngine {
       const replyTypes = formatPaginatedList({
         items: data.appointment_type_list || [],
         formatFn: (a, i) => `${i}. ${a.name}`,
-        page: 0,
+        page: data.appt_type_page || 0,
         pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
+        moreLabel: 'M. More types',
         header: `Select visit type for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
       }) + `\n\nReply with number. (0️⃣ Back)`;
       return replyTypes;
@@ -2801,7 +3035,7 @@ class ChatbotEngine {
       }
 
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1 + ((data.practitioner_page || 0) * MAX_SLOT_ITEMS);
+        const idx = parseInt(numStr, 10) - 1;
         const list = data.practitioner_list || [];
         if (idx >= 0 && idx < list.length) {
           data.selected_physio = list[idx];
@@ -2861,11 +3095,13 @@ class ChatbotEngine {
         }
       };
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.SELECT_SLOT, data: JSON.stringify(slotData) });
+      session.conversation_state = this.STATES.SELECT_SLOT;
+      session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s, i) => { const dt = new Date(s.slot || s.starts_at || s.appointment_start); return `${i}. ${dt.toLocaleString()}`; },
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -3018,7 +3254,7 @@ class ChatbotEngine {
       return (
         `You have selected:\n\n` +
         `• ${header}\n` +
-        `• ${dt.toLocaleString()}\n\n` +
+        `• ${formatSlotDateTime(dt)}\n\n` +
         `Reply YES to confirm, or 0️⃣ to cancel.`
       );
     }
@@ -3036,10 +3272,7 @@ class ChatbotEngine {
     }
 
     // Time-only listing per line
-    const compactFormat = (slot, idx) => {
-      const dt = new Date(slot.slot);
-      return `${idx}. ${dt.toLocaleString()}`;
-    };
+    const compactFormat = (slot, idx) => `${idx}. ${formatSlotDateTime(slot.slot)}`;
 
     const reply = formatPaginatedList({
       items: slots,
@@ -3159,12 +3392,31 @@ class ChatbotEngine {
       }
 
       if (result.success) {
+        // Send booking confirmation email (best-effort)
+        try {
+          const { subject, html, text } = bookingConfirmed({
+            practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name || '—',
+            clinic:       enrichedSlot._business_display || '—',
+            dateTime:     formatSlotDateTime(dt),
+            apptType:     enrichedSlot._appointment_type_display || enrichedSlot.appointment_type_name || '',
+          });
+          const ctx = (() => { try { return typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {}); } catch { return {}; } })();
+          const region = String(ctx.region || 'SG').trim();
+          const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+          const userEmail = String(ctx.email || session.email || '').trim();
+          const to = [];
+          if (supportEmail) to.push(supportEmail);
+          if (userEmail)    to.push(userEmail);
+          await this._postEmail({ to, subject, html, text });
+        } catch (e) {
+          this.logger.error('[Booking] Confirmation email send failed', { error: e?.message || e, sessionId: session.id });
+        }
         // --- Debug: Booking success, show enriched details ---
         return (
           `✅ Your appointment is booked for:\n` +
           `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
           `🏥 *${enrichedSlot._business_display || ''}*\n` +
-          `🗓️ ${dt.toLocaleString()}\n\n` +
+          `🗓️ ${formatSlotDateTime(dt)}\n\n` +
           await this.goToInteractiveMenu(session)
         );
       } else {
@@ -3181,7 +3433,7 @@ class ChatbotEngine {
       `You have selected:\n\n` +
       `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
       `🏥 *${enrichedSlot._business_display || ''}*\n` +
-      `🗓️ ${dt.toLocaleString()}\n\n` +
+      `🗓️ ${formatSlotDateTime(dt)}\n\n` +
       `Reply YES to confirm, or 0️⃣ to cancel.`
     );
   }
@@ -3189,28 +3441,34 @@ class ChatbotEngine {
   // ========== VIEW FEES / LOCATIONS / REGISTER (REUSE) ==========
 
   async handleViewFeesState(session, message) {
-    // (re-use your static display or API as before)
-    const fees = `
-💰 *Fee Structure by Clinic*
+    const region = this._getSessionRegion(session);
 
-🏥 *Prohealth Physiofocus Pte Ltd*
-• Initial: SGD 180
-• Follow-up: SGD 150
+    const FEE_DATA = {
+      SG: [
+        { name: 'Prohealth In Touch Physiotherapy', initial: 'SGD 190', followup: 'SGD 160' },
+        { name: 'UWC East',  initial: 'SGD 170', followup: 'SGD 140' },
+        { name: 'UWC Dover', initial: 'SGD 175', followup: 'SGD 145' },
+      ],
+      HK: [
+        { name: 'Prohealth Hong Kong', initial: 'HKD 1,200', followup: 'HKD 900' },
+      ],
+      IN: [
+        { name: 'Prohealth India', initial: 'INR 2,500', followup: 'INR 1,800' },
+      ],
+      PH: [
+        { name: 'Prohealth Philippines', initial: 'PHP 2,800', followup: 'PHP 2,200' },
+      ],
+    };
 
-🏥 *Prohealth In Touch Physiotherapy*
-• Initial: SGD 190
-• Follow-up: SGD 160
+    const clinics = FEE_DATA[region] || FEE_DATA.SG;
+    const lines = clinics.map(c =>
+      `🏥 *${c.name}*\n• Initial: ${c.initial}\n• Follow-up: ${c.followup}`
+    ).join('\n\n');
 
-🏥 *UWC East*
-• Initial: SGD 170
-• Follow-up: SGD 140
-
-🏥 *UWC Dover*
-• Initial: SGD 175
-• Follow-up: SGD 145
-    `.trim();
+    const fees = `💰 *Fee Structure by Clinic*\n\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-    return fees + '\n\n' + await this.renderMainMenu(session);
+    const fresh = await this.sessionManager.getSession(session.id);
+    return fees + '\n\n' + await this.renderMainMenu(fresh);
   }
 
   async handleViewLocationsState(session, message) {
@@ -3219,7 +3477,8 @@ class ChatbotEngine {
       `${idx + 1}. ${c.business_name}\n `
     ).join('\n');
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(session);
+    const fresh = await this.sessionManager.getSession(session.id);
+    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(fresh);
   }
 
   /**
@@ -3298,13 +3557,22 @@ class ChatbotEngine {
     try {
       const result = await this.clinikoAPI.registerNewPatient(patient);
       if (result) {
+        // Extract the new patient's ID from the Cliniko response
+        const newPatientId = result?.id || result?.patient?.id || null;
+        if (!newPatientId) {
+          this.logger.warn('[Register] Cliniko response missing patient id', { result });
+        }
+        // Persist patient_id on the session + store email in context (survives data resets)
+        const existingCtx = (() => { try { return typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {}); } catch { return {}; } })();
         await this.sessionManager.updateSession(session.id, {
+          patient_id: newPatientId ? String(newPatientId) : undefined,
           verified: true,
           conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-          data: null
+          context: JSON.stringify({ ...existingCtx, email: patient.email || '' }),
+          data: JSON.stringify({})
         });
         const updated = await this.sessionManager.getSession(session.id);
-        log.info('Registration success', { email: patient.email });
+        log.info('Registration success', { email: patient.email, patient_id: newPatientId });
         return `✅ You've been registered!\n\n` + await this.renderMainMenu(updated);
       }
       log.warn('Registration returned falsy result');
@@ -3469,7 +3737,24 @@ class ChatbotEngine {
     delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
-    if (result && result.success) return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
+    if (result && result.success) {
+      // Send cancellation confirmation email (best-effort)
+      try {
+        const emailPayload = await this._composeSupportEmailPayloadCancelled(session, data, appt, { failed: false });
+        await this._postEmail(emailPayload);
+      } catch (e) {
+        this.logger.error('[Cancel] Email send failed', { error: e?.message || e, sessionId: session.id });
+      }
+      return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
+    }
+
+    // Cancellation failed — send contact/failure email
+    try {
+      const emailPayload = await this._composeSupportEmailPayloadCancelled(session, data, appt, { failed: true });
+      await this._postEmail(emailPayload);
+    } catch (e) {
+      this.logger.error('[Cancel] Failure email send failed', { error: e?.message || e, sessionId: session.id });
+    }
     return `❌ Could not cancel your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
   }
 
@@ -3614,7 +3899,7 @@ class ChatbotEngine {
     });
     const slotList = formatPaginatedList({
       items: availableTimes,
-      formatFn: (slot, i) => `${i}. ${new Date(slot.appointment_start).toLocaleString()}`,
+      formatFn: (slot, i) => `${i}. ${formatSlotDateTime(slot.appointment_start)}`,
       page: 0,
       pageSize: MAX_SLOT_ITEMS,
       moreLabel: 'M. More slots',
@@ -3649,7 +3934,7 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const slotList = formatPaginatedList({
         items: availableTimes,
-        formatFn: (s, i) => `${i}. ${new Date(s.starts_at || s.appointment_start || s.slot).toLocaleString()}`,
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot)}`,
         page: slot_page,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -3702,7 +3987,26 @@ class ChatbotEngine {
     delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
 
-    if (result && result.success) return `✅ Your appointment has been rescheduled to:\n${new Date(starts_at).toLocaleString()}\n\n` + await this.goToInteractiveMenu(session);
+    if (result && result.success) {
+      // Send reschedule confirmation email (best-effort)
+      const newApptSummary = { starts_at, practitioner: appt._practitioner_display, clinic: appt._business_display, appointment_type: appt._appointment_type_display };
+      try {
+        const emailPayload = await this._composeSupportEmailPayloadRescheduled(session, data, appt, newApptSummary, { failed: false });
+        await this._postEmail(emailPayload);
+      } catch (e) {
+        this.logger.error('[Reschedule] Email send failed', { error: e?.message || e, sessionId: session.id });
+      }
+      return `✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at)}\n\n` + await this.goToInteractiveMenu(session);
+    }
+
+    // Reschedule failed — send contact/failure email
+    try {
+      const newApptSummary = { starts_at, practitioner: appt._practitioner_display, clinic: appt._business_display, appointment_type: appt._appointment_type_display };
+      const emailPayload = await this._composeSupportEmailPayloadRescheduled(session, data, appt, newApptSummary, { failed: true });
+      await this._postEmail(emailPayload);
+    } catch (e) {
+      this.logger.error('[Reschedule] Failure email send failed', { error: e?.message || e, sessionId: session.id });
+    }
     return `❌ Could not reschedule your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
   }
 
@@ -3724,9 +4028,7 @@ class ChatbotEngine {
     // Region, contact
     const region = String(ctx.region || d.region || 'SG').trim();
     const phone  = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    const userEmail = String(s.email || d.email || '').trim();
-
-    // Front-desk target
+    const userEmail = String(ctx.email || s.email || d.email || '').trim();
     const regionDesk = (typeof REGION_SUPPORT_INFO === 'object' && REGION_SUPPORT_INFO && REGION_SUPPORT_INFO[region] && REGION_SUPPORT_INFO[region].email)
       ? REGION_SUPPORT_INFO[region].email : null;
     const supportEmail = regionDesk || process.env.SUPPORT_EMAIL || process.env.DEFAULT_SUPPORT_EMAIL || '';
@@ -3799,6 +4101,153 @@ class ChatbotEngine {
       (transcript ? `\n--- Transcript (most recent ${Math.min(recent.length, MAX_LINES)} lines) ---\n${transcript}` : '');
 
     return { to, subject, text, meta };
+  }
+
+  /**
+   * POST an email payload to the local mailer service (127.0.0.1:8089).
+   * Accepts { to, subject, html?, text? } — same shape returned by all
+   * _compose* methods and by EmailTemplates functions.
+   * Failures are logged but never thrown — email is best-effort.
+   *
+   * @param {object} payload
+   * @returns {Promise<void>}
+   */
+  async _postEmail(payload) {
+    if (!payload || !Array.isArray(payload.to) || !payload.to.length) {
+      this.logger.warn('[Email] _postEmail called with no recipients — skipped', { subject: payload?.subject });
+      return;
+    }
+    try {
+      const body = JSON.stringify({
+        to:      payload.to,
+        subject: payload.subject || '',
+        html:    payload.html   || '',
+        text:    payload.text   || '',
+      });
+
+      // Debug: log full outgoing payload so we can confirm recipients and content
+      this.logger.info('[Email] Sending payload', {
+        to:      payload.to,
+        subject: payload.subject,
+        hasHtml: !!(payload.html),
+        textPreview: (payload.text || '').slice(0, 200),
+      });
+
+      await new Promise((resolve, reject) => {
+        const http = require('http');
+        const req = http.request(
+          {
+            method: 'POST',
+            host: '127.0.0.1',
+            port: 8089,
+            path: '/email',
+            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
+          },
+          (res) => {
+            let raw = '';
+            res.on('data', chunk => { raw += chunk; });
+            res.on('end', () => {
+              if (res.statusCode === 200) {
+                this.logger.info('[Email] Mailer accepted', { to: payload.to, subject: payload.subject, mailerResponse: raw.trim() });
+                resolve();
+              } else {
+                this.logger.error('[Email] Mailer rejected', { status: res.statusCode, body: raw.trim(), to: payload.to, subject: payload.subject });
+                reject(new Error(`Mailer HTTP ${res.statusCode}: ${raw.trim()}`));
+              }
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+    } catch (e) {
+      this.logger.error('[Email] _postEmail failed', { error: e?.message || e, subject: payload?.subject });
+    }
+  }
+
+  /**
+   * Build the email payload for a cancel event (success or failure/contact).
+   * Uses the HTML template from EmailTemplates.js.
+   *
+   * @param {object} session
+   * @param {object} data         - parsed session.data
+   * @param {object} appt         - enriched appointment object
+   * @param {object} [opts]
+   * @param {boolean} [opts.failed] - true when the cancel API call failed
+   * @returns {Promise<{to:string[], subject:string, html:string, text:string}>}
+   */
+  async _composeSupportEmailPayloadCancelled(session, data, appt, { failed = false } = {}) {
+    const s   = session || {};
+    const d   = (data && typeof data === 'object') ? data : (() => { try { return JSON.parse(s.data || '{}'); } catch { return {}; } })();
+    const ctx = (() => { try { return typeof s.context === 'string' ? JSON.parse(s.context) : (s.context || {}); } catch { return {}; } })();
+
+    const region     = String(ctx.region || d.region || 'SG').trim();
+    const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+
+    // Resolve user email from session data
+    const userEmail = String(ctx.email || s.email || d.email || appt?.patient_email || '').trim();
+
+    const to = [];
+    if (supportEmail) to.push(supportEmail);
+    if (userEmail)    to.push(userEmail);
+
+    const practitioner = appt?._practitioner_display || appt?.practitioner || '—';
+    const clinic       = appt?._business_display      || appt?.clinic       || '—';
+    const dateTime     = appt?.starts_at ? formatSlotDateTime(appt.starts_at) : '—';
+    const apptType     = appt?._appointment_type_display || appt?.appointment_type || '';
+
+    const { subject, html, text } = appointmentCancelled({ practitioner, clinic, dateTime, apptType });
+
+    const prefixedSubject = failed
+      ? `[Cancel Failed] ${subject.replace('Your Appointment Has Been Cancelled', `Contact Required — ${region} — ${phone || userEmail || 'unknown'}`)}`
+      : `[Cancelled] ${region} — ${phone || userEmail || 'unknown'} — ${subject}`;
+
+    return { to, subject: prefixedSubject, html, text };
+  }
+
+  /**
+   * Build the email payload for a reschedule event (success or failure/contact).
+   * Uses the HTML template from EmailTemplates.js.
+   *
+   * @param {object} session
+   * @param {object} data         - parsed session.data
+   * @param {object} oldAppt      - the original appointment object
+   * @param {object} newAppt      - the new appointment object (or attempted new slot)
+   * @param {object} [opts]
+   * @param {boolean} [opts.failed] - true when the reschedule API call failed
+   * @returns {Promise<{to:string[], subject:string, html:string, text:string}>}
+   */
+  async _composeSupportEmailPayloadRescheduled(session, data, oldAppt, newAppt, { failed = false } = {}) {
+    const s   = session || {};
+    const d   = (data && typeof data === 'object') ? data : (() => { try { return JSON.parse(s.data || '{}'); } catch { return {}; } })();
+    const ctx = (() => { try { return typeof s.context === 'string' ? JSON.parse(s.context) : (s.context || {}); } catch { return {}; } })();
+
+    const region     = String(ctx.region || d.region || 'SG').trim();
+    const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+
+    // Resolve user email from context (survives data resets) or session data
+    const userEmail = String(ctx.email || s.email || d.email || '').trim();
+
+    const to = [];
+    if (supportEmail) to.push(supportEmail);
+    if (userEmail)    to.push(userEmail);
+
+    const practitioner  = oldAppt?._practitioner_display  || oldAppt?.practitioner  || '—';
+    const clinic        = oldAppt?._business_display       || oldAppt?.clinic        || '—';
+    const apptType      = oldAppt?._appointment_type_display || oldAppt?.appointment_type || '';
+    const oldDateTime   = oldAppt?.starts_at ? formatSlotDateTime(oldAppt.starts_at) : '—';
+    const newDateTime   = newAppt?.starts_at ? formatSlotDateTime(newAppt.starts_at) : '—';
+
+    const { subject, html, text } = appointmentRescheduled({ practitioner, clinic, oldDateTime, newDateTime, apptType });
+
+    const prefixedSubject = failed
+      ? `[Reschedule Failed] Contact Required — ${region} — ${phone || userEmail || 'unknown'}`
+      : `[Rescheduled] ${region} — ${phone || userEmail || 'unknown'} — ${subject}`;
+
+    return { to, subject: prefixedSubject, html, text };
   }
 
 

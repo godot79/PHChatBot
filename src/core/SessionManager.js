@@ -600,10 +600,15 @@ class SessionManager {
                 return false;
             }
 
-            // Update with current timestamp
+            // Update last_activity AND extend expires_at (sliding window).
+            // This prevents an active session from expiring mid-flow (e.g. mid-booking).
+            // The window resets on every message, so the session stays alive as long as
+            // the user keeps interacting — it only expires after a full period of inactivity.
             const timestamp = new Date().toISOString();
+            const newExpiry = new Date(Date.now() + this.defaultSessionDuration * 60 * 1000).toISOString();
             const result = await this.db.updateSession(sessionId, {
-                last_activity: timestamp
+                last_activity: timestamp,
+                expires_at: newExpiry
             });
 
             if (result === 0) {
@@ -611,7 +616,7 @@ class SessionManager {
                 return false;
             }
 
-            this.logger.debug(`Updated activity for session ${sessionId} to ${timestamp}`);
+            this.logger.debug(`Updated activity for session ${sessionId}, expires ${newExpiry}`);
             return true;
         } catch (error) {
             this.logger.error(`Failed to update activity for session ${sessionId}:`, {

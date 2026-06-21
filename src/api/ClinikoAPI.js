@@ -34,7 +34,7 @@ class ClinikoAPI {
     try {
       const data = await new SendMessage(`/businesses?${params.toString()}`, {}).get();
       const clinics = data.businesses;
-      const pattern = /UWC/;
+      const pattern = /UWC|physio\s*focus/i;
       const main_clinics = clinics.filter(item => !pattern.test(item.business_name));
       return main_clinics || [];
     } catch (error) {

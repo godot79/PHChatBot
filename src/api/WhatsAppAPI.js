@@ -5,7 +5,7 @@ const axios = require('axios');
  */
 class WhatsAppAPI {
   constructor() {
-    this.baseURL = 'https://graph.facebook.com/v19.0';
+    this.baseURL = `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION || 'v22.0'}`;
     this.accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
     this.phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   }
