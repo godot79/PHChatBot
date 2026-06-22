@@ -30,11 +30,7 @@ app.use(bodyParser.json({ limit: '2mb' }));
 const user        = process.env.GMAIL_USER;
 const pass        = process.env.GMAIL_APP_PASSWORD;
 const displayName = process.env.GMAIL_FROM_NAME || 'ProHealth';
-
-if (!user || !pass) {
-  console.error('[Mailer] Missing GMAIL_USER or GMAIL_APP_PASSWORD in environment.');
-  process.exit(1);
-}
+const PORT        = process.env.PORT || 8089;
 
 // ─── Logo attachment ──────────────────────────────────────────────────────────
 
@@ -63,12 +59,26 @@ function getLogoAttachment() {
   }
 }
 
+/**
+ * Returns missing required mailer environment variables.
+ *
+ * @returns {string[]}
+ */
+function getMissingMailerEnv() {
+  const missing = [];
+  if (!user) missing.push('GMAIL_USER');
+  if (!pass) missing.push('GMAIL_APP_PASSWORD');
+  return missing;
+}
+
 // ─── Transport ────────────────────────────────────────────────────────────────
 
-const tx = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user, pass },
-});
+const tx = (user && pass)
+  ? nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user, pass },
+    })
+  : null;
 
 // ─── Send helper ─────────────────────────────────────────────────────────────
 
@@ -83,6 +93,11 @@ const tx = nodemailer.createTransport({
  * @param {string}   [opts.text]
  */
 async function sendEmail({ to, subject, html, text }) {
+  const missing = getMissingMailerEnv();
+  if (missing.length) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+
   const mailOptions = {
     from:    { name: displayName, address: user },
     to:      to.join(','),
@@ -121,6 +136,12 @@ async function sendEmail({ to, subject, html, text }) {
  */
 app.post('/email', async (req, res) => {
   try {
+    const missing = getMissingMailerEnv();
+    if (missing.length) {
+      console.error(`[Mailer] /email unavailable — missing env vars: ${missing.join(', ')}`);
+      return res.status(500).send(`missing env: ${missing.join(', ')}`);
+    }
+
     const body    = req.body || {};
     const to      = Array.isArray(body.to) ? body.to.filter(Boolean) : [];
     const subject = String(body.subject || 'ProHealth Notification');
@@ -146,6 +167,12 @@ app.post('/email', async (req, res) => {
  */
 app.get('/smoke', async (_req, res) => {
   try {
+    const missing = getMissingMailerEnv();
+    if (missing.length) {
+      console.error(`[Mailer] /smoke unavailable — missing env vars: ${missing.join(', ')}`);
+      return res.status(500).send(`missing env: ${missing.join(', ')}`);
+    }
+
     const html = `<!DOCTYPE html>
 <html><body style="font-family:Arial,sans-serif;padding:32px;">
   <img src="cid:${LOGO_CID}" alt="ProHealth" style="max-width:180px;display:block;margin-bottom:16px;"/>
@@ -168,10 +195,17 @@ app.get('/smoke', async (_req, res) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-app.listen(8089, '127.0.0.1', () => {
+app.listen(PORT, '0.0.0.0', () => {
   const logoStatus = fs.existsSync(LOGO_PATH) ? '✅ logo found' : '⚠️  logo missing';
-  console.log(`[Mailer] Listening on 127.0.0.1:8089 — ${logoStatus}`);
-  console.log(`[Mailer] GMAIL_USER = ${user}`);
+  console.log(`[Mailer] Listening on 0.0.0.0:${PORT} — ${logoStatus}`);
+  console.log(`[Mailer] GMAIL_USER = ${user || '(missing)'}`);
+
+  const missing = getMissingMailerEnv();
+  if (missing.length) {
+    console.error(`[Mailer] Missing required env vars: ${missing.join(', ')} — service started, but email routes will fail until configured.`);
+    return;
+  }
+
   // Verify SMTP credentials on startup
   tx.verify((err, success) => {
     if (err) {

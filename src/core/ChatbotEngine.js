@@ -6,7 +6,39 @@ const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
-const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('/opt/prohealth-mailer/EmailTemplates');
+const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('../../prohealth-mailer/EmailTemplates');
+
+
+function getMailerConfig() {
+  const deploymentTarget = String(process.env.DEPLOY_TARGET || '').trim().toLowerCase();
+  const isCloudRun =
+    deploymentTarget === 'cloudrun' ||
+    !!process.env.K_SERVICE ||
+    !!process.env.K_REVISION ||
+    !!process.env.K_CONFIGURATION;
+
+  const mailerBaseUrl = String(process.env.MAILER_BASE_URL || '').trim();
+
+  if (isCloudRun) {
+    if (!mailerBaseUrl) {
+      throw new Error('MAILER_BASE_URL is required when running on Cloud Run');
+    }
+    const url = new URL('/email', mailerBaseUrl);
+    return {
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+    };
+  }
+
+  return {
+    protocol: 'http:',
+    hostname: '127.0.0.1',
+    port: 8089,
+    path: '/email',
+  };
+}
 
 // Code Constants
 const WHATSAPP_MAX_MESSAGE_LENGTH = 4096;
@@ -242,7 +274,7 @@ function normalizeDateWindow(fromISO, toISO, maxSpanDays = 7) {
  * @param {Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>} groups
  * @returns {Array<Object>} Array of unique practitioner objects.
  */
-function uniquePractitionersFromGroups(groups) {
+async function uniquePractitionersFromGroups(groups) {
   const seen = new Set();
   const result = [];
   for (const group of groups) {
@@ -1356,13 +1388,14 @@ class ChatbotEngine {
         try {
           const body = JSON.stringify({ to: emailPayload.to, subject: emailPayload.subject, text: emailPayload.text });
           await new Promise((resolve, reject) => {
-            const http = require('http');
-            const req = http.request(
+            const mailer = getMailerConfig();
+            const client = mailer.protocol === 'https:' ? require('https') : require('http');
+            const req = client.request(
               {
                 method: 'POST',
-                host: '127.0.0.1',
-                port: 8089,
-                path: '/email',
+                host: mailer.hostname,
+                port: mailer.port,
+                path: mailer.path,
                 headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
               },
               (res) => {
@@ -4134,13 +4167,14 @@ class ChatbotEngine {
       });
 
       await new Promise((resolve, reject) => {
-        const http = require('http');
-        const req = http.request(
+        const mailer = getMailerConfig();
+        const client = mailer.protocol === 'https:' ? require('https') : require('http');
+        const req = client.request(
           {
             method: 'POST',
-            host: '127.0.0.1',
-            port: 8089,
-            path: '/email',
+            host: mailer.hostname,
+            port: mailer.port,
+            path: mailer.path,
             headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
           },
           (res) => {
