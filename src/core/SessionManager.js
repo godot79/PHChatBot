@@ -1006,14 +1006,6 @@ class SessionManager {
      * @returns {{region:'HK'|'SG'|'IN'|'PH'|undefined, countryCode:string|undefined, nationalNumber:string|undefined}}
      */
     getRegionFromPhoneNumber(phoneNumber) {
-      // 🔒 environment override
-      if (process.env.FORCE_REGION_SG === 'true') {
-        this.logger.debug('[getRegionFromPhoneNumber] Forced to SG via env', { phoneNumber });
-        const digits = (phoneNumber || '').replace(/\D/g, '');
-        const national = digits ? digits.slice(-8) : undefined;
-        return { region: 'SG', countryCode: '65', nationalNumber: national };
-      }
-
       if (!phoneNumber) return { region: undefined, countryCode: undefined, nationalNumber: undefined };
       const digits = phoneNumber.replace(/\D/g, '');
 
@@ -1059,7 +1051,12 @@ class SessionManager {
         return { region: 'HK', countryCode: '852', nationalNumber: digits };
       }
 
-      // fallback
+      // fallback — or SG if FORCE_REGION_SG is set (only reaches here when no prefix matched)
+      if (process.env.FORCE_REGION_SG === 'true') {
+        this.logger.debug('[getRegionFromPhoneNumber] No country prefix matched; falling back to SG via FORCE_REGION_SG', { phoneNumber });
+        const national = digits ? digits.slice(-8) : undefined;
+        return { region: 'SG', countryCode: '65', nationalNumber: national };
+      }
       return { region: undefined, countryCode: undefined, nationalNumber: undefined };
     }
     

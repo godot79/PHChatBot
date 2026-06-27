@@ -3259,8 +3259,9 @@ class ChatbotEngine {
 
     const page = data.slot_page || 0;
     if (!isNaN(text) && text !== '') {
+      const start = page * MAX_SLOT_ITEMS;
       const idx = parseInt(text, 10) - 1;
-      if (isNaN(idx) || idx < 0 || idx >= slots.length) {
+      if (isNaN(idx) || idx < start || idx >= Math.min(start + MAX_SLOT_ITEMS, slots.length)) {
         return 'Invalid slot selection. Please reply with a number from the list, or 0️⃣ to go back.';
       }
       const selectedSlot = slots[idx];
@@ -3984,9 +3985,10 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Parse selection
+    // Parse selection — page-relative bounds
+    const start = slot_page * MAX_SLOT_ITEMS;
     const idx = parseInt(text, 10) - 1;
-    if (isNaN(idx) || !availableTimes[idx]) {
+    if (isNaN(idx) || idx < start || idx >= Math.min(start + MAX_SLOT_ITEMS, availableTimes.length) || !availableTimes[idx]) {
       return 'Invalid slot selection. Please reply with the number of your chosen slot, "M" for more, or "0" to go back.' +
         (appt ? `\n\nYou are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '');
     }
