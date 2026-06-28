@@ -913,6 +913,17 @@ class ChatbotEngine {
         return await this.handleFallbackState(session, message);
       }
 
+      // Global restart-intent interception: route obvious fresh-start messages to the
+      // interactive menu regardless of current state, so stale mid-flow sessions don't
+      // trap users with "I don't understand" responses.
+      const _globalText = (message || '').trim().toLowerCase();
+      if (
+        currentState !== this.STATES.INTRO &&
+        ['hi', 'hello', 'hey', 'start', 'restart', 'home'].includes(_globalText)
+      ) {
+        return await this.goToInteractiveMenu(session);
+      }
+
       // Region-binding wrapper
       const response = await this.withSessionRegion(session, async () => {
         return await this.stateHandlers[currentState](session, message);
@@ -1896,6 +1907,7 @@ class ChatbotEngine {
       if (text === '1') { // Try another type
         delete data.no_slots_prompt;
         data.selection_step = 'choose_type';
+        data.suppress_auto_advance = true; // prevent planForward from re-selecting the only type
         // clear downstream selections
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio; delete data.clinic_list; delete data.selected_clinic;
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -1912,6 +1924,7 @@ class ChatbotEngine {
         delete data.no_slots_prompt;
         data.selection_step = 'choose_clinic';
         delete data.selected_clinic;
+        delete data.clinic_list; // force re-fetch so stale zero-slot list is not reused
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return await this.handleBookSoonest(session, '');
       }

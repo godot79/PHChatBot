@@ -734,6 +734,9 @@ class SessionManager {
         } else if (digits.startsWith('0') && digits.length === 11) {
             // Indian domestic format: 0xxxxxxxxxx -> +91xxxxxxxxxx
             return `+91${digits.substring(1)}`;
+        } else if (digits.startsWith('65') && digits.length === 10) {
+            // Singapore format: 65xxxxxxxx (CC 65 + 8-digit local)
+            return `+${digits}`;
         } else if (digits.length === 10) {
             // Indian without leading 0: xxxxxxxxxx -> +91xxxxxxxxxx
             return `+91${digits}`;

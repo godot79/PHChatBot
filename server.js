@@ -2,7 +2,6 @@ require('dotenv').config();
 
 const express = require('express');
 const helmet = require('helmet');
-const cors = require('cors');
 const path = require('path');
 
 // Core setup
@@ -17,11 +16,6 @@ const PORT = process.env.PORT || 3000;
 
 // --- Security & Parsing Middleware ---
 app.use(helmet());
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? ['https://your-production-domain.com']
-    : [`http://localhost:${PORT}`, 'http://127.0.0.1:3000']
-}));
 app.set('trust proxy', 1);
 
 // --- WhatsApp Webhook RAW Body Parsing ---

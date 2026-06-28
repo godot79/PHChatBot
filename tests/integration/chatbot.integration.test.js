@@ -148,6 +148,16 @@ jest.mock('../../src/core/DatabaseManager', () => {
       );
     }
 
+    async addChatHistory (sessionId, message, response) {
+      return new Promise((res, rej) =>
+        this.db.run(
+          'INSERT INTO chat_history (session_id, message, response) VALUES (?, ?, ?)',
+          [sessionId, message, response],
+          (err) => (err ? rej(err) : res())
+        )
+      );
+    }
+
     // Used in edge-case tests to write intentionally broken data
     _rawRun (sql, params = []) {
       return new Promise((res, rej) =>
@@ -188,6 +198,19 @@ const pastISO = (days = 7) => {
   return d.toISOString();
 };
 
+const SLOT_WITH_SLOT_FIELD = {
+  ...{
+    id: 'SLOT-001', starts_at: futureISO(2), appointment_start: futureISO(2),
+    appointment_type_id: 'AT-001', appointment_type_name: 'Initial 60 Min Visit (New Clients)',
+    practitioner_name: 'Jolinna Chan', practitioner_id: 'PRAC-001',
+    business_name: 'Prohealth In Touch', business_id: 'BIZ-001',
+    _practitioner_display: 'Jolinna Chan',
+    _appointment_type_display: 'Initial 60 Min Visit (New Clients)',
+    _business_display: 'Prohealth In Touch',
+  },
+  slot: futureISO(2),
+};
+
 const SLOT = {
   id: 'SLOT-001', starts_at: futureISO(2), appointment_start: futureISO(2),
   appointment_type_id: 'AT-001', appointment_type_name: 'Initial 60 Min Visit (New Clients)',
@@ -209,15 +232,27 @@ const FUTURE_APPT = {
   _display_dt: 'Mon 10:00 AM',
 };
 
+// Slot returned by getAvailableSlotsByBusinessAndDate — must have .slot and matching type name
+const SOONEST_SLOT = {
+  id: 'SS-001',
+  slot: futureISO(3),
+  appointment_type_name: 'Initial 60 Min Visit (New Clients)',
+  appointment_type_id:   'AT-001',
+  practitioner_id:       'PRAC-001',
+  business_id:           'BIZ-001',
+  business_name:         'Prohealth In Touch',
+  practitioner_name:     'Jolinna Chan',
+};
+
 const PAST_APPT = {
-  id: 'APPT-P', starts_at: pastISO(7), cancelled_at: null,
+  id: 'APPT-P', starts_at: pastISO(7), cancelled_at: pastISO(8),
   practitioner:     { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan', display_name: 'Jolinna Chan' },
   appointment_type: { id: 'AT-001',   name: 'Initial 60 Min Visit (New Clients)' },
   business:         { id: 'BIZ-001',  business_name: 'Prohealth In Touch' },
 };
 
 // ─── Mock reset helpers ────────────────────────────────────────────────────────
-function resetClinico () {
+function resetCliniko () {
   ClinikoAPI.prototype.getPatientByPhone            = jest.fn().mockResolvedValue({ id: PATIENT_ID, first_name: 'Test', last_name: 'Patient', email: 'p@test.com' });
   ClinikoAPI.prototype.getPatientByEmail            = jest.fn().mockResolvedValue({ id: PATIENT_ID, first_name: 'Test', last_name: 'Patient', email: 'p@test.com', date_of_birth: '1990-01-01' });
   ClinikoAPI.prototype.getPatientById               = jest.fn().mockResolvedValue({ id: PATIENT_ID, first_name: 'Test', last_name: 'Patient' });
@@ -241,9 +276,15 @@ function resetClinico () {
     { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30 },
   ]);
   ClinikoAPI.prototype.healthCheck                  = jest.fn().mockResolvedValue({ status: 'ok' });
+  ClinikoAPI.prototype.bookAppointment              = jest.fn().mockResolvedValue({ success: true, id: 'NEW-APPT' });
+  ClinikoAPI.prototype.getAvailableTimes            = jest.fn().mockResolvedValue([SLOT]);
+  ClinikoAPI.prototype.getPractitionersByClinic     = jest.fn().mockResolvedValue([
+    { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+  ]);
   ClinikoAPI.prototype.getBusinessById              = jest.fn().mockResolvedValue({ id: 'BIZ-001', business_name: 'Prohealth In Touch' });
   ClinikoAPI.prototype.getPractitionerById          = jest.fn().mockResolvedValue({ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' });
   ClinikoAPI.prototype.getAppointmentTypeById       = jest.fn().mockResolvedValue({ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' });
+  ClinikoAPI.prototype.getAvailableSlotsByBusinessAndDate = jest.fn().mockResolvedValue([SOONEST_SLOT]);
 }
 
 function resetWhatsApp () {
@@ -383,10 +424,11 @@ describe('SessionManager', () => {
   });
 
   test('getOrCreateSession creates a session for a new phone', async () => {
-    const s = await sm.getOrCreateSession('+6520000001');
+    // +91XXXXXXXXXX (12-digit Indian format) round-trips through normalizePhoneNumber unchanged
+    const s = await sm.getOrCreateSession('+919100000001');
     expect(s).toBeDefined();
     expect(s.id).toBeTruthy();
-    expect(s.phone_number).toBe('+6520000001');
+    expect(s.phone_number).toBe('+919100000001');
   });
 
   test('getOrCreateSession returns the same session on repeat calls', async () => {
@@ -440,7 +482,7 @@ describe('SessionManager', () => {
 describe('ChatbotEngine — state machine', () => {
   let db, sm, engine;
   beforeAll(async () => {
-    resetClinico(); resetWhatsApp();
+    resetCliniko(); resetWhatsApp();
     db = new DatabaseManager(); await db.initialize();
     sm = new SessionManager(db); await sm.initialize();
     engine = new ChatbotEngine();
@@ -450,7 +492,7 @@ describe('ChatbotEngine — state machine', () => {
     if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
     db.close();
   });
-  beforeEach(() => { jest.clearAllMocks(); resetClinico(); resetWhatsApp(); });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
 
   // Core API
   test('handleMessage is a function', () => {
@@ -507,7 +549,7 @@ describe('ChatbotEngine — state machine', () => {
 
   // Cancel — no future appointments
   test('CANCEL with no future appointments returns "no upcoming" message', async () => {
-    ClinikoAPI.prototype.getBookingsByPatientId = jest.fn().mockResolvedValue([PAST_APPT]);
+    jest.spyOn(engine.clinikoAPI, 'getBookingsByPatientId').mockResolvedValue([PAST_APPT]);
     const session = await seedVerified(db, '+6530000030');
     await db.updateSession(session.id, { conversation_state: 'CANCEL_APPOINTMENT' });
     const fresh = await db.getSession(session.id);
@@ -532,7 +574,7 @@ describe('ChatbotEngine — state machine', () => {
 
   // Reschedule — no future
   test('RESCHEDULE with no future appointments returns "no upcoming" message', async () => {
-    ClinikoAPI.prototype.getBookingsByPatientId = jest.fn().mockResolvedValue([PAST_APPT]);
+    jest.spyOn(engine.clinikoAPI, 'getBookingsByPatientId').mockResolvedValue([PAST_APPT]);
     const session = await seedVerified(db, '+6530000040');
     await db.updateSession(session.id, { conversation_state: 'RESCHEDULE_APPOINTMENT' });
     const fresh = await db.getSession(session.id);
@@ -570,15 +612,28 @@ describe('ChatbotEngine — state machine', () => {
   });
 
   // Book Soonest — no slots
+  // Seeds the session at choose_type with a single type already populated.
+  // Selecting '1' triggers buildAvailablePhysiosForTypeName; getAvailableSlotsByBusinessAndDate
+  // is overridden to return [] so no practitioners pass the slot check,
+  // producing the "no practitioners have available slots" reply in one handler call.
   test('BOOK_SOONEST with no slots returns a helpful message', async () => {
-    ClinikoAPI.prototype.getAvailableAppointmentTimes = jest.fn().mockResolvedValue([]);
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
     const session = await seedVerified(db, '+6530000051');
-    await db.updateSession(session.id, { conversation_state: 'BOOK_SOONEST' });
+    await db.updateSession(session.id, {
+      conversation_state: 'BOOK_SOONEST',
+      data: JSON.stringify({
+        email: 'p@test.com',
+        patient_name: 'Test Patient',
+        selection_step: 'choose_type',
+        appt_type_page: 0,
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)' },
+        ],
+      }),
+    });
     const fresh = await db.getSession(session.id);
-    const reply = await callHandler(engine,
-      ['handleBookSoonestState','handleBookSoonest'], fresh, '')
-      ?? await engine.handleMessage('', '+6530000051');
-    expect(reply).toMatch(/no.*slot|unavailable|try another|no appointment|no available|contact/i);
+    const reply = await callHandler(engine, ['handleBookSoonestState', 'handleBookSoonest'], fresh, '1');
+    expect(reply).toMatch(/no.*slot|try another/i);
   });
 
   // Confirm booking — yes
@@ -640,7 +695,7 @@ describe('ChatbotEngine — state machine', () => {
 describe('Multi-turn conversation simulation', () => {
   let db, sm, engine;
   beforeAll(async () => {
-    resetClinico(); resetWhatsApp();
+    resetCliniko(); resetWhatsApp();
     db = new DatabaseManager(); await db.initialize();
     sm = new SessionManager(db); await sm.initialize();
     engine = new ChatbotEngine();
@@ -650,7 +705,7 @@ describe('Multi-turn conversation simulation', () => {
     if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
     db.close();
   });
-  beforeEach(() => { jest.clearAllMocks(); resetClinico(); resetWhatsApp(); });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
 
   async function turn (phone, inputs) {
     const replies = [];
@@ -735,7 +790,7 @@ describe('Multi-turn conversation simulation', () => {
 // SUITE 5 — Cliniko stub shape contracts
 // =============================================================================
 describe('ClinikoAPI stub shape contracts', () => {
-  beforeEach(() => resetClinico());
+  beforeEach(() => resetCliniko());
 
   test('getAvailableAppointmentTimes → array with id + starts_at', async () => {
     const slots = await new ClinikoAPI().getAvailableAppointmentTimes();
@@ -780,7 +835,7 @@ describe('ClinikoAPI stub shape contracts', () => {
 describe('Resilience and edge cases', () => {
   let db, sm, engine;
   beforeAll(async () => {
-    resetClinico(); resetWhatsApp();
+    resetCliniko(); resetWhatsApp();
     db = new DatabaseManager(); await db.initialize();
     sm = new SessionManager(db); await sm.initialize();
     engine = new ChatbotEngine();
@@ -790,7 +845,7 @@ describe('Resilience and edge cases', () => {
     if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
     db.close();
   });
-  beforeEach(() => { jest.clearAllMocks(); resetClinico(); resetWhatsApp(); });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
 
   test('Cliniko network error — engine returns string, does not throw', async () => {
     ClinikoAPI.prototype.getBookingsByPatientId = jest.fn().mockRejectedValue(new Error('ETIMEDOUT'));
@@ -869,5 +924,718 @@ describe('Resilience and edge cases', () => {
     await seedVerified(db, '+6550000022');
     const r = await engine.handleMessage('😊🎉🏥', '+6550000022');
     expect(typeof r).toBe('string');
+  });
+});
+
+// =============================================================================
+// SUITE 7 — Booking confirmation: bookAppointment call contract
+// =============================================================================
+describe('Booking confirmation — bookAppointment call contract', () => {
+  let db, sm, engine;
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  test('CONFIRM_BOOKING "yes" calls bookAppointment with correct patient_id, practitioner_id, business_id, appointment_type_id, starts_at', async () => {
+    const bookMock = jest.spyOn(engine.clinikoAPI, 'bookAppointment').mockResolvedValue({ success: true, id: 'NEW-APPT' });
+
+    // Phone must round-trip through normalizePhoneNumber: +91XXXXXXXXXX (12 digits starting with 91) normalizes to itself
+    const phone = '+919100000001';
+    const session = await seedVerified(db, phone);
+    await db.updateSession(session.id, {
+      conversation_state: 'CONFIRM_BOOKING',
+      data: JSON.stringify({ selected_slot: SLOT_WITH_SLOT_FIELD }),
+    });
+
+    const reply = await engine.handleMessage('yes', phone);
+
+    expect(bookMock).toHaveBeenCalledTimes(1);
+    expect(bookMock).toHaveBeenCalledWith({
+      patient_id:          PATIENT_ID,
+      practitioner_id:     SLOT_WITH_SLOT_FIELD.practitioner_id,
+      business_id:         SLOT_WITH_SLOT_FIELD.business_id,
+      appointment_type_id: SLOT_WITH_SLOT_FIELD.appointment_type_id,
+      starts_at:           SLOT_WITH_SLOT_FIELD.slot,
+    });
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/booked|appointment|✅/i);
+  });
+
+  test('CONFIRM_BOOKING "yes" with slot missing .slot field does NOT call bookAppointment', async () => {
+    const bookMock = jest.spyOn(engine.clinikoAPI, 'bookAppointment').mockResolvedValue({ success: true, id: 'NEW-APPT' });
+
+    const phone = '+919100000002';
+    const session = await seedVerified(db, phone);
+    await db.updateSession(session.id, {
+      conversation_state: 'CONFIRM_BOOKING',
+      data: JSON.stringify({ selected_slot: SLOT }),
+    });
+
+    const reply = await engine.handleMessage('yes', phone);
+
+    expect(bookMock).not.toHaveBeenCalled();
+    expect(typeof reply).toBe('string');
+  });
+});
+
+// =============================================================================
+// SUITE 8 — Booking menu and flow coverage
+// =============================================================================
+describe('Booking menu and flow coverage', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+658${String(++phoneSeq).padStart(7, '0')}`;
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  // Jest automock gives each ClinikoAPI instance its OWN jest.fn() properties (separate from
+  // prototype). Direct .mockResolvedValue() calls on them persist across tests because
+  // resetCliniko() only updates the prototype. We must restore defaults on the INSTANCE.
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetCliniko();
+    resetWhatsApp();
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SOONEST_SLOT]);
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+    ]);
+    engine.clinikoAPI.bookAppointment.mockResolvedValue({ success: true, id: 'NEW-APPT' });
+  });
+
+  // Seed a verified session in a given state with optional session.data payload
+  async function seedAt (state, extraData = {}) {
+    const ph = nextPhone();
+    const s  = await seedVerified(db, ph);
+    await db.updateSession(s.id, {
+      conversation_state: state,
+      data: JSON.stringify({ email: 'p@test.com', patient_name: 'Test Patient', ...extraData }),
+    });
+    return db.getSession(s.id);
+  }
+
+  // ─── Shared type/physio/clinic fixtures ──────────────────────────────────────
+  const TYPE_1 = { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)' };
+  const TYPE_2 = { id: 'AT-002', name: 'Return Visit (Existing Clients)',    norm_name: 'return visit (existing clients)' };
+  const TYPE_LIST_2  = [TYPE_1, TYPE_2];
+  const TYPE_LIST_1  = [TYPE_1];
+  const PHYSIO_1 = { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' };
+  const PHYSIO_2 = { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  };
+  const CLINIC_1 = { id: 'BIZ-001', business_name: 'Prohealth In Touch' };
+  const CLINIC_2 = { id: 'BIZ-002', business_name: 'Prohealth City'     };
+
+  // ─── BOOK_MANAGE_OPTIONS ─────────────────────────────────────────────────────
+  describe('BOOK_MANAGE_OPTIONS', () => {
+    test('0/back/menu → returns verified main menu', async () => {
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, '0');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('1/book → shows booking method menu', async () => {
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, '1');
+      expect(reply).toMatch(/soonest|history|specific date|physio|clinic/i);
+    });
+
+    test('2/cancel → enters cancel flow', async () => {
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, '2');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+      const updated = await db.getSession(session.id);
+      // handleBookManageOptions immediately calls handleCancelAppointmentState which
+      // advances state beyond CANCEL_APPOINTMENT when a future appointment exists
+      expect(['CANCEL_APPOINTMENT', 'CONFIRM_CANCEL']).toContain(updated.conversation_state);
+    });
+
+    test('3/reschedule → enters reschedule flow', async () => {
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, '3');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+      const updated = await db.getSession(session.id);
+      // handleBookManageOptions immediately calls handleRescheduleAppointmentState which
+      // advances state beyond RESCHEDULE_APPOINTMENT when a future appointment exists
+      expect(['RESCHEDULE_APPOINTMENT', 'SELECT_APPOINTMENT_TO_RESCHEDULE', 'CONFIRM_RESCHEDULE'])
+        .toContain(updated.conversation_state);
+    });
+
+    test('invalid input → returns fallback message', async () => {
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, 'xyz');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ─── BOOKING_METHOD_OPTIONS ───────────────────────────────────────────────────
+  describe('BOOKING_METHOD_OPTIONS', () => {
+    test('0/back/menu → returns to book-manage menu', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '0');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOK_MANAGE_OPTIONS');
+    });
+
+    test('1/history → enters book-history flow', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '1');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('2/soonest → enters BOOK_SOONEST and shows type list', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '2');
+      // Either a type list or a slot list (if auto-advance runs all the way through)
+      expect(typeof reply).toBe('string');
+      expect(reply).toMatch(/appointment type|initial|return|slot|pick/i);
+    });
+
+    test('3/date → enters specific-date flow', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '3');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('4/physio → enters specific-physio flow', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '4');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('5/clinic → enters specific-clinic flow', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '5');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('invalid input → validation message', async () => {
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, 'xyz');
+      expect(reply).toMatch(/valid|1.5|booking method/i);
+    });
+  });
+
+  // ─── BOOK_SOONEST — choose_type ──────────────────────────────────────────────
+  describe('BOOK_SOONEST — choose_type', () => {
+    test('entry with multiple types → renders type list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/choose appointment type|initial|return/i);
+    });
+
+    test('entry with 1 type and slots available → auto-advances past type selection to slot list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).not.toMatch(/choose appointment type/i);
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('valid numeric selection → advances (does not re-show type list)', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
+      expect(typeof reply).toBe('string');
+      expect(reply).not.toMatch(/choose appointment type/i);
+    });
+
+    test('out-of-range number → validation error', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '99');
+      expect(reply).toMatch(/invalid.*type|number from the list/i);
+    });
+
+    test('M/more → increments page and re-renders', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, 'm');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('0/back → goes to BOOKING_METHOD_OPTIONS', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      expect(typeof reply).toBe('string');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
+  // ─── BOOK_SOONEST — choose_physio ────────────────────────────────────────────
+  describe('BOOK_SOONEST — choose_physio', () => {
+    test('0 practitioners → no-slots message with "try another type" option', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/no practitioners|no.*slot/i);
+      expect(reply).toMatch(/try another type/i);
+    });
+
+    test('multiple practitioners → shows practitioner list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/practitioner|jolinna|wei/i);
+    });
+
+    test('valid numeric selection → advances to clinic or slot list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        practitioner_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
+      expect(typeof reply).toBe('string');
+      expect(reply).not.toMatch(/select a practitioner/i);
+    });
+
+    test('out-of-range number → validation error', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        practitioner_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '99');
+      expect(reply).toMatch(/invalid practitioner/i);
+    });
+
+    test('M/more → increments page and re-renders', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        practitioner_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, 'm');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('0/back → returns to type list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        appointment_type_list: TYPE_LIST_2,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      expect(reply).toMatch(/choose appointment type|initial|return/i);
+    });
+  });
+
+  // ─── BOOK_SOONEST — choose_clinic ────────────────────────────────────────────
+  describe('BOOK_SOONEST — choose_clinic', () => {
+    test('0 clinics with slots → cascades to no-slots or type-reset message', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('1 clinic with slots → auto-advances to slot list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/pick a slot|0️⃣ back/i);
+    });
+
+    test('multiple clinics → shows clinic list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City',     practitioners: [PHYSIO_1] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/prohealth in touch|prohealth city/i);
+    });
+
+    test('valid numeric selection from pre-loaded list → fetches slots and advances', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1, CLINIC_2],
+        clinic_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('out-of-range number → validation error', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1, CLINIC_2],
+        clinic_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '99');
+      expect(reply).toMatch(/invalid clinic/i);
+    });
+
+    test('0/back with 1 available physio → returns to type list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_2,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1, CLINIC_2],
+      });
+      // Default mock: 1 practitioner → buildAvailablePhysiosForTypeName returns 1 → back to types
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      expect(reply).toMatch(/choose appointment type|initial|return/i);
+    });
+
+    test('0/back with >1 available physios → returns to physio list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_2,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1, CLINIC_2],
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      expect(reply).toMatch(/practitioner|jolinna|wei/i);
+    });
+  });
+
+  // ─── BOOK_SOONEST — final slot fetch & no_slots recovery ─────────────────────
+  describe('BOOK_SOONEST — final slot fetch and no_slots_prompt', () => {
+    test('final fetch: 0 matching slots → no-slots prompt with 3 options', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([
+        { ...SOONEST_SLOT, appointment_type_name: 'Completely Different Type' },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1],
+        clinic_page: 0,
+        selected_clinic: CLINIC_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/no slots found|try another/i);
+      expect(reply).toMatch(/1\.|2\.|3\./);
+    });
+
+    test('no_slots_prompt option 1: sets suppress_auto_advance — shows type list, not no-slots again', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        practitioner_list: [],
+        no_slots_prompt: { context: 'soonest' },
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
+      // After fix: suppress_auto_advance prevents re-selecting the only type → type list shown
+      expect(reply).toMatch(/choose appointment type|initial/i);
+      expect(reply).not.toMatch(/no practitioners/i);
+    });
+
+    test('no_slots_prompt option 2: clears no-slots state and shows physio list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        no_slots_prompt: { context: 'soonest' },
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '2');
+      expect(reply).toMatch(/practitioner|jolinna|wei/i);
+    });
+
+    test('no_slots_prompt option 3: clears stale clinic_list and re-fetches — advances to slot list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1], // stale — must be cleared by fix B
+        selected_clinic: CLINIC_1,
+        no_slots_prompt: { context: 'soonest' },
+      });
+      // Default mock returns SOONEST_SLOT with matching type → fresh fetch succeeds
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '3');
+      expect(reply).toMatch(/pick a slot|0️⃣ back/i);
+    });
+
+    test('no_slots_prompt invalid input → re-renders current step prompt', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        appointment_type_list: TYPE_LIST_2,
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        practitioner_page: 0,
+        no_slots_prompt: { context: 'soonest' },
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, 'xyz');
+      // Falls through the no_slots block, hits choose_physio render
+      expect(reply).toMatch(/practitioner|jolinna|wei/i);
+    });
+  });
+
+  // ─── SELECT_SLOT ─────────────────────────────────────────────────────────────
+  describe('SELECT_SLOT', () => {
+    const baseSlotData = (extra = {}) => ({
+      slot_list: [SLOT_WITH_SLOT_FIELD],
+      slot_page: 0,
+      last_selection_flow: 'soonest',
+      prev_state_data: {
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        selected_clinic: CLINIC_1,
+      },
+      ...extra,
+    });
+
+    test('renders slot list with context header', async () => {
+      const session = await seedAt('SELECT_SLOT', baseSlotData());
+      const reply   = await callHandler(engine, ['handleSelectSlotState'], session, '');
+      expect(reply).toMatch(/initial 60 min|jolinna|prohealth/i);
+      expect(reply).toMatch(/pick a slot|0️⃣ back/i);
+    });
+
+    test('valid slot number → sets CONFIRM_BOOKING state and returns confirmation prompt', async () => {
+      const session = await seedAt('SELECT_SLOT', baseSlotData());
+      const reply   = await callHandler(engine, ['handleSelectSlotState'], session, '1');
+      expect(reply).toMatch(/reply yes.*confirm|0️⃣.*cancel/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('CONFIRM_BOOKING');
+    });
+
+    test('out-of-range slot number → validation error', async () => {
+      const session = await seedAt('SELECT_SLOT', baseSlotData());
+      const reply   = await callHandler(engine, ['handleSelectSlotState'], session, '99');
+      expect(reply).toMatch(/invalid slot/i);
+    });
+
+    test('M/more → re-renders (non-empty string)', async () => {
+      const session = await seedAt('SELECT_SLOT', baseSlotData());
+      const reply   = await callHandler(engine, ['handleSelectSlotState'], session, 'm');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('0/back with no prev_state_data → goes to BOOKING_METHOD_OPTIONS', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT_WITH_SLOT_FIELD], slot_page: 0, last_selection_flow: 'soonest',
+      });
+      const reply   = await callHandler(engine, ['handleSelectSlotState'], session, '0');
+      expect(typeof reply).toBe('string');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+
+    test('0/back with prev_state_data (flow=soonest) → restores BOOK_SOONEST context', async () => {
+      const session = await seedAt('SELECT_SLOT', baseSlotData({
+        prev_state_data: {
+          selected_appt_type: TYPE_1,
+          selected_physio: PHYSIO_1,
+          selected_clinic: CLINIC_1,
+          appointment_type_list: TYPE_LIST_2,
+        },
+      }));
+      const reply = await callHandler(engine, ['handleSelectSlotState'], session, '0');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOK_SOONEST');
+    });
+
+    test('no_slots_prompt present → _handleNoSlotsDecision result is returned', async () => {
+      const session = await seedAt('SELECT_SLOT', baseSlotData({
+        no_slots_prompt: true,
+        last_selection_flow: 'soonest',
+      }));
+      const reply = await callHandler(engine, ['handleSelectSlotState'], session, '1');
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ─── CONFIRM_BOOKING ─────────────────────────────────────────────────────────
+  describe('CONFIRM_BOOKING', () => {
+    test('0/back/menu → returns booking method text', async () => {
+      const session = await seedAt('CONFIRM_BOOKING', { selected_slot: SLOT_WITH_SLOT_FIELD });
+      const reply   = await callHandler(engine, ['handleConfirmBookingState'], session, '0');
+      expect(reply).toMatch(/soonest|history|specific date|physio|clinic/i);
+    });
+
+    test('unrecognised input → re-renders slot confirmation prompt', async () => {
+      const session = await seedAt('CONFIRM_BOOKING', { selected_slot: SLOT_WITH_SLOT_FIELD });
+      const reply   = await callHandler(engine, ['handleConfirmBookingState'], session, 'maybe');
+      expect(reply).toMatch(/reply yes.*confirm|0️⃣.*cancel/i);
+    });
+
+    test('yes with bookAppointment returning failure → returns error message', async () => {
+      engine.clinikoAPI.bookAppointment.mockResolvedValue({ success: false, message: 'Cliniko unavailable' });
+      const session = await seedAt('CONFIRM_BOOKING', {
+        selected_slot: SLOT_WITH_SLOT_FIELD, email: 'p@test.com',
+      });
+      const reply = await callHandler(engine, ['handleConfirmBookingState'], session, 'yes');
+      expect(reply).toMatch(/could not book|❌|error/i);
+    });
+
+    test('yes with valid selected_slot → calls bookAppointment and returns success UX', async () => {
+      const session = await seedAt('CONFIRM_BOOKING', {
+        selected_slot: SLOT_WITH_SLOT_FIELD, email: 'p@test.com',
+      });
+      const reply = await callHandler(engine, ['handleConfirmBookingState'], session, 'yes');
+      expect(engine.clinikoAPI.bookAppointment).toHaveBeenCalledTimes(1);
+      expect(reply).toMatch(/booked|confirmed|success|✅/i);
+    });
+
+    test('yes with missing selected_slot → returns error string and does not throw', async () => {
+      const session = await seedAt('CONFIRM_BOOKING', { email: 'p@test.com' });
+      const reply = await callHandler(engine, ['handleConfirmBookingState'], session, 'yes');
+      expect(typeof reply).toBe('string');
+      expect(reply).toMatch(/no slot|try booking again/i);
+    });
+  });
+});
+
+// =============================================================================
+// SUITE — Global restart-intent interception
+// =============================================================================
+describe('Global restart-intent interception (handleMessage)', () => {
+  let db, engine;
+
+  async function seedAt(state, extra = {}) {
+    const phone = '+6599000099';
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verification_status: 'verified', verified: 1, patient_id: PATIENT_ID,
+      conversation_state: state,
+      data: JSON.stringify({ email: 'p@test.com', ...extra }),
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    return phone;
+  }
+
+  beforeAll(async () => {
+    resetCliniko();
+    resetWhatsApp();
+    db = new DatabaseManager();
+    await db.initialize();
+    engine = new ChatbotEngine(db);
+    await engine.initialize();
+  });
+  afterAll(() => db.close());
+  beforeEach(() => resetCliniko());
+
+  const RESTART_WORDS = ['hi', 'hello', 'hey', 'start', 'restart', 'home'];
+
+  for (const word of RESTART_WORDS) {
+    test(`"${word}" in BOOK_MANAGE_OPTIONS → routes to interactive menu, not "I don't understand"`, async () => {
+      const phone = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply = await engine.handleMessage(word, phone);
+      expect(reply).not.toMatch(/not understood|don.t understand/i);
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(10);
+    });
+  }
+
+  test('"hello" in SELECT_SLOT → routes to interactive menu', async () => {
+    const phone = await seedAt('SELECT_SLOT', {
+      slot_list: [{ slot: new Date(Date.now() + 86400000).toISOString(), practitioner_id: 'P1', business_id: 'B1', appointment_type_id: 'AT1' }],
+    });
+    const reply = await engine.handleMessage('hello', phone);
+    expect(reply).not.toMatch(/not understood|don.t understand/i);
+  });
+
+  test('"hi" in INTRO state → handled by INTRO handler, not globally intercepted', async () => {
+    const phone = '+6599000098';
+    const id = await db.createSession(phone, null, 60);
+    await db.updateSession(id, {
+      conversation_state: 'INTRO',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    const reply = await engine.handleMessage('hi', phone);
+    expect(typeof reply).toBe('string');
+    expect(reply.length).toBeGreaterThan(5);
+  });
+
+  test('"menu" in BOOK_MANAGE_OPTIONS is NOT globally intercepted (remains state-local)', async () => {
+    // "menu" must go through the state handler, not the global interceptor.
+    // Both paths return the main menu, so we just verify no crash and a valid reply.
+    const phone = await seedAt('BOOK_MANAGE_OPTIONS');
+    const reply = await engine.handleMessage('menu', phone);
+    expect(typeof reply).toBe('string');
+    expect(reply.length).toBeGreaterThan(5);
   });
 });

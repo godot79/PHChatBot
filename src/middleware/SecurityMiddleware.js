@@ -10,7 +10,7 @@ const slowDown = require('express-slow-down');
 const helmet = require('helmet');
 const xss = require('xss');
 const validator = require('validator');
-const  Logger = require('./Logger');
+const Logger = require('../core/Logger');
 
 class SecurityMiddleware {
     constructor(config = {}) {
