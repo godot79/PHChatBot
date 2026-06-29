@@ -1134,14 +1134,21 @@ class ChatbotEngine {
         return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
       }
       if (text === '2') {
-        // Log outreach request and return to main menu
         const region = this._getSessionRegion(session);
-        const support = getSupportInfo(region);
         this.logger.info('[Verify] User requested outreach after failed verification', { sessionId: session.id, region });
+        try {
+          const emailPayload = await this._composeSupportEmailPayloadNoSlots(session, data);
+          if (emailPayload && Array.isArray(emailPayload.to) && emailPayload.to.length) {
+            emailPayload.subject = `[Verify Failed] Contact request — ${region} — ${session.phone_number || session.phoneNumber || ''}`;
+            await this._postEmail(emailPayload);
+          }
+        } catch (e) {
+          this.logger.error('[Verify] Failed to send outreach email', { error: e?.message || e, sessionId: session.id });
+        }
         delete data.verify_error_prompt;
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
         const updated = await this.sessionManager.getSession(session.id);
-        return `Our support team will reach out to you shortly. ${support}\n\n` + await this.renderMainMenu(updated);
+        return `We've sent your details to our support team. They'll be in touch shortly.\n\n` + await this.renderMainMenu(updated);
       }
       if (text === '3') {
         delete data.verify_error_prompt;
@@ -1388,7 +1395,8 @@ class ChatbotEngine {
     const text = (incomingText || '').trim().toLowerCase();
     if (!data.no_slots_prompt) return null;
 
-    if (text === '1') {
+    // 0 — go back one choice step (navBack)
+    if (text === '0' || text === 'back') {
       delete data.no_slots_prompt;
       const { step, popped } = navBack(data);
       if (step) {
@@ -1408,8 +1416,18 @@ class ChatbotEngine {
       return await this.goToInteractiveMenu(session);
     }
 
+    // 1 — go to main booking menu
+    if (text === '1') {
+      delete data.no_slots_prompt;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+        data: JSON.stringify(data)
+      });
+      return await this.renderMainMenu(session);
+    }
+
+    // 2 — email us (sends transcript to support + user)
     if (text === '2') {
-      // Build and send the support email via the mailer service
       let emailPayload = null;
       try {
         emailPayload = await this._composeSupportEmailPayloadNoSlots(session, data);
@@ -1452,27 +1470,32 @@ class ChatbotEngine {
         this.logger.warn('[NoSlots] No recipients resolved for support email — email not sent', { sessionId: session.id });
       }
 
-      // Derive display values for confirmation message
       let context = session.context;
       if (context && typeof context === 'string') { try { context = JSON.parse(context); } catch {} }
       const region = (context && context.region) || emailPayload?.meta?.region || 'SG';
-      const phone = session.phone_number || session.phoneNumber || emailPayload?.meta?.phone || '';
+      const userPhone = session.phone_number || session.phoneNumber || emailPayload?.meta?.phone || '';
 
       delete data.no_slots_prompt;
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(data)
       });
-      return `Thanks! Our ${region} support team will reach out to you at ${phone || 'your contact'} shortly.\n\n` + await this.renderMainMenu(session);
+      return `Thanks! Our ${region} support team will be in touch shortly.\n\n` + await this.renderMainMenu(session);
     }
 
+    // 3 — message us (show support phone number)
     if (text === '3') {
+      let context = session.context;
+      if (context && typeof context === 'string') { try { context = JSON.parse(context); } catch {} }
+      const region = (context && context.region) || this._getSessionRegion(session) || 'SG';
+      const info = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+
       delete data.no_slots_prompt;
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(data)
       });
-      return await this.renderMainMenu(session);
+      return `You can reach our ${region} support team at ${info.phone}.\n\n` + await this.renderMainMenu(session);
     }
 
     return null;
@@ -1765,7 +1788,8 @@ class ChatbotEngine {
       if (!filtered.length) {
         data.no_slots_prompt = { context: 'history' };
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
-        return `No available slots for that combination.\n\n1. Try another type\n2. Pick another physio\n3. Choose another clinic\n0. Back`;
+        const _hsInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        return `No available slots for that combination.\n\n1. Back to main booking menu\n2. Email us\n3. Message us at ${_hsInfo.phone}\n\nReply 1, 2 or 3. (0️⃣ Back)`;
       }
 
       const slotData = {
@@ -2592,7 +2616,8 @@ class ChatbotEngine {
         // Offer support contact option, consistent with other no-slots flows.
         data.no_slots_prompt = true;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        return `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Pick another clinic\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+        const _sdInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        return `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Back to main booking menu\n2. Email us\n3. Message us at ${_sdInfo.phone}\n\nReply 1, 2 or 3. (0️⃣ Back)`;
       }
 
       const slotData = {
@@ -2854,7 +2879,8 @@ class ChatbotEngine {
         });
         session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
         session.data = JSON.stringify(data);
-        return `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+        const _spInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        return `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Back to main booking menu\n2. Email us\n3. Message us at ${_spInfo.phone}\n\nReply 1, 2 or 3. (0️⃣ Back)`;
       }
 
       const slotData = {
@@ -3289,7 +3315,8 @@ class ChatbotEngine {
         conversation_state: this.STATES.SELECT_SLOT,
         data: JSON.stringify(data)
       });
-      return "No available slots to show.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
+      const _ssInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+      return `No available slots to show.\n\n1. Back to main booking menu\n2. Email us\n3. Message us at ${_ssInfo.phone}\n\nReply 1, 2 or 3. (0️⃣ Back)`;
     }
 
     const page = data.slot_page || 0;
@@ -3889,6 +3916,9 @@ class ChatbotEngine {
    */
   async handleSelectAppointmentToRescheduleState(session, message) {
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const noSlotsResult = await this._handleNoSlotsDecision(session, data, this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE, this.handleSelectAppointmentToRescheduleState, message);
+    if (noSlotsResult !== null) return noSlotsResult;
+
     const appts = data.reschedule_appt_list || [];
     const text = message.trim().toLowerCase();
     if (['0', 'menu', 'back'].includes(text)) {
@@ -3953,12 +3983,16 @@ class ChatbotEngine {
       to,
     });
     if (!availableTimes.length) {
-      // Clean up
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
-      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Sorry, there are no available slots for this practitioner at this clinic for this appointment type. Please try again later.\n\n' + await this.goToInteractiveMenu(session);
+      data.no_slots_prompt = true;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
+        data: JSON.stringify(data)
+      });
+      const _rsInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+      return `Sorry, no available slots for rescheduling this appointment.\n\n1. Back to main booking menu\n2. Email us\n3. Message us at ${_rsInfo.phone}\n\nReply 1, 2 or 3. (0️⃣ Back)`;
     }
     data.available_times = availableTimes;
     data.slot_page = 0; // Reset slot page for new selection
