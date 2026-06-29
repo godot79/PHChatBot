@@ -1,5 +1,6 @@
 // File: /src/core/ChatbotEngine.js
 
+const { buttons, list } = require('./MessageBuilder');
 const ClinikoAPI = require('../api/ClinikoAPI.js');
 const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
@@ -590,12 +591,14 @@ function formatPaginatedList({
   page = 0,
   pageSize = MAX_SLOT_ITEMS,
   moreLabel = 'M. More',
+  prevLabel = null,
   header = ''
 }) {
   if (!Array.isArray(items)) return '';
   const start = page * pageSize;
   const pageItems = items.slice(start, start + pageSize);
   let text = pageItems.map((item, idx) => formatFn(item, idx + 1 + start)).join('\n');
+  if (page > 0 && prevLabel) text += `\n${prevLabel}`;
   if (items.length > start + pageSize) text += `\n${moreLabel}`;
   let reply = header ? header + '\n\n' + text : text;
   if (reply.length > WHATSAPP_SAFE_REPLY_LENGTH) {
@@ -703,6 +706,7 @@ class ChatbotEngine {
       RESCHEDULE_APPOINTMENT: 'RESCHEDULE_APPOINTMENT',
       SELECT_APPOINTMENT_TO_RESCHEDULE: 'SELECT_APPOINTMENT_TO_RESCHEDULE',
       CONFIRM_RESCHEDULE: 'CONFIRM_RESCHEDULE',
+      RESCHEDULE_CONFIRM_INTENT: 'RESCHEDULE_CONFIRM_INTENT',
       VIEW_FEES: 'VIEW_FEES',
       VIEW_LOCATIONS: 'VIEW_LOCATIONS',
       REGISTER_PATIENT: 'REGISTER_PATIENT',
@@ -782,6 +786,7 @@ class ChatbotEngine {
       [this.STATES.RESCHEDULE_APPOINTMENT]: this.handleRescheduleAppointmentState.bind(this),
       [this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE]: this.handleSelectAppointmentToRescheduleState.bind(this),
       [this.STATES.CONFIRM_RESCHEDULE]: this.handleConfirmRescheduleState.bind(this),
+      [this.STATES.RESCHEDULE_CONFIRM_INTENT]: this.handleRescheduleIntentConfirmState.bind(this),
       [this.STATES.VIEW_FEES]: this.handleViewFeesState.bind(this),
       [this.STATES.VIEW_LOCATIONS]: this.handleViewLocationsState.bind(this),
       [this.STATES.REGISTER_PATIENT]: this.handleRegisterPatientState.bind(this),
@@ -816,15 +821,13 @@ class ChatbotEngine {
     return await this.renderMainMenu(fresh);
   }
   async renderBookingMethodMenu(session) {
-    return (
-      'How would you like to book?\n\n' +
-      '1️⃣ Based on your last physio visit\n' +
-      '2️⃣ Soonest available\n' +
-      '3️⃣ At specific date\n' +
-      '4️⃣ Pick a specific physio\n' +
-      '5️⃣ Pick a specific clinic\n\n' +
-      'Reply with number'
-    );
+    return list('How would you like to book?', 'Choose method', [
+      { id: '1', title: 'By last visit' },
+      { id: '2', title: 'Soonest available' },
+      { id: '3', title: 'Specific date' },
+      { id: '4', title: 'Specific physio' },
+      { id: '5', title: 'Specific clinic' }
+    ]);
   }
 
   /**
@@ -853,28 +856,25 @@ class ChatbotEngine {
     }
 
     if (session.verified) {
-      return (
-        `${region}` +
-        `What would you like to do?\n\n` +
-        `1️⃣ Book Appointment\n` +
-        `2️⃣ Cancel Appointment\n` +
-        `3️⃣ Reschedule Appointment\n` +
-        `9️⃣ Logout & Delete Data\n\n` +
-        `Type "region" anytime to change region.\n` +
-        `Reply with the number or a keyword.`
-      );
+      const body =
+        `${region}What would you like to do?\n\n` +
+        `Type "9" to logout, "region" to change region.`;
+      return list(body, 'Select option', [
+        { id: '1', title: 'Book Appointment' },
+        { id: '2', title: 'Cancel Appointment' },
+        { id: '3', title: 'Reschedule' }
+      ]);
     } else {
-      return (
+      const body =
         `👋 *Welcome to ProHealthAsia*\n\n` +
-        `${region}` +
-        `Please select an option:\n` +
-        `1️⃣ Book or Manage Appointment\n` +
-        `2️⃣ View Fees\n` +
-        `3️⃣ View Locations\n` +
-        `4️⃣ Register as New Patient\n\n` +
-        `Type "region" anytime to change region.\n` +
-        `Reply with the number or a keyword.`
-      );
+        `${region}Please select an option:\n\n` +
+        `Type "region" anytime to change region.`;
+      return list(body, 'Select option', [
+        { id: '1', title: 'Book or Manage' },
+        { id: '2', title: 'View Fees' },
+        { id: '3', title: 'View Locations' },
+        { id: '4', title: 'Register' }
+      ]);
     }
   }
  
@@ -899,7 +899,12 @@ class ChatbotEngine {
    * @param {string} message
    * @param {string} phoneNumber
    */
-  async handleMessage(message, phoneNumber) {
+  /**
+ * Returns raw reply — may be a MessageEnvelope or plain string.
+ * Callers that need to send interactive messages (e.g. the webhook) use this.
+ * Callers that only need text (tests, /test-message) use handleMessage().
+ */
+async handleMessageEnvelope(message, phoneNumber) {
     try {
       console.log('🤖 HANDLE_MSG entered phone_tail:', (phoneNumber||'').slice(-4), 'msg_preview:', (message||'').slice(0,20));
       if (!this.isInitialized) {
@@ -952,7 +957,7 @@ class ChatbotEngine {
       });
 
       if (session.id) {
-        await this.sessionManager.db.addChatHistory(session.id, message, response);
+        await this.sessionManager.db.addChatHistory(session.id, message, String(response));
       }
       return response;
     } catch (error) {
@@ -970,6 +975,11 @@ class ChatbotEngine {
         getSupportInfo(this._getSessionRegion(session))
       );
     }
+  }
+
+  /** Convenience wrapper — always returns a plain string (text fallback for envelopes). */
+  async handleMessage(message, phoneNumber) {
+    return String(await this.handleMessageEnvelope(message, phoneNumber));
   }
 
   // ====== STATE HANDLERS ======
@@ -1036,9 +1046,10 @@ class ChatbotEngine {
         return await renderMenuFresh();
       }
 
-      const menu = regionCodes.map((code, i) => `${i + 1}. ${regionLabels[code]}`).join('\n');
       await this.sessionManager.updateSession(session.id, { context });
-      return `Please select your region:\n\n${menu}\n\nReply with the number.`;
+      return list('Please select your region:', 'Select region',
+        regionCodes.map((code, i) => ({ id: String(i + 1), title: regionLabels[code] }))
+      );
     }
 
     // Region is set → show Intro main menu for non-verified user
@@ -1118,12 +1129,14 @@ class ChatbotEngine {
       return isNaN(d.getTime()) ? null : `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
     };
 
-    const FAIL_PROMPT =
-      "We couldn't verify those details. Please check your email and date of birth and try again.\n\n" +
-      "1. Try again\n" +
-      "2. Have someone reach out\n" +
-      "3. Go to main menu\n\n" +
-      "(Reply 1, 2, or 3. 0⃣ Back)";
+    const FAIL_PROMPT = buttons(
+      "We couldn't verify those details. Please check your email and date of birth and try again.",
+      [
+        { id: '1', title: 'Try again' },
+        { id: '2', title: 'Request callback' },
+        { id: '3', title: 'Main menu' }
+      ]
+    );
 
     // Handle the post-failure 3-option prompt
     if (data.verify_error_prompt === true) {
@@ -1218,8 +1231,14 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
       const region = this._getSessionRegion(session);
       const support = getSupportInfo(region);
-      return `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}\n\n` +
-        "1. Try again\n2. Have someone reach out\n3. Go to main menu\n\n(Reply 1, 2, or 3. 0️⃣ Back)";
+      return buttons(
+        `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}`,
+        [
+          { id: '1', title: 'Try again' },
+          { id: '2', title: 'Request callback' },
+          { id: '3', title: 'Main menu' }
+        ]
+      );
 
     } catch (e) {
       this.logger.error('[handleVerifyState] API error during verification', { err: e?.message });
@@ -1275,7 +1294,7 @@ class ChatbotEngine {
 
     if (text === '1' || text.includes('book')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
-      return 'How would you like to book?\n\n1️⃣ Based on your last physio visit\n2️⃣ Soonest available\n3️⃣ At specific date\n4️⃣ Pick a specific physio\n5️⃣ Pick a specific clinic\n\nReply with number or keyword.';
+      return await this.renderBookingMethodMenu(session);
     }
     if (text === '2' || text.includes('cancel')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CANCEL_APPOINTMENT });
@@ -1765,7 +1784,11 @@ class ChatbotEngine {
       if (!filtered.length) {
         data.no_slots_prompt = { context: 'history' };
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
-        return `No available slots for that combination.\n\n1. Try another type\n2. Pick another physio\n3. Choose another clinic\n0. Back`;
+        return buttons('No available slots for that combination.', [
+          { id: '1', title: 'Go back' },
+          { id: '2', title: 'Request callback' },
+          { id: '3', title: 'Main menu' }
+        ]);
       }
 
       const slotData = {
@@ -2081,7 +2104,10 @@ class ChatbotEngine {
         // No physios have slots for this type → let user pick another type
         data.no_slots_prompt = { context: 'soonest' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.\n1. Try another type\n\nReply 1 or 0️⃣ Back.`;
+        return buttons(
+          `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
+          [{ id: '1', title: 'Try another type' }]
+        );
       }
 
       if (practitioners.length > 1) {
@@ -2238,7 +2264,11 @@ class ChatbotEngine {
         // Extremely unlikely since clinics are prefiltered, but handle defensively.
         data.no_slots_prompt = { context: 'soonest' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return `No slots found for ${data.selected_appt_type?.name}.\n1. Try another type\n2. Try another physio\n3. Try another clinic\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+        return buttons(`No slots found for ${data.selected_appt_type?.name}.`, [
+          { id: '1', title: 'Try another type' },
+          { id: '2', title: 'Try another physio' },
+          { id: '3', title: 'Try another clinic' }
+        ]);
       }
 
       const slotData = {
@@ -2592,7 +2622,14 @@ class ChatbotEngine {
         // Offer support contact option, consistent with other no-slots flows.
         data.no_slots_prompt = true;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        return `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Pick another clinic\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+        return buttons(
+          `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
+          [
+            { id: '1', title: 'Go back' },
+            { id: '2', title: 'Request callback' },
+            { id: '3', title: 'Main menu' }
+          ]
+        );
       }
 
       const slotData = {
@@ -2854,7 +2891,14 @@ class ChatbotEngine {
         });
         session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
         session.data = JSON.stringify(data);
-        return `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3. (0️⃣ Back)`;
+        return buttons(
+          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
+          [
+            { id: '1', title: 'Go back' },
+            { id: '2', title: 'Request callback' },
+            { id: '3', title: 'Main menu' }
+          ]
+        );
       }
 
       const slotData = {
@@ -3232,6 +3276,16 @@ class ChatbotEngine {
       return await this.handleSelectSlotState(updatedSession, '');
     }
 
+    if (text === 'p' || text === 'prev') {
+      data.slot_page = Math.max(0, (data.slot_page || 0) - 1);
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.SELECT_SLOT,
+        data: JSON.stringify(data)
+      });
+      const updatedSession = await this.sessionManager.getSession(session.id);
+      return await this.handleSelectSlotState(updatedSession, '');
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       if (data.prev_state_data) {
         const prevData = data.prev_state_data;
@@ -3289,7 +3343,11 @@ class ChatbotEngine {
         conversation_state: this.STATES.SELECT_SLOT,
         data: JSON.stringify(data)
       });
-      return "No available slots to show.\n\n1. Go back one level\n2. Have someone reach out\n3. Go to main menu\n\nReply 1, 2 or 3.";
+      return buttons('No available slots to show.', [
+        { id: '1', title: 'Go back' },
+        { id: '2', title: 'Request callback' },
+        { id: '3', title: 'Main menu' }
+      ]);
     }
 
     const page = data.slot_page || 0;
@@ -3320,11 +3378,12 @@ class ChatbotEngine {
       if (data.prev_state_data?.selected_clinic?.business_name) headerParts.push(`${data.prev_state_data.selected_clinic.business_name}`);
       const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || 'Appointment');
 
-      return (
-        `You have selected:\n\n` +
-        `• ${header}\n` +
-        `• ${formatSlotDateTime(dt, this._regionTz(session))}\n\n` +
-        `Reply YES to confirm, or 0️⃣ to cancel.`
+      return buttons(
+        `You have selected:\n\n• ${header}\n• ${formatSlotDateTime(dt, this._regionTz(session))}`,
+        [
+          { id: 'yes', title: 'Confirm booking' },
+          { id: '0',   title: 'Go back' }
+        ]
       );
     }
 
@@ -3348,6 +3407,7 @@ class ChatbotEngine {
       formatFn: compactFormat,
       page,
       pageSize: MAX_SLOT_ITEMS,
+      prevLabel: 'P. Previous slots',
       moreLabel: 'M. More slots',
       header
     }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
@@ -3390,7 +3450,7 @@ class ChatbotEngine {
       } catch (e) {
         this.logger.error('[handleConfirmBookingState] Failed to update session for menu/back', e);
       }
-      return 'How would you like to book?\n\n1️⃣ Based on your last physio visit\n2️⃣ Soonest available\n3️⃣ At specific date\n4️⃣ Pick a specific physio\n5️⃣ Pick a specific clinic\n\nReply with number or keyword.';
+      return await this.renderBookingMethodMenu(session);
     }
 
     // --- Debug: Prepare slot for enrichment ---
@@ -3498,12 +3558,15 @@ class ChatbotEngine {
     }
 
     // --- Debug: Default, show confirmation message ---
-    return (
+    return buttons(
       `You have selected:\n\n` +
       `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
       `🏥 *${enrichedSlot._business_display || ''}*\n` +
-      `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}\n\n` +
-      `Reply YES to confirm, or 0️⃣ to cancel.`
+      `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`,
+      [
+        { id: 'yes', title: 'Confirm booking' },
+        { id: '0',   title: 'Go back' }
+      ]
     );
   }
 
@@ -3758,9 +3821,12 @@ class ChatbotEngine {
       data: JSON.stringify(data)
     });
     const intro = isSingle
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`
-      : `You selected:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`;
-    return `${intro}\nType "yes" to confirm cancellation, or "0" to go back.`;
+      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
+      : `You selected:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
+    return buttons(`${intro}\n\nConfirm cancellation?`, [
+      { id: 'yes', title: 'Yes, cancel' },
+      { id: '0',   title: 'Go back' }
+    ]);
   }
 
   /**
@@ -3790,8 +3856,13 @@ class ChatbotEngine {
     // Require explicit yes
     if (text !== 'yes') {
       const appt = data.selected_cancel_appt;
-      const intro = appt ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '';
-      return `${intro}\nType "yes" to confirm cancellation, or "0" to go back.`;
+      const intro = appt
+        ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
+        : 'Confirm cancellation?';
+      return buttons(`${intro}\n\nConfirm cancellation?`, [
+        { id: 'yes', title: 'Yes, cancel' },
+        { id: '0',   title: 'Go back' }
+      ]);
     }
 
     const appt = data.selected_cancel_appt;
@@ -3868,7 +3939,7 @@ class ChatbotEngine {
       data.selected_reschedule_appt = futureAppts[0];
       data.selected_reschedule_appt_idx = 0;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return await this._reschedulePresentSlots(session, data, true);
+      return await this._rescheduleShowConfirm(session, data, true);
     }
 
     await this.sessionManager.updateSession(session.id, {
@@ -3909,20 +3980,43 @@ class ChatbotEngine {
     await this.sessionManager.updateSession(session.id, {
       data: JSON.stringify(data)
     });
-    return await this._reschedulePresentSlots(session, data, false);
+    return await this._rescheduleShowConfirm(session, data, false);
   } 
 
   /**
-   * Presents available slots for a selected appointment (with pagination).
-   * Used by both the single-appointment and selection flows.
-   * @param {object} session
-   * @param {object} data
-   * @param {boolean} isSingle (true if called from the "only one appt" shortcut)
+   * Step 1 of reschedule: show appointment details and ask for YES/NO confirmation.
+   * Transitions to RESCHEDULE_CONFIRM_INTENT state.
    */
-  async _reschedulePresentSlots(session, data, isSingle) {
+  async _rescheduleShowConfirm(session, data, isSingle) {
     const appt = data.selected_reschedule_appt;
     if (!appt) {
-      // Clean up
+      delete data.reschedule_appt_list;
+      delete data.selected_reschedule_appt;
+      delete data.selected_reschedule_appt_idx;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+    }
+    data.is_single_reschedule_appt = isSingle;
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
+      data: JSON.stringify(data)
+    });
+    const intro = isSingle
+      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
+      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+    return buttons(`${intro}\n\nWould you like to proceed?`, [
+      { id: 'yes', title: 'Yes, reschedule' },
+      { id: '0',   title: 'Go back' }
+    ]);
+  }
+
+  /**
+   * Step 2 of reschedule: fetch available slots and show the paginated list.
+   * Transitions to CONFIRM_RESCHEDULE state.
+   */
+  async _rescheduleFetchAndShowSlots(session, data) {
+    const appt = data.selected_reschedule_appt;
+    if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
@@ -3933,7 +4027,6 @@ class ChatbotEngine {
     const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
     const appointment_type_id = extractIdFromClinikoRef(appt.appointment_type, 'appointment_types');
     if (!business_id || !practitioner_id || !appointment_type_id) {
-      // Clean up
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
@@ -3953,7 +4046,6 @@ class ChatbotEngine {
       to,
     });
     if (!availableTimes.length) {
-      // Clean up
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
@@ -3961,7 +4053,7 @@ class ChatbotEngine {
       return 'Sorry, there are no available slots for this practitioner at this clinic for this appointment type. Please try again later.\n\n' + await this.goToInteractiveMenu(session);
     }
     data.available_times = availableTimes;
-    data.slot_page = 0; // Reset slot page for new selection
+    data.slot_page = 0;
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.CONFIRM_RESCHEDULE,
       data: JSON.stringify(data)
@@ -3971,13 +4063,51 @@ class ChatbotEngine {
       formatFn: (slot, i) => `${i}. ${formatSlotDateTime(slot.appointment_start, this._regionTz(session))}`,
       page: 0,
       pageSize: MAX_SLOT_ITEMS,
+      prevLabel: 'P. Previous slots',
       moreLabel: 'M. More slots',
       header: ''
     });
-    const intro = isSingle
+    const intro = data.is_single_reschedule_appt
       ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`
       : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`;
-    return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with the number of your chosen slot, "M" for more, or "0" to go back.`;
+    return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with a number, "M" more, "P" previous, or "0" back.`;
+  }
+
+  /**
+   * Handle the reschedule intent confirmation (YES/NO before slot list is shown).
+   */
+  async handleRescheduleIntentConfirmState(session, message) {
+    const text = (message || '').trim().toLowerCase();
+    let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+    const appt = data.selected_reschedule_appt;
+
+    if (text === 'yes') {
+      return await this._rescheduleFetchAndShowSlots(session, data);
+    }
+
+    if (['0', 'menu', 'back'].includes(text)) {
+      delete data.reschedule_appt_list;
+      delete data.selected_reschedule_appt;
+      delete data.selected_reschedule_appt_idx;
+      delete data.is_single_reschedule_appt;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return await this.goToInteractiveMenu(session);
+    }
+
+    // Unknown input — re-show confirm prompt
+    if (!appt) {
+      delete data.reschedule_appt_list;
+      delete data.selected_reschedule_appt;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+    }
+    const intro = data.is_single_reschedule_appt
+      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
+      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+    return buttons(`${intro}\n\nWould you like to proceed?`, [
+      { id: 'yes', title: 'Yes, reschedule' },
+      { id: '0',   title: 'Go back' }
+    ]);
   }
 
   /**
@@ -3996,7 +4126,7 @@ class ChatbotEngine {
     const availableTimes = data.available_times || [];
     let slot_page = data.slot_page || 0;
 
-    // Pagination
+    // Pagination — next
     if (['m', 'more'].includes(text.toLowerCase())) {
       slot_page = slot_page + 1;
       data.slot_page = slot_page;
@@ -4006,11 +4136,30 @@ class ChatbotEngine {
         formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot, this._regionTz(session))}`,
         page: slot_page,
         pageSize: MAX_SLOT_ITEMS,
+        prevLabel: 'P. Previous slots',
         moreLabel: 'M. More slots',
         header: 'Please choose a new slot:'
       });
       const intro = appt ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n` : '';
-      return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with the number of your chosen slot, "M" for more, or "0" to go back.`;
+      return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with a number, "M" more, "P" previous, or "0" back.`;
+    }
+
+    // Pagination — previous
+    if (['p', 'prev'].includes(text.toLowerCase())) {
+      slot_page = Math.max(0, slot_page - 1);
+      data.slot_page = slot_page;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
+      const slotList = formatPaginatedList({
+        items: availableTimes,
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot, this._regionTz(session))}`,
+        page: slot_page,
+        pageSize: MAX_SLOT_ITEMS,
+        prevLabel: 'P. Previous slots',
+        moreLabel: 'M. More slots',
+        header: 'Please choose a new slot:'
+      });
+      const intro = appt ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n` : '';
+      return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with a number, "M" more, "P" previous, or "0" back.`;
     }
 
     // Back

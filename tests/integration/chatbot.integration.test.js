@@ -318,7 +318,7 @@ async function seedVerified (db, phone, extra = {}) {
 async function callHandler (engine, names, session, msg) {
   for (const name of names) {
     if (typeof engine[name] === 'function') {
-      return engine[name].call(engine, session, msg);
+      return String(await engine[name].call(engine, session, msg));
     }
   }
   return null; // handler not exposed publicly
@@ -690,8 +690,8 @@ describe('ChatbotEngine — state machine', () => {
     if (typeof engine.goToInteractiveMenu !== 'function') return;
     const session = await seedVerified(db, '+6530000090');
     const reply   = await engine.goToInteractiveMenu(session);
-    expect(typeof reply).toBe('string');
-    expect(reply.length).toBeGreaterThan(0);
+    expect(reply != null).toBe(true);
+    expect(String(reply).length).toBeGreaterThan(0);
   });
 });
 
@@ -1081,7 +1081,7 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       // handleBookManageOptions immediately calls handleRescheduleAppointmentState which
       // advances state beyond RESCHEDULE_APPOINTMENT when a future appointment exists
-      expect(['RESCHEDULE_APPOINTMENT', 'SELECT_APPOINTMENT_TO_RESCHEDULE', 'CONFIRM_RESCHEDULE'])
+      expect(['RESCHEDULE_APPOINTMENT', 'SELECT_APPOINTMENT_TO_RESCHEDULE', 'CONFIRM_RESCHEDULE', 'RESCHEDULE_CONFIRM_INTENT'])
         .toContain(updated.conversation_state);
     });
 
@@ -1395,7 +1395,7 @@ describe('Booking menu and flow coverage', () => {
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       expect(reply).toMatch(/no slots found|try another/i);
-      expect(reply).toMatch(/1\.|2\.|3\./);
+      expect(reply).toMatch(/try another type|try another physio|1\.|2\.|3\./i);
     });
 
     test('no_slots_prompt option 1: sets suppress_auto_advance — shows type list, not no-slots again', async () => {
@@ -1479,7 +1479,7 @@ describe('Booking menu and flow coverage', () => {
     test('valid slot number → sets CONFIRM_BOOKING state and returns confirmation prompt', async () => {
       const session = await seedAt('SELECT_SLOT', baseSlotData());
       const reply   = await callHandler(engine, ['handleSelectSlotState'], session, '1');
-      expect(reply).toMatch(/reply yes.*confirm|0️⃣.*cancel/i);
+      expect(reply).toMatch(/confirm booking|you have selected/i);
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('CONFIRM_BOOKING');
     });
@@ -1545,7 +1545,7 @@ describe('Booking menu and flow coverage', () => {
     test('unrecognised input → re-renders slot confirmation prompt', async () => {
       const session = await seedAt('CONFIRM_BOOKING', { selected_slot: SLOT_WITH_SLOT_FIELD });
       const reply   = await callHandler(engine, ['handleConfirmBookingState'], session, 'maybe');
-      expect(reply).toMatch(/reply yes.*confirm|0️⃣.*cancel/i);
+      expect(reply).toMatch(/confirm booking|you have selected/i);
     });
 
     test('yes with bookAppointment returning failure → returns error message', async () => {

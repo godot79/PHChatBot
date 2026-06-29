@@ -101,10 +101,12 @@ async function handleIncomingMessage(data) {
     } else if (type === 'button') {
       content = message.button?.text || message.button?.payload;
     } else if (type === 'interactive') {
-      content = message.interactive?.button_reply?.title ||
-        message.interactive?.list_reply?.title ||
-        message.interactive?.button_reply?.id ||
-        message.interactive?.list_reply?.id;
+      // ID-first: button/list IDs are the semantic values handlers compare against.
+      // Title is a display-only fallback for unusual cases where id is absent.
+      content = message.interactive?.button_reply?.id ||
+        message.interactive?.list_reply?.id ||
+        message.interactive?.button_reply?.title ||
+        message.interactive?.list_reply?.title;
     }
     if (!content) {
       logger.warn(`Unsupported message type: ${type}`);
@@ -112,10 +114,20 @@ async function handleIncomingMessage(data) {
     }
 
     logger.info(`📩 [${phone}] ${type} - ${content}`);
-    const reply = await chatbotEngine.handleMessage(content, phone);
-    const result = await whatsAppAPI.sendTextMessage(phone, reply);
-    logger.info(`📤 Simulated reply sent to ${phone}`, result);
+    const reply = await chatbotEngine.handleMessageEnvelope(content, phone);
+    const result = await sendReply(whatsAppAPI, phone, reply);
+    logger.info(`📤 Reply sent to ${phone}`, result);
   }
+}
+
+/**
+ * Dispatch a reply: interactive envelope → sendInteractive, plain string → sendTextMessage.
+ */
+function sendReply(api, phone, reply) {
+  if (reply && typeof reply === 'object' && reply.interactive) {
+    return api.sendInteractive(phone, reply.interactive);
+  }
+  return api.sendTextMessage(phone, String(reply));
 }
 
 /**
@@ -143,8 +155,8 @@ router.post('/test-message', async (req, res) => {
   }
   try {
     logger.info('📥 /test-message received:', { phoneNumber, message });
-    const reply = await chatbotEngine.handleMessage(message, phoneNumber);
-    const result = await whatsAppAPI.sendTextMessage(phoneNumber, reply);
+    const reply = await chatbotEngine.handleMessageEnvelope(message, phoneNumber);
+    const result = await sendReply(whatsAppAPI, phoneNumber, reply);
     logger.info(`📤 Simulated reply sent to ${phoneNumber}`, result);
     res.json({ success: true, result: reply });
   } catch (err) {
