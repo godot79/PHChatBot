@@ -42,6 +42,35 @@ class WhatsAppAPI {
   }
 
   /**
+   * Send an interactive message (button or list) to a WhatsApp user.
+   * @param {string} phone - Recipient's phone number.
+   * @param {Object} interactive - The interactive object from a MessageEnvelope.
+   * @returns {Promise<Object>} API response data.
+   */
+  async sendInteractive(phone, interactive) {
+    try {
+      const payload = {
+        messaging_product: 'whatsapp',
+        to: phone,
+        type: 'interactive',
+        interactive
+      };
+      const url = `${this.baseURL}/${this.phoneNumberId}/messages`;
+      const response = await axios.post(url, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.accessToken}`
+        }
+      });
+      console.info(`[WHATSAPP] Interactive ${interactive.type} sent to ${phone}`);
+      return response.data;
+    } catch (error) {
+      console.error('[WHATSAPP] Send interactive error:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Retrieve the WhatsApp business profile.
    * @returns {Promise<Object>} Business profile data.
    */
