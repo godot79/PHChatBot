@@ -66,6 +66,13 @@ const REGION_SUPPORT_INFO = {
   }
 };
 
+const REGION_TZ = {
+  SG: 'Asia/Singapore',
+  HK: 'Asia/Hong_Kong',
+  IN: 'Asia/Kolkata',
+  PH: 'Asia/Manila',
+};
+
 // ====== NAVIGATION HELPERS ======
 
 /**
@@ -392,7 +399,7 @@ function getSupportInfo(region) {
  * @param {Date|string} dateOrIso
  * @returns {string}
  */
-function formatSlotDateTime(dateOrIso) {
+function formatSlotDateTime(dateOrIso, tz) {
   const dt = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
   if (isNaN(dt.getTime())) return String(dateOrIso);
   return dt.toLocaleString('en-GB', {
@@ -402,12 +409,13 @@ function formatSlotDateTime(dateOrIso) {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+    ...(tz ? { timeZone: tz } : {}),
   });
 }
 
 function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
-  return `${idx}. ${formatSlotDateTime(dt)}`;
+  return `${idx}. ${formatSlotDateTime(dt)}`; // no tz: standalone util not used in class methods
 }
 
 /**
@@ -497,7 +505,7 @@ function getBusinessDisplayName(business) {
  * @param {ClinikoAPI} clinikoAPI
  * @returns {Promise<Array<Object>>} Enriched appointments
  */
-async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
+async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz) {
   const practitionerIds = new Set();
   const apptTypeIds = new Set();
   const businessIds = new Set();
@@ -558,7 +566,7 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI) {
     appt._practitioner_display = getPractitionerDisplayName(practitionerObj);
     appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj);
     appt._business_display = getBusinessDisplayName(businessObj);
-    appt._display_dt = formatSlotDateTime(appt.starts_at);
+    appt._display_dt = formatSlotDateTime(appt.starts_at, tz);
   }
 
   // Single summary log at the end
@@ -716,6 +724,10 @@ class ChatbotEngine {
       try { context = JSON.parse(context); } catch {}
     }
     return (context && context.region) || 'SG';
+  }
+
+  _regionTz(session) {
+    return REGION_TZ[this._getSessionRegion(session)] || 'Asia/Singapore';
   }
 
   /**
@@ -890,6 +902,7 @@ class ChatbotEngine {
    */
   async handleMessage(message, phoneNumber) {
     try {
+      console.log('🤖 HANDLE_MSG entered phone_tail:', (phoneNumber||'').slice(-4), 'msg_preview:', (message||'').slice(0,20));
       if (!this.isInitialized) {
         await this.initialize();
       }
@@ -909,19 +922,29 @@ class ChatbotEngine {
       }
 
       const currentState = session.conversation_state || this.STATES.INTRO;
-      if (!this.stateHandlers[currentState]) {
-        return await this.handleFallbackState(session, message);
+      console.log('🗺️ STATE_CHECK session_id:', session.id?.slice(-6), 'raw_state:', JSON.stringify(session.conversation_state), 'currentState:', currentState, 'known:', !!this.stateHandlers[currentState]);
+
+      // Global restart-intent interception: must run before the unknown-state guard so that
+      // sessions with stale/unrecognized states still route to the menu on fresh-start words,
+      // rather than falling through to handleFallbackState.
+      const _globalText = (message || '').trim().toLowerCase();
+      if (['hi', 'hello', 'hey', 'start', 'restart', 'home'].includes(_globalText)) {
+        return await this.goToInteractiveMenu(session);
       }
 
-      // Global restart-intent interception: route obvious fresh-start messages to the
-      // interactive menu regardless of current state, so stale mid-flow sessions don't
-      // trap users with "I don't understand" responses.
-      const _globalText = (message || '').trim().toLowerCase();
-      if (
-        currentState !== this.STATES.INTRO &&
-        ['hi', 'hello', 'hey', 'start', 'restart', 'home'].includes(_globalText)
-      ) {
-        return await this.goToInteractiveMenu(session);
+      // Global region-change interception: if the user types "region" from any state other
+      // than INTRO, reset the session (logout) and prompt for region on a clean session.
+      // From INTRO, fall through to handleIntroState which already handles region selection.
+      if ((_globalText === 'region' || _globalText === 'change region') && currentState !== this.STATES.INTRO) {
+        const phone = session.phone_number || session.phoneNumber;
+        await this.sessionManager.deleteSessionAndData(session.id);
+        const freshSession = await this.sessionManager.getOrCreateSession(phone, true);
+        return await this.handleIntroState(freshSession, 'region');
+      }
+
+      if (!this.stateHandlers[currentState]) {
+        console.log('⚠️ UNKNOWN_STATE fallback triggered raw_state:', JSON.stringify(session.conversation_state), 'msg:', (message||'').slice(0,20));
+        return await this.handleFallbackState(session, message);
       }
 
       // Region-binding wrapper
@@ -1609,7 +1632,7 @@ class ChatbotEngine {
 
       const reply = formatPaginatedList({
         items: list,
-        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${formatSlotDateTime(p.last_seen)}`,
+        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${formatSlotDateTime(p.last_seen, this._regionTz(session))}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: null,
@@ -1766,7 +1789,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply4 = formatPaginatedList({
         items: filtered,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2237,7 +2260,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
       const reply = formatPaginatedList({
         items: filtered,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot)}`,
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot, this._regionTz(session))}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2591,7 +2614,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
+        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -2852,7 +2875,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
+        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -3147,7 +3170,7 @@ class ChatbotEngine {
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
       const reply = formatPaginatedList({
         items: slots,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start)}`,
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
         page: 0,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -3301,7 +3324,7 @@ class ChatbotEngine {
       return (
         `You have selected:\n\n` +
         `• ${header}\n` +
-        `• ${formatSlotDateTime(dt)}\n\n` +
+        `• ${formatSlotDateTime(dt, this._regionTz(session))}\n\n` +
         `Reply YES to confirm, or 0️⃣ to cancel.`
       );
     }
@@ -3319,7 +3342,7 @@ class ChatbotEngine {
     }
 
     // Time-only listing per line
-    const compactFormat = (slot, idx) => `${idx}. ${formatSlotDateTime(slot.slot)}`;
+    const compactFormat = (slot, idx) => `${idx}. ${formatSlotDateTime(slot.slot, this._regionTz(session))}`;
 
     const reply = formatPaginatedList({
       items: slots,
@@ -3387,7 +3410,7 @@ class ChatbotEngine {
     let enrichedSlot = selectedSlot;
     try {
       const enrichableSlot = slotToEnrichable(selectedSlot);
-      const enrichedArr = await enrichAppointmentsForDisplay([enrichableSlot], this.clinikoAPI);
+      const enrichedArr = await enrichAppointmentsForDisplay([enrichableSlot], this.clinikoAPI, this._regionTz(session));
       if (enrichedArr && enrichedArr[0]) {
         enrichedSlot = enrichedArr[0];
         this.logger.debug('[handleConfirmBookingState] Slot enriched', { enriched: enrichedSlot });
@@ -3444,7 +3467,7 @@ class ChatbotEngine {
           const { subject, html, text } = bookingConfirmed({
             practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name || '—',
             clinic:       enrichedSlot._business_display || '—',
-            dateTime:     formatSlotDateTime(dt),
+            dateTime:     formatSlotDateTime(dt, this._regionTz(session)),
             apptType:     enrichedSlot._appointment_type_display || enrichedSlot.appointment_type_name || '',
           });
           const ctx = (() => { try { return typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {}); } catch { return {}; } })();
@@ -3463,7 +3486,7 @@ class ChatbotEngine {
           `✅ Your appointment is booked for:\n` +
           `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
           `🏥 *${enrichedSlot._business_display || ''}*\n` +
-          `🗓️ ${formatSlotDateTime(dt)}\n\n` +
+          `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}\n\n` +
           await this.goToInteractiveMenu(session)
         );
       } else {
@@ -3480,7 +3503,7 @@ class ChatbotEngine {
       `You have selected:\n\n` +
       `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
       `🏥 *${enrichedSlot._business_display || ''}*\n` +
-      `🗓️ ${formatSlotDateTime(dt)}\n\n` +
+      `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}\n\n` +
       `Reply YES to confirm, or 0️⃣ to cancel.`
     );
   }
@@ -3662,7 +3685,7 @@ class ChatbotEngine {
       return 'No upcoming appointments found to cancel.\n\n' + await this.goToInteractiveMenu(session);
     }
 
-    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI);
+    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
 
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.cancel_appt_list = futureAppts;
@@ -3834,7 +3857,7 @@ class ChatbotEngine {
       return 'No upcoming appointments found to reschedule.\n\n' + await this.goToInteractiveMenu(session);
     }
 
-    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI);
+    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
 
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.reschedule_appt_list = futureAppts;
@@ -3946,7 +3969,7 @@ class ChatbotEngine {
     });
     const slotList = formatPaginatedList({
       items: availableTimes,
-      formatFn: (slot, i) => `${i}. ${formatSlotDateTime(slot.appointment_start)}`,
+      formatFn: (slot, i) => `${i}. ${formatSlotDateTime(slot.appointment_start, this._regionTz(session))}`,
       page: 0,
       pageSize: MAX_SLOT_ITEMS,
       moreLabel: 'M. More slots',
@@ -3981,7 +4004,7 @@ class ChatbotEngine {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const slotList = formatPaginatedList({
         items: availableTimes,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot)}`,
+        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot, this._regionTz(session))}`,
         page: slot_page,
         pageSize: MAX_SLOT_ITEMS,
         moreLabel: 'M. More slots',
@@ -4044,7 +4067,7 @@ class ChatbotEngine {
       } catch (e) {
         this.logger.error('[Reschedule] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
-      return `✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at)}\n\n` + await this.goToInteractiveMenu(session);
+      return `✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at, this._regionTz(session))}\n\n` + await this.goToInteractiveMenu(session);
     }
 
     // Reschedule failed — send contact/failure email
@@ -4244,7 +4267,7 @@ class ChatbotEngine {
 
     const practitioner = appt?._practitioner_display || appt?.practitioner || '—';
     const clinic       = appt?._business_display      || appt?.clinic       || '—';
-    const dateTime     = appt?.starts_at ? formatSlotDateTime(appt.starts_at) : '—';
+    const dateTime     = appt?.starts_at ? formatSlotDateTime(appt.starts_at, this._regionTz(session)) : '—';
     const apptType     = appt?._appointment_type_display || appt?.appointment_type || '';
 
     const { subject, html, text } = appointmentCancelled({ practitioner, clinic, dateTime, apptType });
@@ -4287,8 +4310,8 @@ class ChatbotEngine {
     const practitioner  = oldAppt?._practitioner_display  || oldAppt?.practitioner  || '—';
     const clinic        = oldAppt?._business_display       || oldAppt?.clinic        || '—';
     const apptType      = oldAppt?._appointment_type_display || oldAppt?.appointment_type || '';
-    const oldDateTime   = oldAppt?.starts_at ? formatSlotDateTime(oldAppt.starts_at) : '—';
-    const newDateTime   = newAppt?.starts_at ? formatSlotDateTime(newAppt.starts_at) : '—';
+    const oldDateTime   = oldAppt?.starts_at ? formatSlotDateTime(oldAppt.starts_at, this._regionTz(session)) : '—';
+    const newDateTime   = newAppt?.starts_at ? formatSlotDateTime(newAppt.starts_at, this._regionTz(session)) : '—';
 
     const { subject, html, text } = appointmentRescheduled({ practitioner, clinic, oldDateTime, newDateTime, apptType });
 

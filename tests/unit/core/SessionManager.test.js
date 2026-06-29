@@ -7,6 +7,35 @@ jest.mock('../../../src/core/Logger', () =>
 
 const SessionManager = require('../../../src/core/SessionManager');
 
+describe('SessionManager.parseSession — legacy state normalization', () => {
+  let sm;
+  beforeAll(() => { sm = new SessionManager({ on: () => {} }); });
+
+  const future = () => new Date(Date.now() + 60000).toISOString();
+
+  test('"initial" is normalized to "INTRO"', () => {
+    const parsed = sm.parseSession({ id: 'x', conversation_state: 'initial', expires_at: future() });
+    expect(parsed.conversation_state).toBe('INTRO');
+  });
+
+  test('"INTRO" is unchanged', () => {
+    const parsed = sm.parseSession({ id: 'x', conversation_state: 'INTRO', expires_at: future() });
+    expect(parsed.conversation_state).toBe('INTRO');
+  });
+
+  test('null conversation_state is not changed to "INTRO" by parseSession', () => {
+    const parsed = sm.parseSession({ id: 'x', conversation_state: null, expires_at: future() });
+    expect(parsed.conversation_state).toBeNull();
+  });
+
+  test('known valid states are passed through unchanged', () => {
+    for (const state of ['VERIFY', 'BOOK_MANAGE_OPTIONS', 'SELECT_SLOT', 'CONFIRM_BOOKING']) {
+      const parsed = sm.parseSession({ id: 'x', conversation_state: state, expires_at: future() });
+      expect(parsed.conversation_state).toBe(state);
+    }
+  });
+});
+
 describe('SessionManager.normalizePhoneNumber', () => {
   let sm;
 

@@ -5,7 +5,7 @@
  */
 
 const validator = require('validator');
-const Logger = require('./Logger');
+const Logger = require('../core/Logger');
 
 class ValidationMiddleware {
     constructor(config = {}) {

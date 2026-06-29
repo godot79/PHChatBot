@@ -205,6 +205,26 @@ this.logger.info("🔍 Signature stripped:", signature);
     }
 */
 
+/**
+ * Pure boolean signature check — does NOT respond or call next().
+ * Returns true if signature is valid, false otherwise.
+ * Use this after res.sendStatus(200) so Meta never sees a 4xx and retries.
+ */
+checkSignature(rawBody, signatureHeader) {
+  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
+  if (!this.config.webhookSecret) return false;
+  try {
+    const signature = signatureHeader.replace(/^sha256=/, '');
+    const expected = crypto.createHmac('sha256', this.config.webhookSecret).update(rawBody).digest('hex');
+    const sigBuf = Buffer.from(signature, 'hex');
+    const expBuf = Buffer.from(expected, 'hex');
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch {
+    return false;
+  }
+}
+
 verifyWebhookSignature(req, res, next) {
   console.log('✅ ENTERED verifyWebhookSignature');
 console.log('🧾 Content-Type:', req.get('Content-Type'));
@@ -244,8 +264,19 @@ console.log('📦 typeof req.body:', typeof req.body, 'Buffer?', Buffer.isBuffer
     return res.status(400).json({ error: 'Invalid hex encoding', code: 'INVALID_SIGNATURE_ENCODING' });
   }
 
+  console.log('🔍 SIG_CHECK url:', req.originalUrl, 'method:', req.method);
+  console.log('🔍 SIG_CHECK body_bytes:', Buffer.isBuffer(req.body) ? req.body.length : typeof req.body);
+  console.log('🔍 SIG_CHECK received:', signature.slice(0,8), 'expected:', expectedSignature.slice(0,8));
+  try {
+    const _p = JSON.parse(req.body.toString('utf8'));
+    const _e = _p?.entry?.[0];
+    const _v = _e?.changes?.[0]?.value;
+    const _phone = _v?.metadata?.phone_number_id || _v?.messages?.[0]?.from || _v?.statuses?.[0]?.recipient_id || '?';
+    const _type = Array.isArray(_v?.messages) ? 'user_msg' : Array.isArray(_v?.statuses) ? 'status' : 'other';
+    console.log('🔍 SIG_CHECK entry_id:', _e?.id, 'waba_id:', _p?.entry?.[0]?.id, 'phone_id:', _phone, 'type:', _type);
+  } catch {}
   if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
-    console.warn('❌ Invalid signature match');
+    console.warn('❌ SIG_FAIL sig8:', signature.slice(0,8), 'exp8:', expectedSignature.slice(0,8));
     return res.status(401).json({ error: 'Invalid signature', code: 'INVALID_SIGNATURE' });
   }
 

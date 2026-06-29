@@ -680,6 +680,11 @@ class SessionManager {
             session.verificationStatus = session.verification_status;
         }
 
+        // Normalize legacy state values from old schema (DEFAULT 'initial' → 'INTRO')
+        if (session.conversation_state === 'initial') {
+            session.conversation_state = 'INTRO';
+        }
+
         // Map conversation_state to state for compatibility
         if (!session.state && session.conversation_state) {
             session.state = session.conversation_state;

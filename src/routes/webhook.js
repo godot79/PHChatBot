@@ -19,7 +19,7 @@ const whatsAppAPI = new WhatsAppAPI();
 /**
  * WhatsApp Webhook Verification (GET)
  */
-router.get('/webhook', (req, res) => {
+router.get('/', (req, res) => {
   try {
     const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
     if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
@@ -38,25 +38,34 @@ router.get('/webhook', (req, res) => {
  * WhatsApp Webhook Handler (POST)
  */
 router.post(
-  '/webhook',
+  '/',
   rateLimiter.getWhatsappLimiter(),
-  securityMiddleware.verifyWebhookSignature.bind(securityMiddleware),
-  (req, res, next) => {
-    if (Buffer.isBuffer(req.body)) {
-      try {
-        req.body = JSON.parse(req.body.toString('utf8'));
-      } catch (err) {
-        return res.status(400).json({ error: 'Invalid JSON body after raw parse' });
-      }
-    }
-    next();
-  },
-  validationMiddleware.validateWebhookPayload.bind(validationMiddleware),
   async (req, res) => {
-    res.sendStatus(200); // acknowledge quickly
+    // Ack immediately — returning 4xx would cause Meta to retry indefinitely.
+    res.sendStatus(200);
+
+    // Verify signature on the raw Buffer before parsing. Drop silently if invalid
+    // so Meta does not see an error and retry.
+    const rawBody = req.body;
+    const sigHeader = req.get('X-Hub-Signature-256');
+    if (!securityMiddleware.checkSignature(rawBody, sigHeader)) {
+      console.warn('⚠️ WEBHOOK_SIG_DROP sig:', sigHeader?.slice(0, 16), 'bytes:', Buffer.isBuffer(rawBody) ? rawBody.length : typeof rawBody);
+      return;
+    }
+
+    let body;
+    try {
+      body = JSON.parse(rawBody.toString('utf8'));
+    } catch (err) {
+      logger.error('Webhook JSON parse error:', err);
+      return;
+    }
 
     try {
-      const { object, entry } = req.body;
+      const { object, entry } = body;
+      const _val = entry?.[0]?.changes?.[0]?.value;
+      const _type = Array.isArray(_val?.messages) ? 'user_message' : Array.isArray(_val?.statuses) ? 'status_callback' : 'other';
+      console.log('📨 WEBHOOK_TYPE:', _type, 'field:', entry?.[0]?.changes?.[0]?.field, 'object:', object);
       if (object !== 'whatsapp_business_account') return;
       for (const ent of entry) {
         for (const change of ent.changes) {
@@ -147,7 +156,7 @@ router.post('/test-message', async (req, res) => {
 /**
  * Webhook Stats (GET)
  */
-router.get('/webhook/stats', async (req, res) => {
+router.get('/stats', async (req, res) => {
   try {
     const stats = await chatbotEngine.getWebhookStats?.();
     res.json({ success: true, stats });

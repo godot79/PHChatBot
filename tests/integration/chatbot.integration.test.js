@@ -158,6 +158,12 @@ jest.mock('../../src/core/DatabaseManager', () => {
       );
     }
 
+    async query (sql, params = []) {
+      return new Promise((res, rej) =>
+        this.db.all(sql, params, (err, rows) => (err ? rej(err) : res(rows || [])))
+      );
+    }
+
     // Used in edge-case tests to write intentionally broken data
     _rawRun (sql, params = []) {
       return new Promise((res, rej) =>
@@ -1570,6 +1576,76 @@ describe('Booking menu and flow coverage', () => {
 });
 
 // =============================================================================
+// SUITE — Legacy "initial" conversation_state recovery
+// Reproduces the cold-start bug: persistent DB has old schema DEFAULT 'initial',
+// new sessions get that value, and the engine must not fall through to the
+// fallback handler.
+// =============================================================================
+describe('Legacy "initial" conversation_state recovery', () => {
+  let db, engine;
+
+  async function seedLegacyState(phone, contextExtra = {}) {
+    const id = await db.createSession(phone, null, 60);
+    await db.updateSession(id, {
+      conversation_state: 'initial',
+      context: JSON.stringify({ region: 'SG', ...contextExtra }),
+    });
+    return id;
+  }
+
+  beforeAll(async () => {
+    resetCliniko();
+    resetWhatsApp();
+    db = new DatabaseManager();
+    await db.initialize();
+    engine = new ChatbotEngine(db);
+    await engine.initialize();
+  });
+  afterAll(() => db.close());
+  beforeEach(() => resetCliniko());
+
+  test('parseSession normalizes "initial" → "INTRO" at the DB boundary', async () => {
+    const id = await db.createSession('+6598000001', null, 60);
+    await db.updateSession(id, { conversation_state: 'initial' });
+    const raw = await db.getSession(id);
+    expect(raw.conversation_state).toBe('initial'); // raw DB value is wrong
+    const parsed = engine.sessionManager.parseSession(raw);
+    expect(parsed.conversation_state).toBe('INTRO'); // parseSession corrects it
+  });
+
+  test('"1" with "initial" state does not return the fallback "I\'m sorry" response', async () => {
+    const phone = '+6598000002';
+    await seedLegacyState(phone);
+    const reply = await engine.handleMessage('1', phone);
+    expect(reply).not.toMatch(/I'm sorry, I didn't understand/i);
+  });
+
+  test('"1" with "initial" state routes into the INTRO flow (verify or menu)', async () => {
+    const phone = '+6598000003';
+    await seedLegacyState(phone);
+    const reply = await engine.handleMessage('1', phone);
+    // INTRO handles "1" by starting the verify flow
+    expect(reply).toMatch(/email|verify|welcome|select|option/i);
+  });
+
+  test('"hello" with "initial" state routes to interactive menu, not fallback', async () => {
+    const phone = '+6598000004';
+    await seedLegacyState(phone);
+    const reply = await engine.handleMessage('hello', phone);
+    expect(reply).not.toMatch(/I'm sorry, I didn't understand/i);
+    expect(reply).toMatch(/welcome|select|option/i);
+  });
+
+  test('subsequent message after "initial" state is recovered works normally', async () => {
+    const phone = '+6598000005';
+    await seedLegacyState(phone);
+    await engine.handleMessage('1', phone); // first msg: triggers INTRO → VERIFY
+    const reply = await engine.handleMessage('test@example.com', phone); // second: should progress in VERIFY
+    expect(reply).not.toMatch(/I'm sorry, I didn't understand/i);
+  });
+});
+
+// =============================================================================
 // SUITE — Global restart-intent interception
 // =============================================================================
 describe('Global restart-intent interception (handleMessage)', () => {
@@ -1637,5 +1713,98 @@ describe('Global restart-intent interception (handleMessage)', () => {
     const reply = await engine.handleMessage('menu', phone);
     expect(typeof reply).toBe('string');
     expect(reply.length).toBeGreaterThan(5);
+  });
+});
+
+// =============================================================================
+// SUITE — Global region-change interception
+// =============================================================================
+describe('Global region-change interception', () => {
+  let db, engine;
+
+  // ChatbotEngine ignores any db constructor arg — it always creates its own SessionManager.
+  // So we seed through engine.sessionManager to hit the engine's actual database.
+  async function seedAt(state, phone) {
+    const session = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(session.id, {
+      conversation_state: state,
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'SG' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    return session.id;
+  }
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    engine = new ChatbotEngine();
+    await engine.initialize();
+    db = engine.sessionManager.db; // same instance as the engine uses
+  });
+  afterAll(() => db.close());
+  beforeEach(() => { resetCliniko(); resetWhatsApp(); });
+
+  // Helper: get current session for phone via session manager (phone-normalized lookup)
+  const getSession = (phone) => engine.sessionManager.getSessionByPhone(phone);
+
+  test('"region" from BOOK_MANAGE_OPTIONS shows region selection prompt', async () => {
+    const phone = '+6591000201';
+    const orig = await seedAt('BOOK_MANAGE_OPTIONS', phone);
+    const reply = await engine.handleMessage('region', phone);
+    expect(reply).toMatch(/select your region|region/i);
+    const session = await getSession(phone);
+    expect(session.id).not.toBe(orig);
+    expect(session.patient_id).toBeNull();
+  });
+
+  test('"region" from VERIFY state shows region selection prompt and creates new session', async () => {
+    const phone = '+6591000202';
+    const orig = await seedAt('VERIFY', phone);
+    const reply = await engine.handleMessage('region', phone);
+    expect(reply).toMatch(/select your region|region/i);
+    const session = await getSession(phone);
+    expect(session.id).not.toBe(orig);
+    expect(session.patient_id).toBeNull();
+  });
+
+  test('"region" from SELECT_SLOT state shows region selection prompt and creates new session', async () => {
+    const phone = '+6591000203';
+    const orig = await seedAt('SELECT_SLOT', phone);
+    const reply = await engine.handleMessage('region', phone);
+    expect(reply).toMatch(/select your region|region/i);
+    const session = await getSession(phone);
+    expect(session.id).not.toBe(orig);
+  });
+
+  test('"region" from INTRO state does NOT create a new session', async () => {
+    const phone = '+6591000204';
+    const orig = await seedAt('INTRO', phone);
+    const reply = await engine.handleMessage('region', phone);
+    expect(reply).toMatch(/select your region|region/i);
+    // Same session preserved — no reset
+    const session = await getSession(phone);
+    expect(session.id).toBe(orig);
+  });
+
+  test('"change region" alias also resets session from non-INTRO state', async () => {
+    const phone = '+6591000205';
+    const orig = await seedAt('BOOK_MANAGE_OPTIONS', phone);
+    const reply = await engine.handleMessage('change region', phone);
+    expect(reply).toMatch(/select your region|region/i);
+    const session = await getSession(phone);
+    expect(session.id).not.toBe(orig);
+  });
+
+  test('after reset, selecting a new region shows the INTRO menu', async () => {
+    const phone = '+6591000206';
+    await seedAt('BOOK_MANAGE_OPTIONS', phone);
+    await engine.handleMessage('region', phone);   // reset + region prompt
+    const reply = await engine.handleMessage('2', phone); // pick second region
+    expect(reply).toMatch(/book|welcome|select/i);
+    // Region must be saved on the fresh session (context already parsed by parseSession)
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.region).toBeTruthy();
   });
 });

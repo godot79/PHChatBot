@@ -1,0 +1,49 @@
+gcloud run services update chatbot-webhook \
+  --region asia-southeast1 \
+  --min-instances 1 \
+  --concurrency 10 \
+  --no-cpu-throttling
+
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="chatbot-webhook"' \
+  --limit=50 \
+  --freshness=1h \
+  --format='value(timestamp,textPayload)'
+
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="prohealth-mailer"' \
+  --limit=50 \
+  --freshness=1h \
+  --format='value(timestamp,textPayload)'
+
+gcloud run services describe chatbot-webhook \
+  --region asia-southeast1 \
+  --format='value(status.latestReadyRevisionName,status.url)'
+
+gcloud run services describe prohealth-mailer \
+  --region asia-southeast1 \
+  --format='value(status.latestReadyRevisionName,status.url)'
+
+gcloud run deploy chatbot-webhook \
+  --source . \
+  --region asia-southeast1 \
+  --platform managed \
+  --allow-unauthenticated
+
+gcloud run services update chatbot-webhook \
+  --region asia-southeast1 \
+  --update-env-vars MAILER_BASE_URL='https://prohealth-mailer-jfbcvmrxvq-as.a.run.app'
+
+
+
+chatbot-webhook
+
+Revision: chatbot-webhook-00006-gxx
+URL: https://chatbot-webhook-jfbcvmrxvq-as.a.run.app
+
+prohealth-mailer
+
+Revision: prohealth-mailer-00003-4w2
+URL: https://prohealth-mailer-jfbcvmrxvq-as.a.run.app
+
+MAILER_BASE_URL=https://prohealth-mailer-jfbcvmrxvq-as.a.run.app
