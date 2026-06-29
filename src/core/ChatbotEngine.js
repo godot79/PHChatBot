@@ -1,6 +1,5 @@
 // File: /src/core/ChatbotEngine.js
 
-const ConversationService = require('../services/ConversationService.js');
 const ClinikoAPI = require('../api/ClinikoAPI.js');
 const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
