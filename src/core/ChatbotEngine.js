@@ -2,6 +2,7 @@
 
 const { buttons, list, MessageEnvelope } = require('./MessageBuilder');
 const ClinikoAPI = require('../api/ClinikoAPI.js');
+const { formatClinicForWhatsApp } = require('./ClinicFormatter');
 const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
@@ -3633,9 +3634,7 @@ async handleMessageEnvelope(message, phoneNumber) {
 
   async handleViewLocationsState(session, message) {
     const clinics = await this.clinikoAPI.getClinics();
-    const displayText = clinics.map((c, idx) =>
-      `${idx + 1}. ${c.business_name}\n `
-    ).join('\n');
+    const displayText = clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n');
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
     return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(fresh);
