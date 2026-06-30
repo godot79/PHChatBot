@@ -6,6 +6,7 @@ const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('../../prohealth-mailer/EmailTemplates');
+const { REGION_SUPPORT_INFO } = require('../config/regions');
 
 
 function getMailerConfig() {
@@ -46,24 +47,6 @@ const MAX_SLOT_ITEMS = 10;
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 
-const REGION_SUPPORT_INFO = {
-  SG: {
-    phone: '+65 6123 4567',
-    email: 'support@prohealth.com.sg'
-  },
-  HK: {
-    phone: '+852 1234 5678',
-    email: 'support@prohealth.hk'
-  },
-  IN: {
-    phone: '+91 98765 43210',
-    email: 'support@prohealth.in'
-  },
-  PH: {
-    phone: '+63 912 345 6789',
-    email: 'support@prohealth.ph'
-  }
-};
 
 const REGION_TZ = {
   SG: 'Asia/Singapore',
