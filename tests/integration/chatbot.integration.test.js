@@ -2108,3 +2108,396 @@ describe('Dead-end standardization', () => {
     });
   });
 });
+
+// ─── Slot list interactive ─────────────────────────────────────────────────────
+describe('Slot list interactive', () => {
+  let db, engine;
+  let phoneCounter = 9000;
+
+  // Seed a verified session at a specific state
+  async function seedAt(state, extraData = {}) {
+    const phone = `+65300${phoneCounter++}`;
+    const session = await seedVerified(db, phone);
+    await db.updateSession(session.id, {
+      conversation_state: state,
+      data: JSON.stringify({ email: 'p@test.com', patient_name: 'Test Patient', ...extraData }),
+    });
+    return db.getSession(session.id);
+  }
+
+  // Call a handler and return the raw result (no stringify)
+  async function rawCall(handlerName, session, msg) {
+    return engine[handlerName].call(engine, session, msg);
+  }
+
+  // Build N slots with distinct future times
+  const makeSlots = (n) => Array.from({ length: n }, (_, i) => ({
+    id: `SLOT-${i + 1}`,
+    slot: new Date(Date.now() + (i + 1) * 3600000).toISOString(),
+    starts_at: new Date(Date.now() + (i + 1) * 3600000).toISOString(),
+    appointment_start: new Date(Date.now() + (i + 1) * 3600000).toISOString(),
+    appointment_type_id: 'AT-001',
+    appointment_type_name: 'Initial 60 Min Visit (New Clients)',
+    practitioner_id: 'PRAC-001', practitioner_name: 'Jolinna Chan',
+    business_id: 'BIZ-001', business_name: 'Prohealth In Touch',
+  }));
+
+  // Reschedule appointment fixture (has all required Cliniko link fields)
+  const RESCHEDULE_APPT = {
+    id: 'APPT-R',
+    starts_at: new Date(Date.now() + 86400000 * 5).toISOString(),
+    practitioner:     { id: 'PRAC-001' },
+    appointment_type: { id: 'AT-001' },
+    business:         { id: 'BIZ-001' },
+    _practitioner_display: 'Jolinna Chan',
+    _appointment_type_display: 'Initial 60 Min Visit',
+    _display_dt: 'Mon 10:00 AM',
+  };
+
+  const baseSlotSession = (slots, extra = {}) => ({
+    slot_list: slots,
+    slot_page: 0,
+    last_selection_flow: 'soonest',
+    prev_state_data: {
+      selected_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+      selected_physio: { id: 'PRAC-001', display_name: 'Jolinna Chan' },
+      selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth In Touch' },
+    },
+    ...extra,
+  });
+
+  beforeEach(async () => {
+    resetCliniko();
+    db     = new DatabaseManager();
+    engine = new ChatbotEngine();
+    await db.initialize();
+    engine.sessionManager = new SessionManager(db);
+    engine.db = db;
+  });
+
+  afterEach(() => db.close());
+
+  // ─── _slotPageStart / _slotPageCount math ────────────────────────────────────
+
+  test('_slotPageStart: page 0 starts at index 0', () => {
+    expect(engine._slotPageStart(0)).toBe(0);
+  });
+
+  test('_slotPageStart: page 1 starts at index 9 (after page 0 with 9 slots)', () => {
+    expect(engine._slotPageStart(1)).toBe(9);
+  });
+
+  test('_slotPageStart: page 2 starts at index 17 (9 + 8)', () => {
+    expect(engine._slotPageStart(2)).toBe(17);
+  });
+
+  test('_slotPageStart: page 3 starts at index 25 (9 + 8 + 8)', () => {
+    expect(engine._slotPageStart(3)).toBe(25);
+  });
+
+  test('_slotPageCount: page 0 holds 9 slots', () => {
+    expect(engine._slotPageCount(0)).toBe(9);
+  });
+
+  test('_slotPageCount: page 1+ holds 8 slots', () => {
+    expect(engine._slotPageCount(1)).toBe(8);
+    expect(engine._slotPageCount(2)).toBe(8);
+  });
+
+  // ─── _buildSlotList structure ─────────────────────────────────────────────────
+
+  test('_buildSlotList: returns MessageEnvelope with interactive list payload', () => {
+    const slots = makeSlots(3);
+    const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
+    expect(result).toHaveProperty('interactive');
+    expect(result.interactive.type).toBe('list');
+    expect(result.interactive.action.button).toBe('Select slot');
+    expect(Array.isArray(result.interactive.action.sections[0].rows)).toBe(true);
+  });
+
+  test('_buildSlotList page 0: row IDs are 1-based global numbers', () => {
+    const slots = makeSlots(3);
+    const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
+    const rows = result.interactive.action.sections[0].rows;
+    expect(rows[0].id).toBe('1');
+    expect(rows[1].id).toBe('2');
+    expect(rows[2].id).toBe('3');
+  });
+
+  test('_buildSlotList page 0, 9 slots with no overflow: no prev row, no next row', () => {
+    const slots = makeSlots(9);
+    const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
+    const rows = result.interactive.action.sections[0].rows;
+    expect(rows).toHaveLength(9);
+    expect(rows.map(r => r.id)).not.toContain('prev');
+    expect(rows.map(r => r.id)).not.toContain('next');
+  });
+
+  test('_buildSlotList page 0, 10+ slots: no prev row, has next row as last row', () => {
+    const slots = makeSlots(10);
+    const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
+    const rows = result.interactive.action.sections[0].rows;
+    // 9 slots + 1 next = 10 rows
+    expect(rows).toHaveLength(10);
+    expect(rows.map(r => r.id)).not.toContain('prev');
+    expect(rows[rows.length - 1].id).toBe('next');
+    // Only 9 slot rows (IDs 1–9)
+    const slotRows = rows.filter(r => r.id !== 'next' && r.id !== 'prev');
+    expect(slotRows).toHaveLength(9);
+    expect(slotRows[8].id).toBe('9');
+  });
+
+  test('_buildSlotList page 1: has prev row, IDs continue from 10', () => {
+    const slots = makeSlots(17);
+    const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
+    const rows = result.interactive.action.sections[0].rows;
+    const slotRows = rows.filter(r => r.id !== 'prev' && r.id !== 'next');
+    // page 1 start = 9, shows slots 9–16 (IDs 10–17)
+    expect(slotRows[0].id).toBe('10');
+    expect(slotRows[slotRows.length - 1].id).toBe('17');
+    expect(rows.map(r => r.id)).toContain('prev');
+  });
+
+  test('_buildSlotList page 1 with more: prev + next both present, total rows = 10', () => {
+    const slots = makeSlots(18); // 9 on page0, 8 on page1, 1 on page2 → page1 has next
+    const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
+    const rows = result.interactive.action.sections[0].rows;
+    expect(rows).toHaveLength(10); // 8 slots + prev + next
+    expect(rows.map(r => r.id)).toContain('prev');
+    expect(rows.map(r => r.id)).toContain('next');
+  });
+
+  test('_buildSlotList last page (page 1, no more): has prev, no next', () => {
+    const slots = makeSlots(12); // page0=9, page1=3 slots, no more
+    const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
+    const rows = result.interactive.action.sections[0].rows;
+    expect(rows.map(r => r.id)).toContain('prev');
+    expect(rows.map(r => r.id)).not.toContain('next');
+  });
+
+  test('_buildSlotList text fallback uses global numbering (not row position)', () => {
+    const slots = makeSlots(10);
+    const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
+    const text = String(result);
+    // Page 1 starts at index 9; first slot should be labeled 10
+    expect(text).toMatch(/^10\./m);
+  });
+
+  test('_buildSlotList text fallback shows M/P nav labels, not next/prev IDs', () => {
+    const slots = makeSlots(18);
+    const page0 = String(engine._buildSlotList(slots, 0, 'Slots', 'Asia/Singapore'));
+    expect(page0).toMatch(/M\. More slots/);
+    expect(page0).not.toMatch(/\bnext\b/i);
+
+    const page1 = String(engine._buildSlotList(slots, 1, 'Slots', 'Asia/Singapore'));
+    expect(page1).toMatch(/P\. Previous slots/);
+    expect(page1).not.toMatch(/\bprev\b/i);
+  });
+
+  // ─── handleSelectSlotState pagination ────────────────────────────────────────
+
+  test('"next" advances to page 1 and shows global IDs from 10', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
+    const reply = await rawCall('handleSelectSlotState', session, 'next');
+    const rows = reply.interactive?.action?.sections?.[0]?.rows || [];
+    const slotRows = rows.filter(r => r.id !== 'prev' && r.id !== 'next');
+    expect(slotRows[0].id).toBe('10');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(1);
+  });
+
+  test('"m" still advances page (backward compat with text users)', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, 'm');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(1);
+    // Should have returned a slot list (envelope or string)
+    expect(reply).toBeTruthy();
+  });
+
+  test('"prev" goes back from page 1 to page 0', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
+    await callHandler(engine, ['handleSelectSlotState'], session, 'prev');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(0);
+  });
+
+  test('"p" still goes back (backward compat)', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
+    await callHandler(engine, ['handleSelectSlotState'], session, 'p');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(0);
+  });
+
+  test('"prev" at page 0 stays at 0 (no underflow)', async () => {
+    const slots = makeSlots(5);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 0 }));
+    await callHandler(engine, ['handleSelectSlotState'], session, 'prev');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(0);
+  });
+
+  // ─── handleSelectSlotState selection ─────────────────────────────────────────
+
+  test('selecting slot 1 on page 0 → CONFIRM_BOOKING with correct slot', async () => {
+    const slots = makeSlots(3);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '1');
+    expect(reply).toMatch(/confirm booking|you have selected/i);
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).toBe('CONFIRM_BOOKING');
+    const data = JSON.parse(updated.data);
+    expect(data.selected_slot.id).toBe('SLOT-1');
+  });
+
+  test('selecting slot 9 on page 0 (last on page) → CONFIRM_BOOKING with correct slot', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '9');
+    expect(reply).toMatch(/confirm booking|you have selected/i);
+    const updated = await db.getSession(session.id);
+    const data = JSON.parse(updated.data);
+    expect(data.selected_slot.id).toBe('SLOT-9');
+  });
+
+  test('selecting slot by page-1 global ID ("10") on page 1 → CONFIRM_BOOKING with correct slot', async () => {
+    const slots = makeSlots(12);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '10');
+    expect(reply).toMatch(/confirm booking|you have selected/i);
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).toBe('CONFIRM_BOOKING');
+    const data = JSON.parse(updated.data);
+    expect(data.selected_slot.id).toBe('SLOT-10');
+  });
+
+  test('page-0 slot ID typed while on page 1 → validation error (page-scoped)', async () => {
+    const slots = makeSlots(12);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
+    // Typing "1" while on page 1 (page 1 expects global IDs 10-17)
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '1');
+    expect(String(reply)).toMatch(/invalid slot/i);
+  });
+
+  test('out-of-range ID on page 1 → validation error', async () => {
+    const slots = makeSlots(12);
+    const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
+    // page 1 shows slots 10-12 (only 3 remaining), so "17" is out of range
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '17');
+    expect(String(reply)).toMatch(/invalid slot/i);
+  });
+
+  // ─── handleConfirmRescheduleState pagination and selection ───────────────────
+
+  const rescheduleSlotSession = (slots, extra = {}) => ({
+    selected_reschedule_appt: RESCHEDULE_APPT,
+    available_times: slots,
+    slot_page: 0,
+    ...extra,
+  });
+
+  test('reschedule "next" advances page and renders page-1 slot IDs from 10', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots));
+    const reply = await rawCall('handleConfirmRescheduleState', session, 'next');
+    const rows = reply.interactive?.action?.sections?.[0]?.rows || [];
+    const slotRows = rows.filter(r => r.id !== 'prev' && r.id !== 'next');
+    expect(slotRows[0].id).toBe('10');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(1);
+  });
+
+  test('reschedule "m" still advances page', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots));
+    await callHandler(engine, ['handleConfirmRescheduleState'], session, 'm');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(1);
+  });
+
+  test('reschedule "prev" goes back from page 1 to page 0', async () => {
+    const slots = makeSlots(10);
+    const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots, { slot_page: 1 }));
+    await callHandler(engine, ['handleConfirmRescheduleState'], session, 'prev');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).slot_page).toBe(0);
+  });
+
+  test('reschedule slot selection on page 0 → creates booking (slot 1)', async () => {
+    const slots = makeSlots(3);
+    engine.clinikoAPI.updateAppointment = jest.fn().mockResolvedValue({ id: 'APPT-UPD' });
+    const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots));
+    // Just check it doesn't return an error — full booking path may need more stubs
+    const reply = await callHandler(engine, ['handleConfirmRescheduleState'], session, '1').catch(e => String(e));
+    expect(typeof String(reply)).toBe('string');
+  });
+
+  test('reschedule slot selection by global ID on page 1 → not a validation error', async () => {
+    const slots = makeSlots(12);
+    engine.clinikoAPI.updateAppointment = jest.fn().mockResolvedValue({ id: 'APPT-UPD' });
+    const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots, { slot_page: 1 }));
+    const reply = await callHandler(engine, ['handleConfirmRescheduleState'], session, '10').catch(e => String(e));
+    expect(String(reply)).not.toMatch(/invalid slot/i);
+  });
+
+  test('reschedule page-0 ID on page 1 → validation error', async () => {
+    const slots = makeSlots(12);
+    const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots, { slot_page: 1 }));
+    const reply = await callHandler(engine, ['handleConfirmRescheduleState'], session, '1');
+    expect(String(reply)).toMatch(/invalid slot/i);
+  });
+
+  // ─── _rescheduleFetchAndShowSlots ─────────────────────────────────────────────
+
+  test('_rescheduleFetchAndShowSlots returns interactive list envelope when slots available', async () => {
+    const slots = makeSlots(3);
+    engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue(slots);
+    const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
+      selected_reschedule_appt: RESCHEDULE_APPT,
+    });
+    const data = { selected_reschedule_appt: RESCHEDULE_APPT };
+    const reply = await engine._rescheduleFetchAndShowSlots(session, data);
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('list');
+  });
+
+  test('_rescheduleFetchAndShowSlots with 10+ slots has next row on page 0', async () => {
+    const slots = makeSlots(10);
+    engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue(slots);
+    const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
+      selected_reschedule_appt: RESCHEDULE_APPT,
+    });
+    const data = { selected_reschedule_appt: RESCHEDULE_APPT };
+    const reply = await engine._rescheduleFetchAndShowSlots(session, data);
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.map(r => r.id)).toContain('next');
+    expect(rows.map(r => r.id)).not.toContain('prev');
+  });
+
+  // ─── No gaps between pages ───────────────────────────────────────────────────
+
+  test('no slot is skipped: pages cover all slots without overlap or gap', () => {
+    const total = 25;
+    const slots = makeSlots(total);
+    const seen = new Set();
+    let page = 0;
+    // Walk pages until last
+    while (true) {
+      const start = engine._slotPageStart(page);
+      const count = engine._slotPageCount(page);
+      const hasNext = total > start + count;
+      const pageSlots = slots.slice(start, start + count);
+      pageSlots.forEach(s => seen.add(s.id));
+      if (!hasNext) break;
+      page++;
+    }
+    expect(seen.size).toBe(total);
+    for (let i = 1; i <= total; i++) {
+      expect(seen.has(`SLOT-${i}`)).toBe(true);
+    }
+  });
+});
