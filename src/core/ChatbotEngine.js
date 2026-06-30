@@ -1,6 +1,6 @@
 // File: /src/core/ChatbotEngine.js
 
-const { buttons, list } = require('./MessageBuilder');
+const { buttons, list, MessageEnvelope } = require('./MessageBuilder');
 const ClinikoAPI = require('../api/ClinikoAPI.js');
 const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
@@ -44,6 +44,8 @@ function getMailerConfig() {
 const WHATSAPP_MAX_MESSAGE_LENGTH = 4096;
 const WHATSAPP_SAFE_REPLY_LENGTH = 3500;
 const MAX_SLOT_ITEMS = 10;
+const SLOT_LIST_PAGE_FIRST = 9;  // slots on page 0 (no prev row needed)
+const SLOT_LIST_PAGE_REST  = 8;  // slots on page 1+ (prev row takes one row budget)
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 
@@ -731,6 +733,56 @@ class ChatbotEngine {
 
   _regionTz(session) {
     return REGION_TZ[this._getSessionRegion(session)] || 'Asia/Singapore';
+  }
+
+  // --- Slot list pagination helpers ---
+
+  // Returns the 0-based start index for a given slot page.
+  // Page 0 holds SLOT_LIST_PAGE_FIRST slots; page 1+ hold SLOT_LIST_PAGE_REST each.
+  _slotPageStart(page) {
+    if (page === 0) return 0;
+    return SLOT_LIST_PAGE_FIRST + (page - 1) * SLOT_LIST_PAGE_REST;
+  }
+
+  // Returns how many slot rows fit on a given page (before nav rows are added).
+  _slotPageCount(page) {
+    return page === 0 ? SLOT_LIST_PAGE_FIRST : SLOT_LIST_PAGE_REST;
+  }
+
+  // Builds a WhatsApp interactive list for slot selection.
+  // Interactive row IDs are global 1-based numbers matching the slot index.
+  // Nav rows use IDs 'prev' and 'next'. Text fallback uses the old P/M format
+  // so text-mode users see global numbers and type them as before.
+  _buildSlotList(slots, page, header, tz) {
+    const start = this._slotPageStart(page);
+    const count = this._slotPageCount(page);
+    const hasPrev = page > 0;
+    const pageSlots = slots.slice(start, start + count);
+    const hasNext = slots.length > start + count;
+
+    const rows = pageSlots.map((slot, i) => ({
+      id: String(start + i + 1),
+      title: formatSlotDateTime(slot.slot || slot.starts_at || slot.appointment_start, tz),
+    }));
+    if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
+    if (hasNext) rows.push({ id: 'next', title: 'More slots →' });
+
+    const interactive = {
+      type: 'list',
+      body: { text: header },
+      action: {
+        button: 'Select slot',
+        sections: [{ rows: rows.map(r => ({ id: r.id, title: r.title })) }]
+      }
+    };
+
+    const textLines = pageSlots.map((slot, i) =>
+      `${start + i + 1}. ${formatSlotDateTime(slot.slot || slot.starts_at || slot.appointment_start, tz)}`
+    ).join('\n');
+    const navText = [hasPrev ? 'P. Previous slots' : null, hasNext ? 'M. More slots' : null].filter(Boolean).join('\n');
+    const textFallback = header + '\n\n' + textLines + (navText ? '\n' + navText : '') + '\n\nReply with the number to pick a slot, or 0️⃣ Back.';
+
+    return new MessageEnvelope(interactive, textFallback);
   }
 
   /**
@@ -1833,15 +1885,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      const reply4 = formatPaginatedList({
-        items: filtered,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header
-      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-      return reply4;
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
     }
 
     // Fallback
@@ -2311,15 +2355,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      const reply = formatPaginatedList({
-        items: filtered,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot, this._regionTz(session))}`,
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header
-      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-      return reply;
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
     }
 
     // Fallback → show types again
@@ -2673,15 +2709,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
-      const reply = formatPaginatedList({
-        items: slots,
-        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header
-      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-      return reply;
+      return this._buildSlotList(slots, 0, header, this._regionTz(session));
     }
 
     // fallback
@@ -2942,15 +2970,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
-      const reply = formatPaginatedList({
-        items: slots,
-        formatFn: (s,i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header
-      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-      return reply;
+      return this._buildSlotList(slots, 0, header, this._regionTz(session));
     }
 
     // fallback
@@ -3237,15 +3257,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
-      const reply = formatPaginatedList({
-        items: slots,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.slot || s.starts_at || s.appointment_start, this._regionTz(session))}`,
-        page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More slots',
-        header
-      }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-      return reply;
+      return this._buildSlotList(slots, 0, header, this._regionTz(session));
     }
 
     // fallback
@@ -3291,7 +3303,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       // If user typed something else, fall through to render the prompt again
     }
 
-    if (text === 'm' || text === 'more') {
+    if (text === 'm' || text === 'more' || text === 'next') {
       data.slot_page = (data.slot_page || 0) + 1;
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.SELECT_SLOT,
@@ -3379,9 +3391,10 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     const page = data.slot_page || 0;
     if (!isNaN(text) && text !== '') {
-      const start = page * MAX_SLOT_ITEMS;
+      const start = this._slotPageStart(page);
+      const count = this._slotPageCount(page);
       const idx = parseInt(text, 10) - 1;
-      if (isNaN(idx) || idx < start || idx >= Math.min(start + MAX_SLOT_ITEMS, slots.length)) {
+      if (isNaN(idx) || idx < start || idx >= Math.min(start + count, slots.length)) {
         return 'Invalid slot selection. Please reply with a number from the list, or 0️⃣ to go back.';
       }
       const selectedSlot = slots[idx];
@@ -3426,19 +3439,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       header = parts.join(' • ');
     }
 
-    // Time-only listing per line
-    const compactFormat = (slot, idx) => `${idx}. ${formatSlotDateTime(slot.slot, this._regionTz(session))}`;
-
-    const reply = formatPaginatedList({
-      items: slots,
-      formatFn: compactFormat,
-      page,
-      pageSize: MAX_SLOT_ITEMS,
-      prevLabel: 'P. Previous slots',
-      moreLabel: 'M. More slots',
-      header
-    }) + `\n\nReply with the number to pick a slot, or 0️⃣ Back.`;
-    return reply;
+    return this._buildSlotList(slots, page, header, this._regionTz(session));
   }
   
   /**
@@ -4097,19 +4098,11 @@ async handleMessageEnvelope(message, phoneNumber) {
       conversation_state: this.STATES.CONFIRM_RESCHEDULE,
       data: JSON.stringify(data)
     });
-    const slotList = formatPaginatedList({
-      items: availableTimes,
-      formatFn: (slot, i) => `${i}. ${formatSlotDateTime(slot.appointment_start, this._regionTz(session))}`,
-      page: 0,
-      pageSize: MAX_SLOT_ITEMS,
-      prevLabel: 'P. Previous slots',
-      moreLabel: 'M. More slots',
-      header: ''
-    });
     const intro = data.is_single_reschedule_appt
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`
-      : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n`;
-    return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with a number, "M" more, "P" previous, or "0" back.`;
+      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
+      : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
+    const header = intro + '\n\nPlease choose a new slot:';
+    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session));
   }
 
   /**
@@ -4166,21 +4159,14 @@ async handleMessageEnvelope(message, phoneNumber) {
     let slot_page = data.slot_page || 0;
 
     // Pagination — next
-    if (['m', 'more'].includes(text.toLowerCase())) {
+    if (['m', 'more', 'next'].includes(text.toLowerCase())) {
       slot_page = slot_page + 1;
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
-      const slotList = formatPaginatedList({
-        items: availableTimes,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot, this._regionTz(session))}`,
-        page: slot_page,
-        pageSize: MAX_SLOT_ITEMS,
-        prevLabel: 'P. Previous slots',
-        moreLabel: 'M. More slots',
-        header: 'Please choose a new slot:'
-      });
-      const intro = appt ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n` : '';
-      return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with a number, "M" more, "P" previous, or "0" back.`;
+      const rescheduleHeader = appt
+        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
+        : 'Please choose a new slot:';
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
     }
 
     // Pagination — previous
@@ -4188,17 +4174,10 @@ async handleMessageEnvelope(message, phoneNumber) {
       slot_page = Math.max(0, slot_page - 1);
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
-      const slotList = formatPaginatedList({
-        items: availableTimes,
-        formatFn: (s, i) => `${i}. ${formatSlotDateTime(s.starts_at || s.appointment_start || s.slot, this._regionTz(session))}`,
-        page: slot_page,
-        pageSize: MAX_SLOT_ITEMS,
-        prevLabel: 'P. Previous slots',
-        moreLabel: 'M. More slots',
-        header: 'Please choose a new slot:'
-      });
-      const intro = appt ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n` : '';
-      return `${intro}\nPlease choose a new slot:\n\n${slotList}\n\nReply with a number, "M" more, "P" previous, or "0" back.`;
+      const rescheduleHeader = appt
+        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
+        : 'Please choose a new slot:';
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
     }
 
     // Back
@@ -4208,10 +4187,11 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Parse selection — page-relative bounds
-    const start = slot_page * MAX_SLOT_ITEMS;
+    // Parse selection — global 1-based index matching _buildSlotList row IDs
+    const start = this._slotPageStart(slot_page);
+    const count = this._slotPageCount(slot_page);
     const idx = parseInt(text, 10) - 1;
-    if (isNaN(idx) || idx < start || idx >= Math.min(start + MAX_SLOT_ITEMS, availableTimes.length) || !availableTimes[idx]) {
+    if (isNaN(idx) || idx < start || idx >= Math.min(start + count, availableTimes.length) || !availableTimes[idx]) {
       return 'Invalid slot selection. Please reply with the number of your chosen slot, "M" for more, or "0" to go back.' +
         (appt ? `\n\nYou are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '');
     }
