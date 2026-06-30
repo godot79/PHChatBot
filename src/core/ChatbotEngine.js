@@ -8,7 +8,7 @@ const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('../../prohealth-mailer/EmailTemplates');
-const { REGION_SUPPORT_INFO } = require('../config/regions');
+const { REGION_SUPPORT_INFO, REGION_FEES } = require('../config/regions');
 
 
 function getMailerConfig() {
@@ -3586,30 +3586,9 @@ async handleMessageEnvelope(message, phoneNumber) {
 
   async handleViewFeesState(session, message) {
     const region = this._getSessionRegion(session);
-
-    const FEE_DATA = {
-      SG: [
-        { name: 'Prohealth In Touch Physiotherapy', initial: 'SGD 190', followup: 'SGD 160' },
-        { name: 'UWC East',  initial: 'SGD 170', followup: 'SGD 140' },
-        { name: 'UWC Dover', initial: 'SGD 175', followup: 'SGD 145' },
-      ],
-      HK: [
-        { name: 'Prohealth Hong Kong', initial: 'HKD 1,200', followup: 'HKD 900' },
-      ],
-      IN: [
-        { name: 'Prohealth India', initial: 'INR 2,500', followup: 'INR 1,800' },
-      ],
-      PH: [
-        { name: 'Prohealth Philippines', initial: 'PHP 2,800', followup: 'PHP 2,200' },
-      ],
-    };
-
-    const clinics = FEE_DATA[region] || FEE_DATA.SG;
-    const lines = clinics.map(c =>
-      `🏥 *${c.name}*\n• Initial: ${c.initial}\n• Follow-up: ${c.followup}`
-    ).join('\n\n');
-
-    const fees = `💰 *Fee Structure by Clinic*\n\n${lines}`;
+    const feeData = REGION_FEES[region] || REGION_FEES.SG;
+    const lines = feeData.items.map(item => `• ${item}`).join('\n');
+    const fees = `💰 *Fee Structure*\n\n${feeData.header}\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
     return fees + '\n\n' + await this.renderMainMenu(fresh);
