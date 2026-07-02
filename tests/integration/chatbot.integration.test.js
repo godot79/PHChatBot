@@ -2296,13 +2296,12 @@ describe('Slot list interactive', () => {
 
   // ─── handleSelectSlotState pagination ────────────────────────────────────────
 
-  test('"next" advances to page 1 and shows global IDs from 10', async () => {
+  test('"next" advances to page 1 and text output contains slot 10 entry', async () => {
     const slots = makeSlots(10);
     const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
     const reply = await rawCall('handleSelectSlotState', session, 'next');
-    const rows = reply.interactive?.action?.sections?.[0]?.rows || [];
-    const slotRows = rows.filter(r => r.id !== 'prev' && r.id !== 'next');
-    expect(slotRows[0].id).toBe('10');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/10\./);
     const updated = await db.getSession(session.id);
     expect(JSON.parse(updated.data).slot_page).toBe(1);
   });
@@ -2400,13 +2399,12 @@ describe('Slot list interactive', () => {
     ...extra,
   });
 
-  test('reschedule "next" advances page and renders page-1 slot IDs from 10', async () => {
+  test('reschedule "next" advances page and text output contains slot 10 entry', async () => {
     const slots = makeSlots(10);
     const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots));
     const reply = await rawCall('handleConfirmRescheduleState', session, 'next');
-    const rows = reply.interactive?.action?.sections?.[0]?.rows || [];
-    const slotRows = rows.filter(r => r.id !== 'prev' && r.id !== 'next');
-    expect(slotRows[0].id).toBe('10');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/10\./);
     const updated = await db.getSession(session.id);
     expect(JSON.parse(updated.data).slot_page).toBe(1);
   });
@@ -2453,7 +2451,7 @@ describe('Slot list interactive', () => {
 
   // ─── _rescheduleFetchAndShowSlots ─────────────────────────────────────────────
 
-  test('_rescheduleFetchAndShowSlots returns interactive list envelope when slots available', async () => {
+  test('_rescheduleFetchAndShowSlots returns plain text string (not interactive envelope)', async () => {
     const slots = makeSlots(3);
     engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue(slots);
     const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
@@ -2461,11 +2459,11 @@ describe('Slot list interactive', () => {
     });
     const data = { selected_reschedule_appt: RESCHEDULE_APPT };
     const reply = await engine._rescheduleFetchAndShowSlots(session, data);
-    expect(reply).toHaveProperty('interactive');
-    expect(reply.interactive.type).toBe('list');
+    expect(typeof reply).toBe('string');
+    expect(reply).not.toHaveProperty('interactive');
   });
 
-  test('_rescheduleFetchAndShowSlots with 10+ slots has next row on page 0', async () => {
+  test('_rescheduleFetchAndShowSlots with 10+ slots text includes "More slots" navigation hint', async () => {
     const slots = makeSlots(10);
     engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue(slots);
     const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
@@ -2473,9 +2471,18 @@ describe('Slot list interactive', () => {
     });
     const data = { selected_reschedule_appt: RESCHEDULE_APPT };
     const reply = await engine._rescheduleFetchAndShowSlots(session, data);
-    const rows = reply.interactive.action.sections[0].rows;
-    expect(rows.map(r => r.id)).toContain('next');
-    expect(rows.map(r => r.id)).not.toContain('prev');
+    expect(reply).toMatch(/more slots|M\./i);
+  });
+
+  // ─── No gaps between pages ───────────────────────────────────────────────────
+
+  // ─── _buildSlotList internal contract (unchanged) ────────────────────────────
+
+  test('_buildSlotList internal method still returns MessageEnvelope (internal contract)', () => {
+    const slots = makeSlots(3);
+    const result = engine._buildSlotList(slots, 0, 'Test header', 'Asia/Singapore');
+    expect(result).toHaveProperty('interactive');
+    expect(result.interactive.type).toBe('list');
   });
 
   // ─── No gaps between pages ───────────────────────────────────────────────────
@@ -2706,5 +2713,155 @@ describe('Interactive envelope integrity — fees, locations, and string+menu re
     const session = await db.getSession(id);
     const reply = await engine.handleBookManageOptions(session, 'zzzzunknown');
     expect(reply).toHaveProperty('interactive');
+  });
+});
+
+// =============================================================================
+// SUITE — Slot list always rendered as plain text (cross-platform compatibility)
+// =============================================================================
+describe('Slot list — always rendered as plain text for cross-platform compatibility', () => {
+  let db, sm, engine;
+
+  const PATIENT_ID_SLOT = 'pat-slot-001';
+  const BASE_APPT = {
+    id: 'appt-01', starts_at: new Date(Date.now() + 86400000).toISOString(),
+    practitioner: { links: { self: 'https://api.cliniko.com/v1/practitioners/1' } },
+    appointment_type: { links: { self: 'https://api.cliniko.com/v1/appointment_types/1' } },
+    business: { links: { self: 'https://api.cliniko.com/v1/businesses/1' } },
+  };
+
+  function makeSlots(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      id: `S${i + 1}`,
+      slot: new Date(Date.now() + (i + 1) * 3600000).toISOString(),
+      practitioner_id: '1', business_id: '1', appointment_type_id: '1',
+    }));
+  }
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue(makeSlots(3));
+    engine.clinikoAPI.getPractitionerById = jest.fn().mockResolvedValue({ display_name: 'Dr Test' });
+    engine.clinikoAPI.getAppointmentTypeById = jest.fn().mockResolvedValue({ name: 'Initial' });
+    engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ business_name: 'Test Clinic' });
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  async function seedSlotSession(phone, slotCount = 3) {
+    const slots = makeSlots(slotCount);
+    const id = await db.createSession(phone, PATIENT_ID_SLOT, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID_SLOT,
+      conversation_state: 'SELECT_SLOT',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ slot_list: slots, slot_page: 0 }),
+    });
+    return db.getSession(id);
+  }
+
+  // ─── Slot list render is always a string ───────────────────────────────────
+
+  test('handleSelectSlotState renders slot list as a plain text string, not a MessageEnvelope', async () => {
+    const session = await seedSlotSession('+6570000001');
+    const reply = await engine.handleSelectSlotState(session, '');
+    expect(typeof reply).toBe('string');
+    expect(reply).not.toHaveProperty('interactive');
+  });
+
+  test('handleSelectSlotState text output contains numbered slot entries', async () => {
+    const session = await seedSlotSession('+6570000002');
+    const reply = await engine.handleSelectSlotState(session, '');
+    expect(reply).toMatch(/1\./);
+    expect(reply).toMatch(/2\./);
+  });
+
+  test('handleSelectSlotState text output includes back instruction', async () => {
+    const session = await seedSlotSession('+6570000003');
+    const reply = await engine.handleSelectSlotState(session, '');
+    expect(reply).toMatch(/back|0️⃣|reply/i);
+  });
+
+  test('handleSelectSlotState with 10+ slots text output includes "More" navigation hint', async () => {
+    const session = await seedSlotSession('+6570000004', 10);
+    const reply = await engine.handleSelectSlotState(session, '');
+    expect(reply).toMatch(/M\.|more/i);
+  });
+
+  test('handleSelectSlotState with page 1 text output includes "Previous" navigation hint', async () => {
+    const slots = makeSlots(10);
+    const id = await db.createSession('+6570000005', PATIENT_ID_SLOT, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID_SLOT,
+      conversation_state: 'SELECT_SLOT',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ slot_list: slots, slot_page: 1 }),
+    });
+    const session = await db.getSession(id);
+    const reply = await engine.handleSelectSlotState(session, '');
+    expect(reply).toMatch(/P\.|previous/i);
+  });
+
+  // ─── Slot selection by number still works (text and list_reply both send a number) ──
+
+  test('selecting slot "1" (text input) advances to CONFIRM_BOOKING', async () => {
+    const session = await seedSlotSession('+6570000010');
+    const reply = await engine.handleSelectSlotState(session, '1');
+    expect(typeof reply).not.toBe('undefined');
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).toBe('CONFIRM_BOOKING');
+  });
+
+  test('selecting slot via list_reply id "2" (interactive response) advances to CONFIRM_BOOKING', async () => {
+    const session = await seedSlotSession('+6570000011', 3);
+    const reply = await engine.handleSelectSlotState(session, '2');
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).toBe('CONFIRM_BOOKING');
+  });
+
+  test('list_reply id "next" advances slot page', async () => {
+    const session = await seedSlotSession('+6570000012', 10);
+    const reply = await engine.handleSelectSlotState(session, 'next');
+    const updated = await db.getSession(session.id);
+    const data = JSON.parse(updated.data);
+    expect(data.slot_page).toBe(1);
+  });
+
+  test('list_reply id "prev" on page 1 goes back to page 0', async () => {
+    const slots = makeSlots(10);
+    const id = await db.createSession('+6570000013', PATIENT_ID_SLOT, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID_SLOT,
+      conversation_state: 'SELECT_SLOT',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ slot_list: slots, slot_page: 1 }),
+    });
+    const session = await db.getSession(id);
+    await engine.handleSelectSlotState(session, 'prev');
+    const updated = await db.getSession(session.id);
+    const data = JSON.parse(updated.data);
+    expect(data.slot_page).toBe(0);
+  });
+
+  test('out-of-range slot number returns validation error string', async () => {
+    const session = await seedSlotSession('+6570000014');
+    const reply = await engine.handleSelectSlotState(session, '99');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/invalid/i);
+  });
+
+  // ─── _buildSlotList internal contract is unchanged ─────────────────────────
+
+  test('_buildSlotList internal method still returns a MessageEnvelope (not affected by fix)', () => {
+    const slots = makeSlots(3);
+    const result = engine._buildSlotList(slots, 0, 'Header', 'Asia/Singapore');
+    expect(result).toHaveProperty('interactive');
+    expect(result.interactive.type).toBe('list');
+    expect(result._textFallback).toMatch(/1\./);
   });
 });

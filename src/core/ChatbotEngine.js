@@ -1888,7 +1888,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
+      return String(this._buildSlotList(filtered, 0, header, this._regionTz(session)));
     }
 
     // Fallback
@@ -2358,7 +2358,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
+      return String(this._buildSlotList(filtered, 0, header, this._regionTz(session)));
     }
 
     // Fallback → show types again
@@ -2712,7 +2712,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      return String(this._buildSlotList(slots, 0, header, this._regionTz(session)));
     }
 
     // fallback
@@ -2973,7 +2973,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      return String(this._buildSlotList(slots, 0, header, this._regionTz(session)));
     }
 
     // fallback
@@ -3260,7 +3260,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      return String(this._buildSlotList(slots, 0, header, this._regionTz(session)));
     }
 
     // fallback
@@ -3442,7 +3442,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       header = parts.join(' • ');
     }
 
-    return this._buildSlotList(slots, page, header, this._regionTz(session));
+    return String(this._buildSlotList(slots, page, header, this._regionTz(session)));
   }
   
   /**
@@ -4085,7 +4085,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
       : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
     const header = intro + '\n\nPlease choose a new slot:';
-    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session));
+    return String(this._buildSlotList(availableTimes, 0, header, this._regionTz(session)));
   }
 
   /**
@@ -4149,7 +4149,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const rescheduleHeader = appt
         ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
         : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
+      return String(this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session)));
     }
 
     // Pagination — previous
@@ -4160,7 +4160,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const rescheduleHeader = appt
         ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
         : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
+      return String(this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session)));
     }
 
     // Back
