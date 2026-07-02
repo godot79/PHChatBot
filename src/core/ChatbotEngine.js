@@ -3610,7 +3610,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const fees = `💰 *Fee Structure*\n\n${feeData.header}\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
-    return prependTextToEnvelope(fees, await this.renderMainMenu(fresh));
+    return fees + '\n\n' + String(await this.renderMainMenu(fresh));
   }
 
   async handleViewLocationsState(session, message) {
@@ -3621,7 +3621,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const locationText = `Here are our clinic locations:\n\n${displayText}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
-    return prependTextToEnvelope(locationText, await this.renderMainMenu(fresh));
+    return locationText + '\n\n' + String(await this.renderMainMenu(fresh));
   }
 
   /**

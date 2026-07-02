@@ -2624,66 +2624,67 @@ describe('Interactive envelope integrity — fees, locations, and string+menu re
 
   // ─── Fees ──────────────────────────────────────────────────────────────────
 
-  test('handleViewFeesState returns a MessageEnvelope, not a plain string', async () => {
+  test('handleViewFeesState returns a plain text string (not interactive envelope)', async () => {
     const session = await unverifiedSession('+6561000001');
     const reply = await engine.handleViewFeesState(session, '');
-    expect(typeof reply).not.toBe('string');
-    expect(reply).toHaveProperty('interactive');
+    expect(typeof reply).toBe('string');
+    expect(reply).not.toHaveProperty('interactive');
   });
 
-  test('handleViewFeesState interactive body contains fee text', async () => {
+  test('handleViewFeesState reply contains fee text', async () => {
     const session = await unverifiedSession('+6561000002');
     const reply = await engine.handleViewFeesState(session, '');
-    expect(reply.interactive.body.text).toMatch(/fee|SGD|physio/i);
+    expect(reply).toMatch(/fee|SGD|physio/i);
   });
 
-  test('handleViewFeesState interactive body stays within WhatsApp character limit', async () => {
+  test('handleViewFeesState reply contains menu options as text', async () => {
     const session = await unverifiedSession('+6561000003');
     const reply = await engine.handleViewFeesState(session, '');
-    expect(reply.interactive.body.text.length).toBeLessThanOrEqual(SAFE_BODY_LIMIT);
+    expect(reply).toMatch(/book|view|register/i);
   });
 
-  test('handleViewFeesState works for all four regions without exceeding limit', async () => {
+  test('handleViewFeesState works for all four regions', async () => {
     for (const [i, region] of ['SG', 'HK', 'IN', 'PH'].entries()) {
       const session = await unverifiedSession(`+6561000${10 + i}`, region);
       const reply = await engine.handleViewFeesState(session, '');
-      expect(reply).toHaveProperty('interactive');
-      expect(reply.interactive.body.text.length).toBeLessThanOrEqual(SAFE_BODY_LIMIT);
+      expect(typeof reply).toBe('string');
+      expect(reply).toMatch(/fee|physio/i);
     }
   });
 
-  test('handleViewFeesState text fallback also contains fee text', async () => {
+  test('handleViewFeesState reply does not exceed WhatsApp text message limit', async () => {
     const session = await unverifiedSession('+6561000020');
     const reply = await engine.handleViewFeesState(session, '');
-    expect(String(reply)).toMatch(/fee|SGD|physio/i);
+    expect(reply.length).toBeLessThanOrEqual(4096);
   });
 
   // ─── Locations ─────────────────────────────────────────────────────────────
 
-  test('handleViewLocationsState returns a MessageEnvelope, not a plain string', async () => {
+  test('handleViewLocationsState returns a plain text string (not interactive envelope)', async () => {
     const session = await unverifiedLocationSession('+6562000001');
     const reply = await engine.handleViewLocationsState(session, '');
-    expect(typeof reply).not.toBe('string');
-    expect(reply).toHaveProperty('interactive');
+    expect(typeof reply).toBe('string');
+    expect(reply).not.toHaveProperty('interactive');
   });
 
-  test('handleViewLocationsState interactive body contains clinic info', async () => {
+  test('handleViewLocationsState reply contains clinic info', async () => {
     const session = await unverifiedLocationSession('+6562000002');
     const reply = await engine.handleViewLocationsState(session, '');
-    expect(reply.interactive.body.text).toMatch(/clinic/i);
+    expect(reply).toMatch(/clinic/i);
   });
 
-  test('handleViewLocationsState interactive body stays within WhatsApp character limit', async () => {
+  test('handleViewLocationsState reply contains menu options as text', async () => {
     const session = await unverifiedLocationSession('+6562000003');
     const reply = await engine.handleViewLocationsState(session, '');
-    expect(reply.interactive.body.text.length).toBeLessThanOrEqual(SAFE_BODY_LIMIT);
+    expect(reply).toMatch(/book|view|register/i);
   });
 
   test('handleViewLocationsState falls back gracefully if no clinics returned', async () => {
     engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue([]);
     const session = await unverifiedLocationSession('+6562000004');
     const reply = await engine.handleViewLocationsState(session, '');
-    expect(reply).toBeDefined();
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/no clinic information/i);
     engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue([
       { business_name: 'Clinic A', address_1: '1 Test St', city: 'Singapore', phone_number: '+6512345678', profile_url: null },
     ]);
