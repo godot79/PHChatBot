@@ -119,9 +119,13 @@ async function handleIncomingMessage(data) {
 }
 
 /**
- * Dispatch a reply: interactive envelope → sendInteractive, plain string → sendTextMessage.
+ * Dispatch a reply: two-part array → text then interactive, envelope → sendInteractive, string → sendTextMessage.
  */
-function sendReply(api, phone, reply) {
+async function sendReply(api, phone, reply) {
+  if (Array.isArray(reply)) {
+    await api.sendTextMessage(phone, String(reply[0]));
+    return sendReply(api, phone, reply[1]);
+  }
   if (reply && typeof reply === 'object' && reply.interactive) {
     return api.sendInteractive(phone, reply.interactive);
   }

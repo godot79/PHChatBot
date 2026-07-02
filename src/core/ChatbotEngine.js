@@ -1013,7 +1013,8 @@ async handleMessageEnvelope(message, phoneNumber) {
       });
 
       if (session.id) {
-        await this.sessionManager.db.addChatHistory(session.id, message, String(response));
+        const historyText = Array.isArray(response) ? response.map(String).join('\n\n') : String(response);
+        await this.sessionManager.db.addChatHistory(session.id, message, historyText);
       }
       return response;
     } catch (error) {
@@ -1035,7 +1036,8 @@ async handleMessageEnvelope(message, phoneNumber) {
 
   /** Convenience wrapper — always returns a plain string (text fallback for envelopes). */
   async handleMessage(message, phoneNumber) {
-    return String(await this.handleMessageEnvelope(message, phoneNumber));
+    const result = await this.handleMessageEnvelope(message, phoneNumber);
+    return Array.isArray(result) ? result.map(String).join('\n\n') : String(result);
   }
 
   // ====== STATE HANDLERS ======
@@ -3610,7 +3612,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const fees = `💰 *Fee Structure*\n\n${feeData.header}\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
-    return fees + '\n\n' + String(await this.renderMainMenu(fresh));
+    return [fees, await this.renderMainMenu(fresh)];
   }
 
   async handleViewLocationsState(session, message) {
@@ -3621,7 +3623,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const locationText = `Here are our clinic locations:\n\n${displayText}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
-    return locationText + '\n\n' + String(await this.renderMainMenu(fresh));
+    return [locationText, await this.renderMainMenu(fresh)];
   }
 
   /**
