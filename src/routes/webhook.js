@@ -5,11 +5,9 @@ const ChatbotEngine = require('../core/ChatbotEngine.js');
 const WhatsAppAPI = require('../api/WhatsAppAPI.js');
 const Logger = require('../core/Logger.js');
 const SecurityMiddleware = require('../middleware/SecurityMiddleware.js');
-const ValidationMiddleware = require('../middleware/ValidationMiddleware.js');
 const RateLimitMiddleware = require('../middleware/RateLimitMiddleware.js');
 
 const securityMiddleware = new SecurityMiddleware();
-const validationMiddleware = new ValidationMiddleware();
 const rateLimiter = new RateLimitMiddleware();
 
 const logger = new Logger('WebhookRoute');
