@@ -2501,3 +2501,210 @@ describe('Slot list interactive', () => {
     }
   });
 });
+
+// =============================================================================
+// SUITE — Verified main menu: logout button and interactive envelope
+// =============================================================================
+describe('renderMainMenu — verified menu must include logout row', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  async function verifiedSession(phone) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verification_status: 'verified', verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_MANAGE_OPTIONS',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    return db.getSession(id);
+  }
+
+  test('renderMainMenu (verified) returns a MessageEnvelope, not a plain string', async () => {
+    const session = await verifiedSession('+6560000001');
+    const reply = await engine.renderMainMenu(session);
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('list');
+  });
+
+  test('renderMainMenu (verified) includes Book, Cancel, Reschedule rows', async () => {
+    const session = await verifiedSession('+6560000002');
+    const reply = await engine.renderMainMenu(session);
+    const ids = reply.interactive.action.sections[0].rows.map(r => r.id);
+    expect(ids).toContain('1'); // Book
+    expect(ids).toContain('2'); // Cancel
+    expect(ids).toContain('3'); // Reschedule
+  });
+
+  test('renderMainMenu (verified) includes a logout/delete row with id "9"', async () => {
+    const session = await verifiedSession('+6560000003');
+    const reply = await engine.renderMainMenu(session);
+    const rows = reply.interactive.action.sections[0].rows;
+    const logoutRow = rows.find(r => r.id === '9');
+    expect(logoutRow).toBeDefined();
+    expect(logoutRow.title).toMatch(/logout|delete/i);
+  });
+
+  test('renderMainMenu (unverified) does NOT include a logout row', async () => {
+    const id = await db.createSession('+6560000004', null, 60);
+    await db.updateSession(id, {
+      verified: 0, conversation_state: 'INTRO',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    const session = await db.getSession(id);
+    const reply = await engine.renderMainMenu(session);
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.find(r => r.id === '9')).toBeUndefined();
+  });
+
+  test('sending "9" from BOOK_MANAGE_OPTIONS logs out and returns unverified menu', async () => {
+    const session = await verifiedSession('+6560000005');
+    const reply = await engine.handleMessage('9', '+6560000005');
+    expect(reply).toMatch(/logged out|deleted|data has been deleted/i);
+    const freshSession = await db.getSessionByPhone('+6560000005');
+    expect(freshSession.verified).toBeFalsy();
+  });
+});
+
+// =============================================================================
+// SUITE — Interactive envelope: fees, locations, and mixed string+menu replies
+// =============================================================================
+describe('Interactive envelope integrity — fees, locations, and string+menu replies', () => {
+  let db, sm, engine;
+  const SAFE_BODY_LIMIT = 4096; // WhatsApp interactive body text hard limit
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue([
+      { business_name: 'Clinic A', address_1: '1 Test St', city: 'Singapore', phone_number: '+6512345678', profile_url: null },
+      { business_name: 'Clinic B', address_1: '2 Test Rd', city: 'Singapore', phone_number: '+6587654321', profile_url: null },
+    ]);
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  async function unverifiedSession(phone, region = 'SG') {
+    const id = await db.createSession(phone, null, 60);
+    await db.updateSession(id, {
+      verified: 0, conversation_state: 'VIEW_FEES',
+      context: JSON.stringify({ region }),
+    });
+    return db.getSession(id);
+  }
+
+  async function unverifiedLocationSession(phone, region = 'SG') {
+    const id = await db.createSession(phone, null, 60);
+    await db.updateSession(id, {
+      verified: 0, conversation_state: 'VIEW_LOCATIONS',
+      context: JSON.stringify({ region }),
+    });
+    return db.getSession(id);
+  }
+
+  // ─── Fees ──────────────────────────────────────────────────────────────────
+
+  test('handleViewFeesState returns a MessageEnvelope, not a plain string', async () => {
+    const session = await unverifiedSession('+6561000001');
+    const reply = await engine.handleViewFeesState(session, '');
+    expect(typeof reply).not.toBe('string');
+    expect(reply).toHaveProperty('interactive');
+  });
+
+  test('handleViewFeesState interactive body contains fee text', async () => {
+    const session = await unverifiedSession('+6561000002');
+    const reply = await engine.handleViewFeesState(session, '');
+    expect(reply.interactive.body.text).toMatch(/fee|SGD|physio/i);
+  });
+
+  test('handleViewFeesState interactive body stays within WhatsApp character limit', async () => {
+    const session = await unverifiedSession('+6561000003');
+    const reply = await engine.handleViewFeesState(session, '');
+    expect(reply.interactive.body.text.length).toBeLessThanOrEqual(SAFE_BODY_LIMIT);
+  });
+
+  test('handleViewFeesState works for all four regions without exceeding limit', async () => {
+    for (const [i, region] of ['SG', 'HK', 'IN', 'PH'].entries()) {
+      const session = await unverifiedSession(`+6561000${10 + i}`, region);
+      const reply = await engine.handleViewFeesState(session, '');
+      expect(reply).toHaveProperty('interactive');
+      expect(reply.interactive.body.text.length).toBeLessThanOrEqual(SAFE_BODY_LIMIT);
+    }
+  });
+
+  test('handleViewFeesState text fallback also contains fee text', async () => {
+    const session = await unverifiedSession('+6561000020');
+    const reply = await engine.handleViewFeesState(session, '');
+    expect(String(reply)).toMatch(/fee|SGD|physio/i);
+  });
+
+  // ─── Locations ─────────────────────────────────────────────────────────────
+
+  test('handleViewLocationsState returns a MessageEnvelope, not a plain string', async () => {
+    const session = await unverifiedLocationSession('+6562000001');
+    const reply = await engine.handleViewLocationsState(session, '');
+    expect(typeof reply).not.toBe('string');
+    expect(reply).toHaveProperty('interactive');
+  });
+
+  test('handleViewLocationsState interactive body contains clinic info', async () => {
+    const session = await unverifiedLocationSession('+6562000002');
+    const reply = await engine.handleViewLocationsState(session, '');
+    expect(reply.interactive.body.text).toMatch(/clinic/i);
+  });
+
+  test('handleViewLocationsState interactive body stays within WhatsApp character limit', async () => {
+    const session = await unverifiedLocationSession('+6562000003');
+    const reply = await engine.handleViewLocationsState(session, '');
+    expect(reply.interactive.body.text.length).toBeLessThanOrEqual(SAFE_BODY_LIMIT);
+  });
+
+  test('handleViewLocationsState falls back gracefully if no clinics returned', async () => {
+    engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue([]);
+    const session = await unverifiedLocationSession('+6562000004');
+    const reply = await engine.handleViewLocationsState(session, '');
+    expect(reply).toBeDefined();
+    engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue([
+      { business_name: 'Clinic A', address_1: '1 Test St', city: 'Singapore', phone_number: '+6512345678', profile_url: null },
+    ]);
+  });
+
+  // ─── String + menu coercion guard ──────────────────────────────────────────
+
+  test('Verification success reply is a MessageEnvelope (not plain string)', async () => {
+    const id = await db.createSession('+6563000001', null, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_MANAGE_OPTIONS',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    const session = await db.getSession(id);
+    const reply = await engine.goToInteractiveMenu(session);
+    expect(reply).toHaveProperty('interactive');
+  });
+
+  test('Fallback reply ("I did not understand") is a MessageEnvelope', async () => {
+    const id = await db.createSession('+6563000002', null, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_MANAGE_OPTIONS',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    const session = await db.getSession(id);
+    const reply = await engine.handleBookManageOptions(session, 'zzzzunknown');
+    expect(reply).toHaveProperty('interactive');
+  });
+});

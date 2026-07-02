@@ -666,6 +666,25 @@ function sortAppointmentTypes(types) {
   });
 }
 /**
+ * Prepend a plain-text prefix to a MessageEnvelope's body and text fallback.
+ * Keeps the reply as an interactive envelope rather than coercing to a string.
+ * Clamps the combined interactive body to WHATSAPP_SAFE_REPLY_LENGTH.
+ *
+ * @param {string} prefix
+ * @param {MessageEnvelope} envelope
+ * @returns {MessageEnvelope}
+ */
+function prependTextToEnvelope(prefix, envelope) {
+  if (!envelope || !envelope.interactive) return envelope;
+  const combined = prefix + '\n\n' + envelope.interactive.body.text;
+  envelope.interactive.body.text = combined.length <= WHATSAPP_SAFE_REPLY_LENGTH
+    ? combined
+    : combined.slice(0, WHATSAPP_SAFE_REPLY_LENGTH);
+  envelope._textFallback = prefix + '\n\n' + envelope._textFallback;
+  return envelope;
+}
+
+/**
  * Main Chatbot conversation engine for WhatsApp/Cliniko integration.
  */
 class ChatbotEngine {
@@ -894,11 +913,12 @@ class ChatbotEngine {
     if (session.verified) {
       const body =
         `${region}What would you like to do?\n\n` +
-        `Type "9" to logout, "region" to change region.`;
+        `Type "region" to change region.`;
       return list(body, 'Select option', [
         { id: '1', title: 'Book Appointment' },
         { id: '2', title: 'Cancel Appointment' },
-        { id: '3', title: 'Reschedule' }
+        { id: '3', title: 'Reschedule' },
+        { id: '9', title: 'Logout & Delete My Data' },
       ]);
     } else {
       const body =
@@ -1120,7 +1140,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleRegisterPatientState(fresh, '');
     }
 
-    return `Sorry, I didn't understand that.\n\n` + await this.renderMainMenu(session);
+    return prependTextToEnvelope(`Sorry, I didn't understand that.`, await this.renderMainMenu(session));
   }
 
   /**
@@ -1129,7 +1149,7 @@ async handleMessageEnvelope(message, phoneNumber) {
    * @param {string} message
    */
   async handleFallbackState(session, message) {
-    return `I'm sorry, I didn't understand that.\n\n` + await this.goToInteractiveMenu(session);
+    return prependTextToEnvelope(`I'm sorry, I didn't understand that.`, await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1197,7 +1217,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         delete data.verify_error_prompt;
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
         const updated = await this.sessionManager.getSession(session.id);
-        return `We've sent your details to our support team. They'll be in touch shortly.\n\n` + await this.renderMainMenu(updated);
+        return prependTextToEnvelope(`We've sent your details to our support team. They'll be in touch shortly.`, await this.renderMainMenu(updated));
       }
       if (text === '3') {
         delete data.verify_error_prompt;
@@ -1266,7 +1286,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           data: JSON.stringify(cleared)
         });
         const updated = await this.sessionManager.getSession(session.id);
-        return 'Verification successful!\n\n' + await this.goToInteractiveMenu(updated);
+        return prependTextToEnvelope('Verification successful!', await this.goToInteractiveMenu(updated));
       }
 
       // Verification failed — show 3-option prompt, stay in VERIFY state
@@ -1331,8 +1351,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.INTRO
       });
       const freshSession = await this.sessionManager.getSession(updatedSession.id);
-      return '✅ All your data has been deleted and you are logged out.\n\n' +
-        await this.renderMainMenu(freshSession);
+      return prependTextToEnvelope('✅ All your data has been deleted and you are logged out.', await this.renderMainMenu(freshSession));
     }
 
     if (text === '1' || text.includes('book')) {
@@ -1347,7 +1366,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
       return await this.handleRescheduleAppointmentState(session, '');
     }
-    return 'Your response is not understood. Here are the options. Try again.' + (await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope('Your response is not understood. Here are the options. Try again.', await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1535,7 +1554,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(data)
       });
-      return `Thanks! Our ${region} support team will be in touch shortly.\n\n` + await this.renderMainMenu(session);
+      return prependTextToEnvelope(`Thanks! Our ${region} support team will be in touch shortly.`, await this.renderMainMenu(session));
     }
 
     // 3 — message us (show support phone number)
@@ -1550,7 +1569,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(data)
       });
-      return `You can reach our ${region} support team at ${info.phone}.\n\n` + await this.renderMainMenu(session);
+      return prependTextToEnvelope(`You can reach our ${region} support team at ${info.phone}.`, await this.renderMainMenu(session));
     }
 
     return null;
@@ -3507,7 +3526,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         } catch (e) {
           this.logger.error('[handleConfirmBookingState] Failed to set INTRO state after missing patient_id', e);
         }
-        return 'Cannot proceed with booking. Please start again.\n\n' + await this.renderMainMenu(session);
+        return prependTextToEnvelope('Cannot proceed with booking. Please start again.', await this.renderMainMenu(session));
       }
 
       // Defensive: Check slot fields
@@ -3591,15 +3610,18 @@ async handleMessageEnvelope(message, phoneNumber) {
     const fees = `💰 *Fee Structure*\n\n${feeData.header}\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
-    return fees + '\n\n' + await this.renderMainMenu(fresh);
+    return prependTextToEnvelope(fees, await this.renderMainMenu(fresh));
   }
 
   async handleViewLocationsState(session, message) {
     const clinics = await this.clinikoAPI.getClinics();
-    const displayText = clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n');
+    const displayText = clinics.length
+      ? clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n')
+      : 'No clinic information is currently available.';
+    const locationText = `Here are our clinic locations:\n\n${displayText}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
-    return `Here are our clinic locations:\n\n${displayText}\n\n` + await this.renderMainMenu(fresh);
+    return prependTextToEnvelope(locationText, await this.renderMainMenu(fresh));
   }
 
   /**
@@ -3656,7 +3678,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       });
       const updated = await this.sessionManager.getSession(session.id);
       log.warn('Missing email or phone for registration');
-      return "We need both email and phone number to complete registration.\n\n" + await this.renderMainMenu(updated);
+      return prependTextToEnvelope('We need both email and phone number to complete registration.', await this.renderMainMenu(updated));
     }
 
     const patient = {
@@ -3694,15 +3716,15 @@ async handleMessageEnvelope(message, phoneNumber) {
         });
         const updated = await this.sessionManager.getSession(session.id);
         log.info('Registration success', { email: patient.email, patient_id: newPatientId });
-        return `✅ You've been registered!\n\n` + await this.renderMainMenu(updated);
+        return prependTextToEnvelope(`✅ You've been registered!`, await this.renderMainMenu(updated));
       }
       log.warn('Registration returned falsy result');
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return "Sorry, we couldn't complete registration right now.\n\n" + await this.renderMainMenu(session);
+      return prependTextToEnvelope("Sorry, we couldn't complete registration right now.", await this.renderMainMenu(session));
     } catch (e) {
       log.error('Registration error', { err: e?.message || e });
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return "We hit an error while registering you. Please try again later.\n\n" + await this.renderMainMenu(session);
+      return prependTextToEnvelope('We hit an error while registering you. Please try again later.', await this.renderMainMenu(session));
     }
   }
 
@@ -3733,7 +3755,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const now = new Date();
     let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
-      return 'No upcoming appointments found to cancel.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('No upcoming appointments found to cancel.', await this.goToInteractiveMenu(session));
     }
 
     futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
@@ -3803,7 +3825,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.CONFIRM_CANCEL,
@@ -3858,7 +3880,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     if (!appt || !appt.id) {
       delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
 
     const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
@@ -3874,7 +3896,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       } catch (e) {
         this.logger.error('[Cancel] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
-      return `✅ Your appointment has been cancelled.\n\n` + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope(`✅ Your appointment has been cancelled.`, await this.goToInteractiveMenu(session));
     }
 
     // Cancellation failed — send contact/failure email
@@ -3884,7 +3906,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     } catch (e) {
       this.logger.error('[Cancel] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
-    return `❌ Could not cancel your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
+    return prependTextToEnvelope(`❌ Could not cancel your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
   }
 
   // ========== RESCHEDULE WORKFLOW  ==========
@@ -3913,7 +3935,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const now = new Date();
     let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
-      return 'No upcoming appointments found to reschedule.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('No upcoming appointments found to reschedule.', await this.goToInteractiveMenu(session));
     }
 
     futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
@@ -3986,7 +4008,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
     data.is_single_reschedule_appt = isSingle;
     await this.sessionManager.updateSession(session.id, {
@@ -4013,7 +4035,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
     const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
     const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
@@ -4092,7 +4114,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not find the selected appointment. Please try again.\n\n' + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
     const intro = data.is_single_reschedule_appt
       ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
@@ -4195,7 +4217,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       } catch (e) {
         this.logger.error('[Reschedule] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
-      return `✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at, this._regionTz(session))}\n\n` + await this.goToInteractiveMenu(session);
+      return prependTextToEnvelope(`✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at, this._regionTz(session))}`, await this.goToInteractiveMenu(session));
     }
 
     // Reschedule failed — send contact/failure email
@@ -4206,7 +4228,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     } catch (e) {
       this.logger.error('[Reschedule] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
-    return `❌ Could not reschedule your appointment. ${result?.message || ''}\n\n` + await this.goToInteractiveMenu(session);
+    return prependTextToEnvelope(`❌ Could not reschedule your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
   }
 
   /**
