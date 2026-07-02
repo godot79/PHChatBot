@@ -604,11 +604,16 @@ function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPa
   if (hasPrev) textLines.push('P. Previous');
   if (hasNext) textLines.push('M. More');
   textLines.push('0. Back');
-  const textFallback = header + '\n\n' + textLines.join('\n') + '\n\nReply with number or option above.';
+  const numberedList = textLines.join('\n');
+  const textFallback = header + '\n\n' + numberedList + '\n\nReply with number or option above.';
+
+  // Include numbered options in the body so users can type a number if the
+  // interactive picker doesn't fire (e.g. Mac WhatsApp Desktop).
+  const bodyText = (header + '\n\n' + numberedList + '\n\nTap to select, or type a number.').slice(0, 1024);
 
   const interactive = {
     type: 'list',
-    body: { text: header },
+    body: { text: bodyText },
     action: {
       button: 'Select option',
       sections: [{ rows }]
