@@ -50,6 +50,9 @@ const SLOT_LIST_PAGE_FIRST = 9;  // slots on page 0 (no prev row needed)
 const SLOT_LIST_PAGE_REST  = 8;  // slots on page 1+ (prev row takes one row budget)
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
+// Interactive selection list page sizes (10 row WhatsApp limit; reserve rows for back/prev/next)
+const INTERACTIVE_SELECT_PAGE_FIRST = 8; // page 0: up to 8 items + next + back = 10
+const INTERACTIVE_SELECT_PAGE_REST  = 7; // page 1+: up to 7 items + prev + next + back = 10
 
 
 const REGION_TZ = {
@@ -562,35 +565,57 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz) {
 }
 
 /**
- * Paginate and format a list of options for WhatsApp reply.
- * @param {Array} items - Array of objects to present (slots, physios, clinics, etc.)
- * @param {function} formatFn - Function that returns string for each item (item, idx) => string
- * @param {number} [page=0] - Page number (0-based)
- * @param {number} [pageSize=MAX_SLOT_ITEMS] - Items per page
- * @param {string} [moreLabel='M. More'] - Label for "more" option
- * @param {string} [header=''] - Optional header/title for the list
- * @returns {string} WhatsApp-safe paginated list
+ * Build a WhatsApp interactive list envelope for selection menus.
+ * Manages the 10-row limit with prev/next/back nav rows.
+ * rowFn(item, 1-based-global-idx) → { title, description? }
+ * Titles over 24 chars are truncated; the full text becomes the description.
+ * fixedPageSize overrides the default variable sizing (use for date picker).
  */
-function formatPaginatedList({
-  items,
-  formatFn,
-  page = 0,
-  pageSize = MAX_SLOT_ITEMS,
-  moreLabel = 'M. More',
-  prevLabel = null,
-  header = ''
-}) {
-  if (!Array.isArray(items)) return '';
-  const start = page * pageSize;
+function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPageSize = null }) {
+  if (!Array.isArray(items)) items = [];
+
+  const hasPrev = page > 0;
+  const pageSize = fixedPageSize !== null
+    ? fixedPageSize
+    : (hasPrev ? INTERACTIVE_SELECT_PAGE_REST : INTERACTIVE_SELECT_PAGE_FIRST);
+  const start = fixedPageSize !== null
+    ? page * fixedPageSize
+    : (page === 0 ? 0 : INTERACTIVE_SELECT_PAGE_FIRST + (page - 1) * INTERACTIVE_SELECT_PAGE_REST);
+
   const pageItems = items.slice(start, start + pageSize);
-  let text = pageItems.map((item, idx) => formatFn(item, idx + 1 + start)).join('\n');
-  if (page > 0 && prevLabel) text += `\n${prevLabel}`;
-  if (items.length > start + pageSize) text += `\n${moreLabel}`;
-  let reply = header ? header + '\n\n' + text : text;
-  if (reply.length > WHATSAPP_SAFE_REPLY_LENGTH) {
-    reply = reply.slice(0, WHATSAPP_SAFE_REPLY_LENGTH - 50) + "\n\n[Reply 'M' for more]";
-  }
-  return reply;
+  const hasNext = items.length > start + pageSize;
+
+  const rows = pageItems.map((item, i) => {
+    const globalIdx = start + i + 1;
+    const { title: rawTitle, description: rawDesc } = rowFn(item, globalIdx);
+    const safeTitle = rawTitle.length > 24 ? rawTitle.slice(0, 23) + '…' : rawTitle;
+    const description = rawDesc !== undefined ? rawDesc : (rawTitle.length > 24 ? rawTitle.slice(0, 72) : undefined);
+    return { id: String(globalIdx), title: safeTitle, ...(description ? { description: String(description).slice(0, 72) } : {}) };
+  });
+
+  if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
+  if (hasNext) rows.push({ id: 'next', title: 'More →' });
+  rows.push({ id: 'back', title: '← Back' });
+
+  const textLines = pageItems.map((item, i) => {
+    const { title } = rowFn(item, start + i + 1);
+    return `${start + i + 1}. ${title}`;
+  });
+  if (hasPrev) textLines.push('P. Previous');
+  if (hasNext) textLines.push('M. More');
+  textLines.push('0. Back');
+  const textFallback = header + '\n\n' + textLines.join('\n') + '\n\nReply with number or option above.';
+
+  const interactive = {
+    type: 'list',
+    body: { text: header },
+    action: {
+      button: 'Select option',
+      sections: [{ rows }]
+    }
+  };
+
+  return new MessageEnvelope(interactive, textFallback);
 }
 
 /**
@@ -1728,14 +1753,15 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: list,
-        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName(p.practitioner)}\n   Last seen: ${formatSlotDateTime(p.last_seen, this._regionTz(session))}`,
+        rowFn: (p) => ({
+          title: getPractitionerDisplayName(p.practitioner) || '',
+          description: `Last seen: ${formatSlotDateTime(p.last_seen, this._regionTz(session))}`
+        }),
         page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: null,
         header: 'Choose a physio from your past visits:'
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -1772,7 +1798,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (fwd.advanced) return await this.handleBookHistory(session, '');
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
       }
@@ -1789,14 +1815,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply2 = formatPaginatedList({
+      const reply2 = buildInteractiveSelectionList({
         items: data.appointment_type_list || [],
-        formatFn: (a, i) => `${i}. ${a.name}`,
+        rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More types',
         header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply2;
     }
 
@@ -1835,14 +1859,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply3 = formatPaginatedList({
+      const reply3 = buildInteractiveSelectionList({
         items: data.clinic_list || [],
-        formatFn: (c, i) => `${i}. ${c.business_name}`,
+        rowFn: (c) => ({ title: String(c.business_name) }),
         page: 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More clinics',
         header: 'Select a clinic:'
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply3;
     }
 
@@ -1890,7 +1912,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return String(this._buildSlotList(filtered, 0, header, this._regionTz(session)));
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
     }
 
     // Fallback
@@ -2067,14 +2089,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        const reply = formatPaginatedList({
+        const reply = buildInteractiveSelectionList({
           items: list,
-          formatFn: (a, i) => `${i}. ${a.name}`,
+          rowFn: (a) => ({ title: String(a.name) }),
           page: 0,
-          pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More types',
           header: 'Choose appointment type:'
-        }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
         return reply;
       }
 
@@ -2086,14 +2106,12 @@ async handleMessageEnvelope(message, phoneNumber) {
           data.practitioner_list = physios; data.practitioner_page = 0; delete data.selected_physio;
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-          const reply = formatPaginatedList({
+          const reply = buildInteractiveSelectionList({
             items: physios,
-            formatFn: formatPhysioItem,
+            rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
-            pageSize: MAX_SLOT_ITEMS,
-            moreLabel: 'M. More practitioners',
             header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
-          }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
           return reply;
         }
         // else back to types
@@ -2102,14 +2120,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio; delete data.clinic_list; delete data.selected_clinic;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        const reply2 = formatPaginatedList({
+        const reply2 = buildInteractiveSelectionList({
           items: list,
-          formatFn: (a, i) => `${i}. ${a.name}`,
+          rowFn: (a) => ({ title: String(a.name) }),
           page: 0,
-          pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More types',
           header: 'Choose appointment type:'
-        }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
         return reply2;
       }
 
@@ -2130,7 +2146,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
 
     // Paging in choose_type
-    if (data.selection_step === 'choose_type' && (text === 'm' || text === 'more')) {
+    if (data.selection_step === 'choose_type' && (text === 'm' || text === 'more' || text === 'next')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
       return await this.handleBookSoonest(session, '');
@@ -2151,14 +2167,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       if (!data.selected_appt_type) {
-        const reply = formatPaginatedList({
+        const reply = buildInteractiveSelectionList({
           items: apptTypes,
-          formatFn: (a, i) => `${i}. ${a.name}`,
+          rowFn: (a) => ({ title: String(a.name) }),
           page,
-          pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More types',
           header: 'Choose appointment type:'
-        }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
         return reply;
       }
 
@@ -2184,14 +2198,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       if (practitioners.length > 1) {
-        const reply = formatPaginatedList({
+        const reply = buildInteractiveSelectionList({
           items: practitioners,
-          formatFn: formatPhysioItem,
+          rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
           page: 0,
-          pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More practitioners',
           header: `Select a practitioner for ${data.selected_appt_type.name}:`
-        }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
         return reply;
       }
 
@@ -2203,7 +2215,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
 
     // Paging in choose_physio
-    if (data.selection_step === 'choose_physio' && (text === 'm' || text === 'more')) {
+    if (data.selection_step === 'choose_physio' && (text === 'm' || text === 'more' || text === 'next')) {
       data.practitioner_page = (data.practitioner_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
       return await this.handleBookSoonest(session, '');
@@ -2223,19 +2235,17 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.handleBookSoonest(session, '');
       }
 
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: practitionerList,
-        formatFn: formatPhysioItem,
+        rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
         page,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More practitioners',
         header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
     // Paging in choose_clinic
-    if (data.selection_step === 'choose_clinic' && (text === 'm' || text === 'more')) {
+    if (data.selection_step === 'choose_clinic' && (text === 'm' || text === 'more' || text === 'next')) {
       data.clinic_page = (data.clinic_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
       return await this.handleBookSoonest(session, '');
@@ -2278,14 +2288,12 @@ async handleMessageEnvelope(message, phoneNumber) {
             await sync({ conversation_state: this.STATES.BOOK_SOONEST });
             return await this.handleBookSoonest(session, '');
           }
-          const reply = formatPaginatedList({
+          const reply = buildInteractiveSelectionList({
             items: rebuilt,
-            formatFn: formatPhysioItem,
+            rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
-            pageSize: MAX_SLOT_ITEMS,
-            moreLabel: 'M. More practitioners',
             header: `No slots found. Select another practitioner for ${data.selected_appt_type.name}:`
-          }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
           return reply;
         }
 
@@ -2310,14 +2318,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       if (!data.selected_clinic) {
-        const reply = formatPaginatedList({
+        const reply = buildInteractiveSelectionList({
           items: clinics,
-          formatFn: (c, i) => `${i}. ${c.business_name}`,
+          rowFn: (c) => ({ title: String(c.business_name) }),
           page,
-          pageSize: MAX_SLOT_ITEMS,
-          moreLabel: 'M. More clinics',
           header: `Clinics for ${getPractitionerDisplayName(data.selected_physio)}:`
-        }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
         return reply;
       }
 
@@ -2360,20 +2366,18 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return String(this._buildSlotList(filtered, 0, header, this._regionTz(session)));
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
     }
 
     // Fallback → show types again
     const apptTypes = data.appointment_type_list || [];
     const apptTypePage = data.appt_type_page || 0;
-    const reply = formatPaginatedList({
+    const reply = buildInteractiveSelectionList({
       items: apptTypes,
-      formatFn: (a, i) => `${i}. ${a.name}`,
+      rowFn: (a) => ({ title: String(a.name) }),
       page: apptTypePage,
-      pageSize: MAX_SLOT_ITEMS,
-      moreLabel: 'M. More types',
       header: 'Choose appointment type:'
-    }) + `\n\nReply with number. (0️⃣ Back)`;
+    });
     return reply;
   }
 
@@ -2491,14 +2495,12 @@ async handleMessageEnvelope(message, phoneNumber) {
           }
 
           const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-          const reply = formatPaginatedList({
+          const reply = buildInteractiveSelectionList({
             items: data.appointment_type_list || [],
-            formatFn: (a,i)=>`${i}. ${a.name}`,
+            rowFn: (a) => ({ title: String(a.name) }),
             page: 0,
-            pageSize: MAX_SLOT_ITEMS,
-            moreLabel: 'M. More types',
             header: `Select visit type for ${headerDate}:`
-          }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
           return reply;
         }
       }
@@ -2515,7 +2517,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       // page forward
-      if (text === 'm' || text === 'more') {
+      if (text === 'm' || text === 'more' || text === 'next') {
         if (page < (MAX_DATE_PAGES - 1)) {
           data.date_page = page + 1;
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -2524,11 +2526,13 @@ async handleMessageEnvelope(message, phoneNumber) {
 
       // render date page
       const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-      const slice = candidates.slice(cur * MAX_DATE_ITEMS, cur * MAX_DATE_ITEMS + MAX_DATE_ITEMS);
-      const list = slice.map((dt, i) => `${i + 1}. ${dt.toLocaleDateString()}`).join('\n');
-      const more = cur < (MAX_DATE_PAGES - 1) ? `\nM. More dates` : '';
-      const hint = cur < (MAX_DATE_PAGES - 1) ? ' or M for more' : '';
-      return `Pick a date (Page ${cur + 1}/${MAX_DATE_PAGES}):\n${list}${more}\n\nReply with number${hint}. (0️⃣ Back)`;
+      return buildInteractiveSelectionList({
+        header: `Pick a date (Page ${cur + 1}/${MAX_DATE_PAGES}):`,
+        items: candidates,
+        rowFn: (dt) => ({ title: dt.toLocaleDateString() }),
+        page: cur,
+        fixedPageSize: MAX_DATE_ITEMS
+      });
     }
 
     // =====================================================================
@@ -2554,7 +2558,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
@@ -2574,14 +2578,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.appointment_type_list || [],
-        formatFn: (a,i)=>`${i}. ${a.name}`,
+        rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More types',
         header: `Select visit type for ${headerDate}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -2610,14 +2612,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
-        formatFn: (p,i)=>`${i}. ${getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)}`,
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More physios',
         header: `Choose a physio for ${data.selected_appt_type?.name || 'visit'} on ${headerDate}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -2651,14 +2651,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.clinic_list || [],
-        formatFn: (c,i)=>`${i}. ${getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name}`,
+        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name) }),
         page: data.clinic_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More clinics',
         header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)} on ${headerDate}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -2714,7 +2712,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
-      return String(this._buildSlotList(slots, 0, header, this._regionTz(session)));
+      return this._buildSlotList(slots, 0, header, this._regionTz(session));
     }
 
     // fallback
@@ -2802,7 +2800,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
@@ -2819,14 +2817,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         }
       }
 
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
-        formatFn: (p,i)=>`${i}. ${getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)}`,
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More physios',
         header: 'Choose a physio:'
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -2851,7 +2847,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
@@ -2869,14 +2865,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         }
       }
 
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.appointment_type_list || [],
-        formatFn: (a,i)=>`${i}. ${a.name}`,
+        rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More types',
         header: `Select visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -2909,14 +2903,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         }
       }
 
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.clinic_list || [],
-        formatFn: (c,i)=>`${i}. ${getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name}`,
+        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name) }),
         page: data.clinic_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More clinics',
         header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -2975,7 +2967,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
-      return String(this._buildSlotList(slots, 0, header, this._regionTz(session)));
+      return this._buildSlotList(slots, 0, header, this._regionTz(session));
     }
 
     // fallback
@@ -3071,7 +3063,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.clinic_page = (Number(data.clinic_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
@@ -3088,14 +3080,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         }
       }
 
-      const reply = formatPaginatedList({
+      const reply = buildInteractiveSelectionList({
         items: data.clinic_list || [],
-        formatFn: (c, i) => `${i}. ${getBusinessDisplayName ? getBusinessDisplayName(c) : (c.business_name || c.display_name || c.id)}`,
+        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : (c.business_name || c.display_name || c.id)) }),
         page: data.clinic_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More clinics',
         header: 'Select a clinic:'
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return reply;
     }
 
@@ -3135,7 +3125,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
@@ -3153,14 +3143,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         }
       }
 
-      const replyTypes = formatPaginatedList({
+      const replyTypes = buildInteractiveSelectionList({
         items: data.appointment_type_list || [],
-        formatFn: (a, i) => `${i}. ${a.name}`,
+        rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More types',
         header: `Select visit type for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return replyTypes;
     }
 
@@ -3192,7 +3180,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
-      if (/^m(ore)?$/i.test(text)) {
+      if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
@@ -3209,14 +3197,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         }
       }
 
-      const replyPhys = formatPaginatedList({
+      const replyPhys = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
-        formatFn: (p, i) => `${i}. ${getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name || p.id)}`,
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name || p.id)) }),
         page: data.practitioner_page || 0,
-        pageSize: MAX_SLOT_ITEMS,
-        moreLabel: 'M. More physios',
         header: `Choose a physio for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
-      }) + `\n\nReply with number. (0️⃣ Back)`;
+      });
       return replyPhys;
     }
 
@@ -3262,7 +3248,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
-      return String(this._buildSlotList(slots, 0, header, this._regionTz(session)));
+      return this._buildSlotList(slots, 0, header, this._regionTz(session));
     }
 
     // fallback
@@ -3444,7 +3430,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       header = parts.join(' • ');
     }
 
-    return String(this._buildSlotList(slots, page, header, this._regionTz(session)));
+    return this._buildSlotList(slots, page, header, this._regionTz(session));
   }
   
   /**
@@ -3780,10 +3766,15 @@ async handleMessageEnvelope(message, phoneNumber) {
       data: JSON.stringify(data)
     });
 
-    const listText = futureAppts.map((appt, idx) =>
-      `${idx + 1}. ${appt._practitioner_display} — ${appt._appointment_type_display}\n   ${appt._display_dt}`
-    ).join('\n');
-    return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to cancel, or "0" to go back.`;
+    return buildInteractiveSelectionList({
+      header: 'Your upcoming appointments:',
+      items: futureAppts,
+      rowFn: (appt) => ({
+        title: appt._practitioner_display || 'Appointment',
+        description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
+      }),
+      page: 0
+    });
   }
 
   /**
@@ -3960,10 +3951,15 @@ async handleMessageEnvelope(message, phoneNumber) {
       data: JSON.stringify(data)
     });
 
-    const listText = futureAppts.map((appt, idx) =>
-      `${idx + 1}. ${appt._practitioner_display} — ${appt._appointment_type_display}\n   ${appt._display_dt}`
-    ).join('\n');
-    return `Your upcoming appointments:\n\n${listText}\n\nPlease reply with the number of the appointment you want to reschedule, or "0" to go back.`;
+    return buildInteractiveSelectionList({
+      header: 'Your upcoming appointments:',
+      items: futureAppts,
+      rowFn: (appt) => ({
+        title: appt._practitioner_display || 'Appointment',
+        description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
+      }),
+      page: 0
+    });
   }
 
   /**
@@ -4087,7 +4083,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
       : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
     const header = intro + '\n\nPlease choose a new slot:';
-    return String(this._buildSlotList(availableTimes, 0, header, this._regionTz(session)));
+    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session));
   }
 
   /**
@@ -4151,7 +4147,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const rescheduleHeader = appt
         ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
         : 'Please choose a new slot:';
-      return String(this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session)));
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
     }
 
     // Pagination — previous
@@ -4162,7 +4158,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const rescheduleHeader = appt
         ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
         : 'Please choose a new slot:';
-      return String(this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session)));
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
     }
 
     // Back

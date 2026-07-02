@@ -2296,12 +2296,13 @@ describe('Slot list interactive', () => {
 
   // ─── handleSelectSlotState pagination ────────────────────────────────────────
 
-  test('"next" advances to page 1 and text output contains slot 10 entry', async () => {
+  test('"next" advances to page 1 and interactive rows contain slot 10', async () => {
     const slots = makeSlots(10);
     const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
     const reply = await rawCall('handleSelectSlotState', session, 'next');
-    expect(typeof reply).toBe('string');
-    expect(reply).toMatch(/10\./);
+    expect(reply).toHaveProperty('interactive');
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.some(r => r.id === '10')).toBe(true);
     const updated = await db.getSession(session.id);
     expect(JSON.parse(updated.data).slot_page).toBe(1);
   });
@@ -2399,12 +2400,13 @@ describe('Slot list interactive', () => {
     ...extra,
   });
 
-  test('reschedule "next" advances page and text output contains slot 10 entry', async () => {
+  test('reschedule "next" advances page and interactive rows contain slot 10', async () => {
     const slots = makeSlots(10);
     const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots));
     const reply = await rawCall('handleConfirmRescheduleState', session, 'next');
-    expect(typeof reply).toBe('string');
-    expect(reply).toMatch(/10\./);
+    expect(reply).toHaveProperty('interactive');
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.some(r => r.id === '10')).toBe(true);
     const updated = await db.getSession(session.id);
     expect(JSON.parse(updated.data).slot_page).toBe(1);
   });
@@ -2459,11 +2461,11 @@ describe('Slot list interactive', () => {
     });
     const data = { selected_reschedule_appt: RESCHEDULE_APPT };
     const reply = await engine._rescheduleFetchAndShowSlots(session, data);
-    expect(typeof reply).toBe('string');
-    expect(reply).not.toHaveProperty('interactive');
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('list');
   });
 
-  test('_rescheduleFetchAndShowSlots with 10+ slots text includes "More slots" navigation hint', async () => {
+  test('_rescheduleFetchAndShowSlots with 10+ slots interactive list has next row', async () => {
     const slots = makeSlots(10);
     engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue(slots);
     const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
@@ -2471,7 +2473,8 @@ describe('Slot list interactive', () => {
     });
     const data = { selected_reschedule_appt: RESCHEDULE_APPT };
     const reply = await engine._rescheduleFetchAndShowSlots(session, data);
-    expect(reply).toMatch(/more slots|M\./i);
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.map(r => r.id)).toContain('next');
   });
 
   // ─── No gaps between pages ───────────────────────────────────────────────────
@@ -2722,9 +2725,9 @@ describe('Interactive envelope integrity — fees, locations, and string+menu re
 });
 
 // =============================================================================
-// SUITE — Slot list always rendered as plain text (cross-platform compatibility)
+// SUITE — Slot list rendered as interactive list
 // =============================================================================
-describe('Slot list — always rendered as plain text for cross-platform compatibility', () => {
+describe('Slot list — rendered as interactive list for uniform UX', () => {
   let db, sm, engine;
 
   const PATIENT_ID_SLOT = 'pat-slot-001';
@@ -2772,33 +2775,35 @@ describe('Slot list — always rendered as plain text for cross-platform compati
 
   // ─── Slot list render is always a string ───────────────────────────────────
 
-  test('handleSelectSlotState renders slot list as a plain text string, not a MessageEnvelope', async () => {
+  test('handleSelectSlotState renders slot list as interactive MessageEnvelope', async () => {
     const session = await seedSlotSession('+6570000001');
     const reply = await engine.handleSelectSlotState(session, '');
-    expect(typeof reply).toBe('string');
-    expect(reply).not.toHaveProperty('interactive');
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('list');
   });
 
-  test('handleSelectSlotState text output contains numbered slot entries', async () => {
+  test('handleSelectSlotState interactive rows contain numbered slot entries', async () => {
     const session = await seedSlotSession('+6570000002');
     const reply = await engine.handleSelectSlotState(session, '');
-    expect(reply).toMatch(/1\./);
-    expect(reply).toMatch(/2\./);
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.some(r => r.id === '1')).toBe(true);
+    expect(rows.some(r => r.id === '2')).toBe(true);
   });
 
-  test('handleSelectSlotState text output includes back instruction', async () => {
+  test('handleSelectSlotState text fallback includes back instruction', async () => {
     const session = await seedSlotSession('+6570000003');
     const reply = await engine.handleSelectSlotState(session, '');
-    expect(reply).toMatch(/back|0️⃣|reply/i);
+    expect(String(reply)).toMatch(/back|0️⃣/i);
   });
 
-  test('handleSelectSlotState with 10+ slots text output includes "More" navigation hint', async () => {
+  test('handleSelectSlotState with 10+ slots interactive rows include next row', async () => {
     const session = await seedSlotSession('+6570000004', 10);
     const reply = await engine.handleSelectSlotState(session, '');
-    expect(reply).toMatch(/M\.|more/i);
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.some(r => r.id === 'next')).toBe(true);
   });
 
-  test('handleSelectSlotState with page 1 text output includes "Previous" navigation hint', async () => {
+  test('handleSelectSlotState with page 1 interactive rows include prev row', async () => {
     const slots = makeSlots(10);
     const id = await db.createSession('+6570000005', PATIENT_ID_SLOT, 60);
     await db.updateSession(id, {
@@ -2809,7 +2814,8 @@ describe('Slot list — always rendered as plain text for cross-platform compati
     });
     const session = await db.getSession(id);
     const reply = await engine.handleSelectSlotState(session, '');
-    expect(reply).toMatch(/P\.|previous/i);
+    const rows = reply.interactive.action.sections[0].rows;
+    expect(rows.some(r => r.id === 'prev')).toBe(true);
   });
 
   // ─── Slot selection by number still works (text and list_reply both send a number) ──
