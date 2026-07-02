@@ -1807,6 +1807,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.appt_type_page = Math.max(0, (Number(data.appt_type_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+}
 
       if (/^\d+$/.test(text)) {
         const page = data.appt_type_page || 0;
@@ -2151,6 +2155,10 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
 
     // Paging in choose_type
+    if (data.selection_step === 'choose_type' && /^p(rev)?$/i.test(text)) {
+      data.appt_type_page = Math.max(0, (data.appt_type_page || 0) - 1);
+      await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+    }
     if (data.selection_step === 'choose_type' && (text === 'm' || text === 'more' || text === 'next')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -2220,6 +2228,10 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
 
     // Paging in choose_physio
+    if (data.selection_step === 'choose_physio' && /^p(rev)?$/i.test(text)) {
+      data.practitioner_page = Math.max(0, (data.practitioner_page || 0) - 1);
+      await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+    }
     if (data.selection_step === 'choose_physio' && (text === 'm' || text === 'more' || text === 'next')) {
       data.practitioner_page = (data.practitioner_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -2250,6 +2262,10 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
 
     // Paging in choose_clinic
+    if (data.selection_step === 'choose_clinic' && /^p(rev)?$/i.test(text)) {
+      data.clinic_page = Math.max(0, (data.clinic_page || 0) - 1);
+      await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+    }
     if (data.selection_step === 'choose_clinic' && (text === 'm' || text === 'more' || text === 'next')) {
       data.clinic_page = (data.clinic_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -2567,6 +2583,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.appt_type_page = Math.max(0, (Number(data.appt_type_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+}
 
       const numOnly = text.replace(/[^\d]/g, '');
       if (numOnly) {
@@ -2809,6 +2829,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+}
 
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text,10) - 1;
@@ -2856,6 +2880,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.appt_type_page = Math.max(0, (Number(data.appt_type_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+}
 
       if (/^\d+$/.test(text)) {
         const page = data.appt_type_page || 0;
@@ -3072,6 +3100,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.clinic_page = (Number(data.clinic_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.clinic_page = Math.max(0, (Number(data.clinic_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+}
 
       if (numStr) {
         const idx = parseInt(numStr, 10) - 1;
@@ -3134,6 +3166,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.appt_type_page = Math.max(0, (Number(data.appt_type_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+}
 
       if (numStr && !data.selected_appt_type) {
         const page = data.appt_type_page || 0;
@@ -3189,6 +3225,10 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
+if (/^p(rev)?$/i.test(text)) {
+  data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
+  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+}
 
       if (numStr) {
         const idx = parseInt(numStr, 10) - 1;
