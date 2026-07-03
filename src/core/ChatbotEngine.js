@@ -50,9 +50,10 @@ const SLOT_LIST_PAGE_FIRST = 9;  // slots on page 0 (no prev row needed)
 const SLOT_LIST_PAGE_REST  = 8;  // slots on page 1+ (prev row takes one row budget)
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
-// Interactive selection list page sizes (10 row WhatsApp limit; reserve rows for back/prev/next)
-const INTERACTIVE_SELECT_PAGE_FIRST = 8; // page 0: up to 8 items + next + back = 10
-const INTERACTIVE_SELECT_PAGE_REST  = 7; // page 1+: up to 7 items + prev + next + back = 10
+// Interactive selection list page sizes — kept small so the Send button stays
+// visible on Mac WhatsApp Desktop without scrolling past the list rows.
+const INTERACTIVE_SELECT_PAGE_FIRST = 5; // page 0: up to 5 items + next + back = 7
+const INTERACTIVE_SELECT_PAGE_REST  = 4; // page 1+: up to 4 items + prev + next + back = 7
 
 
 const REGION_TZ = {
