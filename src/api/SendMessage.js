@@ -29,6 +29,7 @@ class SendMessage {
       console.log('With payload:', JSON.stringify(data));
       const response = await axios.patch(`${this.baseURL}${this.endpoint}`, data, {
         headers: ClinikoHeaders.build(),
+        timeout: 15000,
       });
       return response.data;
     } catch (error) {
@@ -49,6 +50,7 @@ class SendMessage {
       const response = await axios.get(`${this.baseURL}${this.endpoint}`, {
         headers: ClinikoHeaders.build(),
         params: this.params,
+        timeout: 15000,
       });
       return response.data;
     } catch (error) {
@@ -71,6 +73,7 @@ class SendMessage {
       console.log('With payload:', JSON.stringify(data));
       const response = await axios.post(`${this.baseURL}${this.endpoint}`, data, {
         headers: ClinikoHeaders.build(),
+        timeout: 15000,
       });
       return response.data;
     } catch (error) {

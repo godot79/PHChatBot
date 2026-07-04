@@ -143,7 +143,6 @@ async function handleStatusUpdate(data) {
       status: status.status,
       timestamp: status.timestamp
     });
-    await chatbotEngine.updateMessageStatus?.(status.id, status.status);
   }
 }
 
@@ -170,14 +169,8 @@ router.post('/test-message', async (req, res) => {
 /**
  * Webhook Stats (GET)
  */
-router.get('/stats', async (req, res) => {
-  try {
-    const stats = await chatbotEngine.getWebhookStats?.();
-    res.json({ success: true, stats });
-  } catch (err) {
-    logger.error('Failed to get webhook stats:', err);
-    res.status(500).json({ success: false });
-  }
+router.get('/stats', (req, res) => {
+  res.json({ success: true, stats: null });
 });
 
 /**

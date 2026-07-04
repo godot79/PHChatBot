@@ -2,6 +2,10 @@ const SendMessage = require("./SendMessage.js");
 const Logger = require("../core/Logger.js");
 const config = require('../config/cliniko.js');
 
+// Clinics whose names match this pattern are excluded from all booking flows.
+// Physiofocus SG was shut down; UWC clinics are handled by a separate contract.
+const EXCLUDED_CLINIC_PATTERN = /UWC|physio\s*focus/i;
+
 /**
  * Cliniko API wrapper for patient, appointment, and clinic actions.
  */
@@ -34,8 +38,7 @@ class ClinikoAPI {
     try {
       const data = await new SendMessage(`/businesses?${params.toString()}`, {}).get();
       const clinics = data.businesses;
-      const pattern = /UWC|physio\s*focus/i;
-      const main_clinics = clinics.filter(item => !pattern.test(item.business_name));
+      const main_clinics = clinics.filter(item => !EXCLUDED_CLINIC_PATTERN.test(item.business_name));
       return main_clinics || [];
     } catch (error) {
       this.logger.error("getClinics failed");
@@ -282,10 +285,10 @@ class ClinikoAPI {
    */
   async getNextAvailableSlots({ practitioner_id, business_id, maxDays, maxSlots } = {}) {
     try {
-      // Check if this business is a UWC clinic and skip if so
+      // Check if this business is excluded from booking (UWC, closed clinics)
       const businessObj = await this.getBusinessById(business_id);
-      if (businessObj && /UWC/i.test(businessObj.business_name)) {
-        this.logger.warn(`Skipping UWC clinic slots: ${businessObj.business_name}`);
+      if (businessObj && EXCLUDED_CLINIC_PATTERN.test(businessObj.business_name)) {
+        this.logger.warn(`Skipping excluded clinic slots: ${businessObj.business_name}`);
         return [];
       }
 
@@ -320,7 +323,7 @@ class ClinikoAPI {
         if (blocks?.length) {
           const slicedSlots = blocks.slice(0, maxSlotsTotal);
           const businessName = businessObj?.business_name || '';
-          if (!/UWC/i.test(businessName)) {
+          if (!EXCLUDED_CLINIC_PATTERN.test(businessName)) {
             const tempObjects = slicedSlots.map(block => ({
               practitioner_id,
               business_id,
@@ -397,27 +400,9 @@ class ClinikoAPI {
   }
 
   /**
-   * List individual appointments for a patient.
-   * @param {string} patientId
-   * @returns {Promise<Array>}
-   */
-  async getBookingsByPatientIdOld(patientId) {
-    try {
-      const params = new URLSearchParams();
-      params.append('q[]', `patient_id:=${patientId}`);
-      params.append('sort', 'starts_at:asc');
-      params.append('per_page', 20);
-      const data = await new SendMessage(`/individual_appointments?${params.toString()}`, {}).get();
-      return data.individual_appointments || [];
-    } catch (error) {
-      this.logger.error(`getBookingsByPatientId failed for ${patientId}`);
-      return [];
-    }
-  }
-
-  /**
    * List individual appointments for a patient within an optional time window.
    * Supports active, cancelled, or both. Returns merged, de-duplicated, sorted rows.
+   * Past lookback defaults to 90 days when no fromISO is provided.
    *
    * @param {string} patientId
    * @param {Object} [opts]
@@ -428,86 +413,6 @@ class ClinikoAPI {
    * @param {'active'|'cancelled'|'both'|'none'} [opts.statusMode='both']
    * @returns {Promise<Array>} individual_appointments[]
    */
-  async getBookingsByPatientId(patientId, opts = {}) {
-    try {
-      const when = String(opts.when || 'future').toLowerCase();
-      const perPage = Math.max(1, Math.min(100, Number.isFinite(opts.perPage) ? opts.perPage : 100)); // Cliniko max = 100
-      const statusMode = String(opts.statusMode || 'both').toLowerCase();
-      const nowISO = new Date().toISOString();
-
-      const buildParams = (cancelMode) => {
-        const p = new URLSearchParams();
-        p.append('q[]', `patient_id:=${patientId}`);
-
-        if (when === 'past') {
-          const toISO = opts.toISO || nowISO;
-          const fromISO = opts.fromISO || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-          p.append('q[]', `starts_at:>=${fromISO}`);
-          p.append('q[]', `starts_at:<${toISO}`);
-          p.append('sort', 'starts_at:desc');
-        } else if (when === 'future') {
-          const fromISO = opts.fromISO || nowISO;
-          if (opts.toISO) p.append('q[]', `starts_at:<${opts.toISO}`);
-          p.append('q[]', `starts_at:>=${fromISO}`);
-          p.append('sort', 'starts_at:asc');
-        } else { // 'all'
-          if (opts.fromISO) p.append('q[]', `starts_at:>=${opts.fromISO}`);
-          if (opts.toISO)   p.append('q[]', `starts_at:<${opts.toISO}`);
-          p.append('sort', 'starts_at:asc');
-        }
-
-        // cancelled_at operators per Cliniko:
-        //   '?'  => IS NOT NULL  (cancelled)
-        //   '!?' => IS NULL      (active)
-        if (cancelMode === 'cancelled') p.append('q[]', 'cancelled_at:?');
-        if (cancelMode === 'active')    p.append('q[]', 'cancelled_at:!?');
-
-        p.append('per_page', String(perPage));
-        return p;
-      };
-
-      const fetchOne = async (cancelMode) => {
-        const params = buildParams(cancelMode);
-        const url = `/individual_appointments?${params.toString()}`;
-        this.logger.debug(url);
-        const data = await new SendMessage(url, {}).get();
-        return (data && data.individual_appointments) ? data.individual_appointments : [];
-      };
-
-      let rows = [];
-      if (statusMode === 'both') {
-        // Sequential to avoid transient 4xx surfacing as double-fail
-        const active = await fetchOne('active').catch(() => {
-          this.logger.error(`getBookingsByPatientId(active) failed for ${patientId}`);
-          return [];
-        });
-        const cancelled = await fetchOne('cancelled').catch(() => {
-          this.logger.error(`getBookingsByPatientId(cancelled) failed for ${patientId}`);
-          return [];
-        });
-        const map = new Map();
-        for (const r of [...active, ...cancelled]) map.set(r.id, r);
-        rows = Array.from(map.values());
-      } else if (statusMode === 'active') {
-        rows = await fetchOne('active');
-      } else if (statusMode === 'cancelled') {
-        rows = await fetchOne('cancelled');
-      } else {
-        rows = await fetchOne('none');
-      }
-      // Deterministic sort
-      rows.sort((a, b) => {
-        const da = new Date(a.starts_at).getTime();
-        const db = new Date(b.starts_at).getTime();
-        return (when === 'past') ? (db - da) : (da - db);
-      });
-
-      return rows;
-    } catch (error) {
-      this.logger.error(`getBookingsByPatientId failed for ${patientId}`, { error: error?.response?.status || error?.message });
-      return [];
-    }
-  }
   async getBookingsByPatientId(patientId, opts = {}) {
     try {
       const when = String(opts.when || 'future').toLowerCase();
@@ -599,7 +504,6 @@ class ClinikoAPI {
     try {
       const cancelPayload = {
         cancellation_note: "Cancelled via chatbot",
-        cancellation_reason: 50
       };
       await new SendMessage(`/individual_appointments/${appointmentId}/cancel`).patch(cancelPayload);
       this.logger.info(`Appointment ${appointmentId} canceled`);
@@ -711,10 +615,10 @@ class ClinikoAPI {
         to: toDateOnly
       });
 
-      // Skip UWC clinics
+      // Skip excluded clinics (UWC, closed clinics)
       const businessObj = await this.getBusinessById(business_id);
-      if (businessObj && /UWC/i.test(businessObj.business_name)) {
-        this.logger.warn(`Skipping UWC clinic slots: ${businessObj.business_name}`);
+      if (businessObj && EXCLUDED_CLINIC_PATTERN.test(businessObj.business_name)) {
+        this.logger.warn(`Skipping excluded clinic slots: ${businessObj.business_name}`);
         return [];
       }
 
@@ -770,7 +674,7 @@ class ClinikoAPI {
 
           if (slots.length) {
             const businessName = businessObj?.business_name || '';
-            if (!/UWC/i.test(businessName)) {
+            if (!EXCLUDED_CLINIC_PATTERN.test(businessName)) {
               allSlots.push(...slots.map(slot => ({
                 practitioner_id: practitioner.id,
                 practitioner_name: practitioner.display_name || `${practitioner.first_name} ${practitioner.last_name}`.trim(),

@@ -800,6 +800,7 @@ class ChatbotEngine {
     }));
     if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
     if (hasNext) rows.push({ id: 'next', title: 'More slots →' });
+    rows.push({ id: 'back', title: '← Back' });
 
     const interactive = {
       type: 'list',
@@ -2533,8 +2534,8 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      // page back
-      if (text === '0') {
+      // page back — 'back' interactive id behaves like '0' in this context
+      if (text === '0' || text === 'back') {
         if (page > 0) {
           data.date_page = page - 1;
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3056,6 +3057,12 @@ if (/^p(rev)?$/i.test(text)) {
 
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
 
+    // ---------- no-slots decision (must run before back/nav to handle "1","2","3" replies) ----------
+    if (data.no_slots_prompt) {
+      const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, this.handleBookSpecificClinic, textRaw);
+      if (ret) return ret;
+    }
+
     // ---------- Back/Menu ----------
     // 'back' (interactive list id) behaves like '0' (contextual step-back), not like 'menu' (full exit).
     if (text === 'menu') {
@@ -3284,7 +3291,24 @@ if (/^p(rev)?$/i.test(text)) {
 
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
-      if (!slots.length) return 'No available slots in that window. Try another selection.';
+      if (!slots.length) {
+        if (typeof navBack === 'function') navBack(data);
+        data.selection_step = 'choose_physio';
+        delete data.practitioner_list;
+        data.no_slots_prompt = true;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: JSON.stringify(data) });
+        session.conversation_state = this.STATES.BOOK_SPECIFIC_CLINIC;
+        session.data = JSON.stringify(data);
+        const _scInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        return buttons(
+          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.\n\nOr message us: ${_scInfo.phone}\n\n(Reply 0 to go back one step)`,
+          [
+            { id: '1', title: 'Booking menu' },
+            { id: '2', title: 'Email us' },
+            { id: '3', title: 'Message us' }
+          ]
+        );
+      }
 
       const slotData = {
         slot_list: slots,
@@ -3804,6 +3828,7 @@ if (/^p(rev)?$/i.test(text)) {
 
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.cancel_appt_list = futureAppts;
+    data.cancel_appt_page = 0;
     data.selected_cancel_appt = undefined;
     data.selected_cancel_appt_idx = undefined;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -3842,11 +3867,27 @@ if (/^p(rev)?$/i.test(text)) {
     const text = message.trim().toLowerCase();
     if (['0', 'menu', 'back'].includes(text)) {
       delete data.cancel_appt_list;
+      delete data.cancel_appt_page;
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
+    const renderCancelList = async (page) => {
+      data.cancel_appt_page = page;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return buildInteractiveSelectionList({
+        header: 'Your upcoming appointments:',
+        items: appts,
+        rowFn: (appt) => ({
+          title: appt._practitioner_display || 'Appointment',
+          description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
+        }),
+        page
+      });
+    };
+    if (text === 'prev') return renderCancelList(Math.max(0, (Number(data.cancel_appt_page) || 0) - 1));
+    if (text === 'next') return renderCancelList((Number(data.cancel_appt_page) || 0) + 1);
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || !appts[idx]) {
       return 'Invalid selection. Please reply with the number of the appointment you want to cancel, or "0" to go back.';
@@ -3989,6 +4030,7 @@ if (/^p(rev)?$/i.test(text)) {
 
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.reschedule_appt_list = futureAppts;
+    data.reschedule_appt_page = 0;
     data.selected_reschedule_appt = undefined;
     data.selected_reschedule_appt_idx = undefined;
     await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
@@ -4030,24 +4072,36 @@ if (/^p(rev)?$/i.test(text)) {
     const text = message.trim().toLowerCase();
     if (['0', 'menu', 'back'].includes(text)) {
       delete data.reschedule_appt_list;
+      delete data.reschedule_appt_page;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
-      await this.sessionManager.updateSession(session.id, {
-        data: JSON.stringify(data)
-      });
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return await this.goToInteractiveMenu(session);
     }
+    const renderRescheduleList = async (page) => {
+      data.reschedule_appt_page = page;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      return buildInteractiveSelectionList({
+        header: 'Your upcoming appointments:',
+        items: appts,
+        rowFn: (appt) => ({
+          title: appt._practitioner_display || 'Appointment',
+          description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
+        }),
+        page
+      });
+    };
+    if (text === 'prev') return renderRescheduleList(Math.max(0, (Number(data.reschedule_appt_page) || 0) - 1));
+    if (text === 'next') return renderRescheduleList((Number(data.reschedule_appt_page) || 0) + 1);
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || !appts[idx]) {
       return 'Invalid selection. Please reply with the number of the appointment you want to reschedule, or "0" to go back.';
     }
     data.selected_reschedule_appt = appts[idx];
     data.selected_reschedule_appt_idx = idx;
-    await this.sessionManager.updateSession(session.id, {
-      data: JSON.stringify(data)
-    });
+    await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
     return await this._rescheduleShowConfirm(session, data, false);
-  } 
+  }
 
   /**
    * Step 1 of reschedule: show appointment details and ask for YES/NO confirmation.

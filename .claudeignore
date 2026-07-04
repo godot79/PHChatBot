@@ -1,0 +1,50 @@
+# Environment & Secrets (Saves tokens + maintains security)
+.env
+.env.*
+*.pem
+*.key
+.secret
+
+# Version Control & Systems
+.git/
+.github/
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+
+# Dependencies & Package managers
+node_modules/
+.npm/
+.yarn/
+.pnpm-store/
+
+# Build outputs and caches
+dist/
+build/
+.next/
+.nuxt/
+.cache/
+.turbo/
+*.log
+
+# Python bytecode & environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.poetry/
+
+# Large Datasets & Media (Claude cannot read binary files effectively anyway)
+*.csv
+*.xlsx
+*.sqlite3
+*.zip
+*.tar.gz
+media/
+uploads/
+

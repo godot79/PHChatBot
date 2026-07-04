@@ -2643,25 +2643,28 @@ describe('Slot list interactive', () => {
     expect(rows[2].id).toBe('3');
   });
 
-  test('_buildSlotList page 0, 9 slots with no overflow: no prev row, no next row', () => {
+  test('_buildSlotList page 0, 9 slots with no overflow: no prev row, no next row, has back row', () => {
     const slots = makeSlots(9);
     const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    expect(rows).toHaveLength(9);
+    // 9 slots + back = 10
+    expect(rows).toHaveLength(10);
     expect(rows.map(r => r.id)).not.toContain('prev');
     expect(rows.map(r => r.id)).not.toContain('next');
+    expect(rows[rows.length - 1].id).toBe('back');
   });
 
-  test('_buildSlotList page 0, 10+ slots: no prev row, has next row as last row', () => {
+  test('_buildSlotList page 0, 10+ slots: no prev row, has next row, has back row as last', () => {
     const slots = makeSlots(10);
     const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    // 9 slots + 1 next = 10 rows
-    expect(rows).toHaveLength(10);
+    // 9 slots + next + back = 11 rows
+    expect(rows).toHaveLength(11);
     expect(rows.map(r => r.id)).not.toContain('prev');
-    expect(rows[rows.length - 1].id).toBe('next');
+    expect(rows.map(r => r.id)).toContain('next');
+    expect(rows[rows.length - 1].id).toBe('back');
     // Only 9 slot rows (IDs 1–9)
-    const slotRows = rows.filter(r => r.id !== 'next' && r.id !== 'prev');
+    const slotRows = rows.filter(r => !['next', 'prev', 'back'].includes(r.id));
     expect(slotRows).toHaveLength(9);
     expect(slotRows[8].id).toBe('9');
   });
@@ -2670,20 +2673,22 @@ describe('Slot list interactive', () => {
     const slots = makeSlots(17);
     const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    const slotRows = rows.filter(r => r.id !== 'prev' && r.id !== 'next');
+    const slotRows = rows.filter(r => !['prev', 'next', 'back'].includes(r.id));
     // page 1 start = 9, shows slots 9–16 (IDs 10–17)
     expect(slotRows[0].id).toBe('10');
     expect(slotRows[slotRows.length - 1].id).toBe('17');
     expect(rows.map(r => r.id)).toContain('prev');
+    expect(rows[rows.length - 1].id).toBe('back');
   });
 
-  test('_buildSlotList page 1 with more: prev + next both present, total rows = 10', () => {
+  test('_buildSlotList page 1 with more: prev + next + back all present, total rows = 11', () => {
     const slots = makeSlots(18); // 9 on page0, 8 on page1, 1 on page2 → page1 has next
     const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    expect(rows).toHaveLength(10); // 8 slots + prev + next
+    expect(rows).toHaveLength(11); // 8 slots + prev + next + back
     expect(rows.map(r => r.id)).toContain('prev');
     expect(rows.map(r => r.id)).toContain('next');
+    expect(rows.map(r => r.id)).toContain('back');
   });
 
   test('_buildSlotList last page (page 1, no more): has prev, no next', () => {
@@ -3293,5 +3298,235 @@ describe('Slot list — rendered as interactive list for uniform UX', () => {
     expect(result).toHaveProperty('interactive');
     expect(result.interactive.type).toBe('list');
     expect(result._textFallback).toMatch(/1\./);
+  });
+});
+
+// =============================================================================
+// Bug-fix regression: H2 — 'back' id in choose_date steps back, not stuck
+// =============================================================================
+describe("H2 regression — 'back' interactive id in choose_date steps back", () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seedDatePickerSession(phone, page = 0) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SPECIFIC_DATE',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ selection_step: 'choose_date', date_page: page, navigation_chain: [] }),
+    });
+    return db.getSession(id);
+  }
+
+  test("'back' on page 0 exits to booking methods (leaves BOOK_SPECIFIC_DATE)", async () => {
+    const session = await seedDatePickerSession('+6581100001');
+    await engine.handleBookSpecificDate(session, 'back');
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).not.toBe('BOOK_SPECIFIC_DATE');
+  });
+
+  test("'0' on page 0 also exits (unchanged baseline)", async () => {
+    const session = await seedDatePickerSession('+6581100002');
+    await engine.handleBookSpecificDate(session, '0');
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).not.toBe('BOOK_SPECIFIC_DATE');
+  });
+
+  test("'back' on page 1 decrements page, stays in BOOK_SPECIFIC_DATE", async () => {
+    const session = await seedDatePickerSession('+6581100003', 1);
+    await engine.handleBookSpecificDate(session, 'back');
+    const updated = await db.getSession(session.id);
+    const data = JSON.parse(updated.data || '{}');
+    expect(data.date_page).toBe(0);
+    expect(updated.conversation_state).toBe('BOOK_SPECIFIC_DATE');
+  });
+});
+
+// =============================================================================
+// Bug-fix regression: H3 — BOOK_SPECIFIC_CLINIC no-slots returns buttons
+// =============================================================================
+describe('H3 regression — BOOK_SPECIFIC_CLINIC view_slots no-slots gives 3-option prompt', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate = jest.fn().mockResolvedValue([]);
+    engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-001', business_name: 'Prohealth In Touch' });
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seedViewSlotsSession(phone) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SPECIFIC_CLINIC',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({
+        selection_step: 'view_slots',
+        navigation_chain: [{ step: 'choose_physio', meta: {} }],
+        selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth In Touch' },
+        selected_physio: { id: 'PRAC-001' },
+        selected_appt_type: { id: 'AT-001', name: 'Initial Consultation' },
+      }),
+    });
+    return db.getSession(id);
+  }
+
+  test('no-slots returns a MessageEnvelope with 3 buttons (not a plain string)', async () => {
+    const session = await seedViewSlotsSession('+6582200001');
+    const reply = await engine.handleBookSpecificClinic(session, '');
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('button');
+    const ids = reply.interactive.action.buttons.map(b => b.reply.id);
+    expect(ids).toContain('1');
+    expect(ids).toContain('2');
+    expect(ids).toContain('3');
+  });
+
+  test('no-slots sets no_slots_prompt so follow-up replies are handled', async () => {
+    const session = await seedViewSlotsSession('+6582200002');
+    await engine.handleBookSpecificClinic(session, '');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data || '{}').no_slots_prompt).toBeTruthy();
+  });
+
+  test("reply '1' after no-slots goes to booking menu", async () => {
+    const session = await seedViewSlotsSession('+6582200003');
+    await engine.handleBookSpecificClinic(session, '');
+    const updated = await db.getSession(session.id);
+    const reply2 = await engine.handleBookSpecificClinic(updated, '1');
+    expect(String(reply2)).toMatch(/book|appointment|menu/i);
+  });
+});
+
+// =============================================================================
+// Bug-fix regression: L2 — _buildSlotList always has ← Back interactive row
+// =============================================================================
+describe('L2 regression — _buildSlotList always includes back row', () => {
+  let engine;
+  function makeSlots(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      slot: new Date(Date.now() + (i + 1) * 3600000).toISOString(),
+    }));
+  }
+  beforeAll(() => { engine = new ChatbotEngine(); });
+
+  test('page 0, no overflow: has back row, no prev, no next', () => {
+    const ids = engine._buildSlotList(makeSlots(3), 0, 'H', 'Asia/Singapore')
+      .interactive.action.sections[0].rows.map(r => r.id);
+    expect(ids).toContain('back');
+    expect(ids).not.toContain('prev');
+    expect(ids).not.toContain('next');
+  });
+
+  test('page 0, overflow: back is last row after next', () => {
+    const rows = engine._buildSlotList(makeSlots(15), 0, 'H', 'Asia/Singapore')
+      .interactive.action.sections[0].rows;
+    expect(rows[rows.length - 1].id).toBe('back');
+    expect(rows.map(r => r.id)).toContain('next');
+  });
+
+  test('page 1: prev + next + back all present, back is last', () => {
+    const rows = engine._buildSlotList(makeSlots(20), 1, 'H', 'Asia/Singapore')
+      .interactive.action.sections[0].rows;
+    const ids = rows.map(r => r.id);
+    expect(ids).toContain('prev');
+    expect(ids).toContain('next');
+    expect(ids[ids.length - 1]).toBe('back');
+  });
+});
+
+// =============================================================================
+// Bug-fix regression: L3 — cancel/reschedule list pagination
+// =============================================================================
+describe('L3 regression — cancel/reschedule appointment list pagination', () => {
+  let db, sm, engine;
+  const MANY_APPTS = Array.from({ length: 12 }, (_, i) => ({
+    id: `APPT-${i}`, starts_at: new Date(Date.now() + (i + 1) * 86400000).toISOString(),
+    cancelled_at: null,
+    _practitioner_display: `Dr ${i}`,
+    _appointment_type_display: 'Physio',
+    _display_dt: `Day ${i + 1}`,
+  }));
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seedCancelSelect(phone, page = 0) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'SELECT_APPOINTMENT_TO_CANCEL',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ cancel_appt_list: MANY_APPTS, cancel_appt_page: page }),
+    });
+    return db.getSession(id);
+  }
+
+  async function seedRescheduleSelect(phone, page = 0) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'SELECT_APPOINTMENT_TO_RESCHEDULE',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ reschedule_appt_list: MANY_APPTS, reschedule_appt_page: page }),
+    });
+    return db.getSession(id);
+  }
+
+  test("cancel: 'next' advances page and returns interactive list", async () => {
+    const session = await seedCancelSelect('+6583300001');
+    const reply = await engine.handleSelectAppointmentToCancelState(session, 'next');
+    expect(reply).toHaveProperty('interactive');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).cancel_appt_page).toBe(1);
+  });
+
+  test("cancel: 'prev' from page 1 goes to page 0", async () => {
+    const session = await seedCancelSelect('+6583300002', 1);
+    await engine.handleSelectAppointmentToCancelState(session, 'prev');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).cancel_appt_page).toBe(0);
+  });
+
+  test("cancel: 'prev' on page 0 stays at 0 (floor)", async () => {
+    const session = await seedCancelSelect('+6583300003');
+    await engine.handleSelectAppointmentToCancelState(session, 'prev');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).cancel_appt_page).toBe(0);
+  });
+
+  test("reschedule: 'next' advances page and returns interactive list", async () => {
+    const session = await seedRescheduleSelect('+6583300004');
+    const reply = await engine.handleSelectAppointmentToRescheduleState(session, 'next');
+    expect(reply).toHaveProperty('interactive');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).reschedule_appt_page).toBe(1);
+  });
+
+  test("reschedule: 'prev' from page 1 goes to page 0", async () => {
+    const session = await seedRescheduleSelect('+6583300005', 1);
+    await engine.handleSelectAppointmentToRescheduleState(session, 'prev');
+    const updated = await db.getSession(session.id);
+    expect(JSON.parse(updated.data).reschedule_appt_page).toBe(0);
   });
 });

@@ -142,4 +142,96 @@ describe('ClinikoAPI', () => {
       expect(result).toEqual({ success: false, message: 'Failed to book appointment.' });
     });
   });
+
+  // ─── cancelSpecificAppointment ─────────────────────────────────────────────
+
+  describe('cancelSpecificAppointment()', () => {
+    let mockPatch;
+
+    beforeEach(() => {
+      mockPatch = jest.fn();
+      SendMessage.mockImplementation(() => ({ get: mockGet, post: mockPost, patch: mockPatch }));
+      api = new ClinikoAPI();
+    });
+
+    test('PATCH to correct endpoint and returns {success: true}', async () => {
+      mockPatch.mockResolvedValue({});
+
+      const result = await api.cancelSpecificAppointment('123');
+
+      expect(result).toEqual({ success: true, appointmentId: '123' });
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+      expect(mockPatch).toHaveBeenCalledWith(
+        expect.objectContaining({ cancellation_note: 'Cancelled via chatbot' })
+      );
+    });
+
+    test('does not send cancellation_reason in payload', async () => {
+      mockPatch.mockResolvedValue({});
+
+      await api.cancelSpecificAppointment('123');
+
+      const payload = mockPatch.mock.calls[0][0];
+      expect(payload).not.toHaveProperty('cancellation_reason');
+    });
+
+    test('returns {success: false} when PATCH throws', async () => {
+      mockPatch.mockRejectedValue({ status: 422, error: 'invalid' });
+
+      const result = await api.cancelSpecificAppointment('123');
+
+      expect(result.success).toBe(false);
+    });
+  });
+
+  // ─── getClinics exclusion pattern ─────────────────────────────────────────
+
+  describe('getClinics() exclusion — all PhysioFocus name variants', () => {
+    const variants = [
+      'Prohealth Physiofocus Pte Ltd',
+      'Prohealth Physio Focus',
+      'PhysioFocus Singapore',
+      'physio  focus',
+      'PHYSIOFOCUS',
+    ];
+
+    test.each(variants)('excludes clinic named "%s"', async (name) => {
+      mockGet.mockResolvedValue({ businesses: [{ id: '1', business_name: name }] });
+      const result = await api.getClinics();
+      expect(result).toHaveLength(0);
+    });
+  });
+
+  // ─── getBookingsByPatientId — single definition ────────────────────────────
+
+  describe('getBookingsByPatientId()', () => {
+    test('fetches from individual_appointments endpoint with patient_id filter', async () => {
+      SendMessage.mockClear(); // start fresh so prior test calls do not pollute
+      mockGet.mockResolvedValue({ individual_appointments: [] });
+
+      const result = await api.getBookingsByPatientId('42', { when: 'past' });
+
+      expect(Array.isArray(result)).toBe(true);
+      expect(SendMessage.mock.calls.length).toBeGreaterThan(0);
+      const urls = SendMessage.mock.calls.map(c => decodeURIComponent(String(c[0])));
+      expect(urls.some(u => u.includes('/individual_appointments') && u.includes('patient_id'))).toBe(true);
+    });
+
+    test('deduplicates active + cancelled results by id', async () => {
+      const appt = { id: 'X', starts_at: new Date().toISOString() };
+      // Active and cancelled calls both return same appointment — should appear once
+      mockGet.mockResolvedValue({ individual_appointments: [appt] });
+
+      const result = await api.getBookingsByPatientId('42', { when: 'future', statusMode: 'both' });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('X');
+    });
+
+    test('returns empty array when API throws', async () => {
+      mockGet.mockRejectedValue({ status: 500, error: 'server error' });
+      const result = await api.getBookingsByPatientId('42', { when: 'future' });
+      expect(result).toEqual([]);
+    });
+  });
 });
