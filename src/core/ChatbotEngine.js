@@ -1428,23 +1428,28 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.goToInteractiveMenu(session);
     }
     if (text === '1' || text.includes('history')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY, data: null });
+      session.data = null;
       return await this.handleBookHistory(session, '');
     }
     if (text === '2' || text.includes('soonest')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: null });
+      session.data = null;
       return await this.handleBookSoonest(session, '');
     }
     if (text === '3' || text.includes('date')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_DATE, data: null });
+      session.data = null;
       return await this.handleBookSpecificDate(session, '');
     }
     if (text === '4' || text.includes('physio')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO, data: null });
+      session.data = null;
       return await this.handleBookSpecificPhysio(session, '');
     }
     if (text === '5' || text.includes('clinic')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: null });
+      session.data = null;
       return await this.handleBookSpecificClinic(session, '');
     }
     return 'Please reply with a valid booking method (1-5).';

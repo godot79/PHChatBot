@@ -1147,6 +1147,329 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── Re-entry regression: stale data must be cleared when switching booking method ─
+  // Bug: BOOKING_METHOD_OPTIONS transitions only set conversation_state, leaving stale
+  // session.data (selection_step, no_slots_prompt, etc.) intact. On re-entry the handler
+  // would skip its INIT block and resume mid-flow using stale physio/type/clinic data.
+  describe('BOOKING_METHOD_OPTIONS — re-entry resets stale session data', () => {
+    // Stale data that looks like a previous booking attempt that hit no-slots at view_slots.
+    // Each field uses a clearly non-default value so we can assert it's NOT used on re-entry.
+    const STALE = {
+      selection_step: 'view_slots',
+      no_slots_prompt: { context: 'history' },
+      selected_physio:     { id: 'STALE-PRAC', first_name: 'Old',   last_name: 'Ghost' },
+      selected_appt_type:  { id: 'STALE-TYPE', name: 'Stale Appointment Type' },
+      selected_clinic:     { id: 'STALE-BIZ',  business_name: 'Stale Clinic Name' },
+      appointment_type_list: [{ id: 'STALE-TYPE', name: 'Stale Appointment Type' }],
+      clinic_list:           [{ id: 'STALE-BIZ',  business_name: 'Stale Clinic Name' }],
+      navigation_chain:    [{ step: 'choose_type' }],
+    };
+
+    // Two distinct physios so planForward doesn't auto-advance past the physio list.
+    const TWO_PHYSIO_MOCK = [
+      { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [
+        { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+        { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  },
+      ]},
+    ];
+    const TWO_HISTORY_APPTS = [
+      { id: 'H1', starts_at: pastISO(5),  practitioner_id: 'PRAC-001', business_id: 'BIZ-001' },
+      { id: 'H2', starts_at: pastISO(10), practitioner_id: 'PRAC-002', business_id: 'BIZ-001' },
+    ];
+
+    test('1/history — physio-history list shown fresh (getBookingsByPatientId called)', async () => {
+      engine.clinikoAPI.getBookingsByPatientId.mockResolvedValue(TWO_HISTORY_APPTS);
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIO_MOCK);
+      const session = await seedAt('BOOKING_METHOD_OPTIONS', STALE);
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '1');
+      // Stale content must not appear — flow must start fresh from the physio list
+      expect(reply).not.toMatch(/Stale/i);
+      expect(reply).not.toMatch(/no available slots/i);
+      // Fresh INIT fetched past bookings and shows the physio list
+      expect(engine.clinikoAPI.getBookingsByPatientId).toHaveBeenCalled();
+      expect(reply).toMatch(/past visits|Jolinna|Wei/i);
+    });
+
+    test('2/soonest — type list shown fresh (stale Stale Appointment Type not shown)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIO_MOCK);
+      // Two types so the list renders (doesn't auto-advance to physio then slots)
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+      ]);
+      const session = await seedAt('BOOKING_METHOD_OPTIONS', STALE);
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '2');
+      expect(reply).not.toMatch(/Stale/i);
+      expect(reply).toMatch(/Initial|Return Visit|appointment type/i);
+    });
+
+    test('3/date — type list shown fresh (stale data cleared)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIO_MOCK);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+      ]);
+      const session = await seedAt('BOOKING_METHOD_OPTIONS', STALE);
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '3');
+      expect(reply).not.toMatch(/Stale/i);
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('4/physio — physio or type list shown fresh (Old Ghost not shown)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIO_MOCK);
+      const session = await seedAt('BOOKING_METHOD_OPTIONS', STALE);
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '4');
+      expect(reply).not.toMatch(/Stale/i);
+      expect(reply).not.toMatch(/Old Ghost/i);
+      expect(reply.length).toBeGreaterThan(0);
+    });
+
+    test('5/clinic — clinic or type list shown fresh (Stale Clinic Name not shown)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIO_MOCK);
+      const session = await seedAt('BOOKING_METHOD_OPTIONS', STALE);
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, '5');
+      expect(reply).not.toMatch(/Stale/i);
+      expect(reply.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ─── BOOK_HISTORY — step-by-step flow ────────────────────────────────────────
+  describe('BOOK_HISTORY — choose_physio_from_history step', () => {
+    const TWO_PHYSIOS = [
+      { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [
+        { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+        { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  },
+      ]},
+    ];
+
+    beforeEach(() => {
+      engine.clinikoAPI.getBookingsByPatientId.mockResolvedValue([
+        { id: 'H1', starts_at: pastISO(5),  practitioner_id: 'PRAC-001', business_id: 'BIZ-001' },
+        { id: 'H2', starts_at: pastISO(10), practitioner_id: 'PRAC-002', business_id: 'BIZ-001' },
+      ]);
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIOS);
+    });
+
+    test('entry with past visits → shows physio list as interactive list', async () => {
+      const session = await seedAt('BOOK_HISTORY');
+      const reply   = await callHandler(engine, ['handleBookHistory'], session, '');
+      expect(reply).toMatch(/past visits/i);
+      expect(reply).toMatch(/Jolinna|PRAC-001/i);
+      expect(reply).toMatch(/Wei|PRAC-002/i);
+    });
+
+    test('no past visits → returns to booking method options with message', async () => {
+      engine.clinikoAPI.getBookingsByPatientId.mockResolvedValue([]);
+      const session = await seedAt('BOOK_HISTORY');
+      const reply   = await callHandler(engine, ['handleBookHistory'], session, '');
+      expect(reply).toMatch(/no prior|no past|another booking/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+
+    test('selecting physio by number → advances to choose_type step', async () => {
+      // Two non-Initial types so planForward doesn't auto-advance past the type list
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+        { id: 'AT-003', name: 'Follow Up Appointment' },
+      ]);
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: [
+          { practitioner: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }, last_seen: pastISO(5), last_clinic_id: 'BIZ-001' },
+          { practitioner: { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  }, last_seen: pastISO(10), last_clinic_id: 'BIZ-001' },
+        ],
+        navigation_chain: [],
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, '1');
+      // Type list shown after physio selection — Initial/New are filtered in history flow
+      expect(reply).toMatch(/Return Visit|Follow Up|appointment type/i);
+    });
+
+    test('out-of-range physio number → validation error', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: [
+          { practitioner: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }, last_seen: pastISO(5), last_clinic_id: 'BIZ-001' },
+        ],
+        navigation_chain: [],
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, '99');
+      expect(reply).toMatch(/invalid/i);
+    });
+
+    test('0/back from physio list → goes to BOOKING_METHOD_OPTIONS', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: [
+          { practitioner: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }, last_seen: pastISO(5), last_clinic_id: 'BIZ-001' },
+        ],
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookHistory'], session, '0');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
+  describe('BOOK_HISTORY — choose_type step', () => {
+    const physioListData = {
+      selection_step: 'choose_type',
+      selected_physio: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+      last_clinic_id: 'BIZ-001',
+      navigation_chain: [{ step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+    };
+
+    test('entry → fetches types, filters out Initial/New, shows remaining types', async () => {
+      // Two non-Initial types so the list renders without auto-advancing
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+        { id: 'AT-003', name: 'Follow Up Appointment' },
+      ]);
+      const session = await seedAt('BOOK_HISTORY', physioListData);
+      const reply   = await callHandler(engine, ['handleBookHistory'], session, '');
+      // "Initial" is excluded from history flow; both non-Initial types appear
+      expect(reply).not.toMatch(/Initial/i);
+      expect(reply).toMatch(/Return Visit/i);
+      expect(reply).toMatch(/Follow Up/i);
+    });
+
+    test('selecting type by number → advances to choose_clinic', async () => {
+      // Two clinics for PRAC-001 so planForward stops at clinic selection
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [
+          { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+        ]},
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City', practitioners: [
+          { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+        ]},
+      ]);
+      const session = await seedAt('BOOK_HISTORY', {
+        ...physioListData,
+        appointment_type_list: [
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)', norm_name: 'return visit (existing clients)', ids: ['AT-002'] },
+          { id: 'AT-003', name: 'Follow Up Appointment', norm_name: 'follow up appointment', ids: ['AT-003'] },
+        ],
+        appt_type_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, '1');
+      expect(reply).toMatch(/clinic|Prohealth/i);
+    });
+
+    test('m/more increments page and re-renders list', async () => {
+      const manyTypes = Array.from({ length: 8 }, (_, i) => ({
+        id: `AT-${i}`, name: `Type ${i + 1}`, norm_name: `type ${i + 1}`, ids: [`AT-${i}`]
+      }));
+      const session = await seedAt('BOOK_HISTORY', {
+        ...physioListData,
+        appointment_type_list: manyTypes,
+        appt_type_page: 0,
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, 'm');
+      const updated = await db.getSession(session.id);
+      expect(JSON.parse(updated.data || '{}').appt_type_page).toBe(1);
+    });
+
+    test('p/prev decrements page (stops at 0)', async () => {
+      const manyTypes = Array.from({ length: 8 }, (_, i) => ({
+        id: `AT-${i}`, name: `Type ${i + 1}`, norm_name: `type ${i + 1}`, ids: [`AT-${i}`]
+      }));
+      const session = await seedAt('BOOK_HISTORY', {
+        ...physioListData,
+        appointment_type_list: manyTypes,
+        appt_type_page: 1,
+      });
+      await callHandler(engine, ['handleBookHistory'], session, 'p');
+      const updated = await db.getSession(session.id);
+      expect(JSON.parse(updated.data || '{}').appt_type_page).toBe(0);
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_DATE ───────────────────────────────────────────────────────
+  describe('BOOK_SPECIFIC_DATE — entry and navigation', () => {
+    test('entry → shows date picker (date is selected first in this flow)', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE');
+      const reply   = await callHandler(engine, ['handleBookSpecificDate'], session, '');
+      // BOOK_SPECIFIC_DATE starts by asking for a date, not a type
+      expect(reply).toMatch(/date|Pick/i);
+    });
+
+    test('0/back from date picker → goes to BOOKING_METHOD_OPTIONS', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSpecificDate'], session, '0');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+
+    test('0/back from choose_type → returns to date picker', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        appointment_type_list: [{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)', ids: ['AT-001'] }],
+        appt_type_page: 0,
+        selected_date: '2026-08-01',
+        navigation_chain: [{ step: 'choose_date', had_multiple_options: true, auto: false }],
+      });
+      const reply = await callHandler(engine, ['handleBookSpecificDate'], session, '0');
+      expect(reply).toMatch(/date|Pick/i);
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_PHYSIO ─────────────────────────────────────────────────────
+  describe('BOOK_SPECIFIC_PHYSIO — entry and physio selection', () => {
+    test('entry with multiple physios → shows physio list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [
+          { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+          { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  },
+        ]},
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const reply   = await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+      expect(reply).toMatch(/Jolinna|Wei|physio|practitioner/i);
+    });
+
+    test('0/back from physio list → goes to BOOKING_METHOD_OPTIONS', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_physio',
+        practitioner_list: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '0');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_CLINIC ─────────────────────────────────────────────────────
+  describe('BOOK_SPECIFIC_CLINIC — entry and clinic selection', () => {
+    test('entry with multiple clinics → shows clinic list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City',     practitioners: [{ id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  }] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC');
+      const reply   = await callHandler(engine, ['handleBookSpecificClinic'], session, '');
+      expect(reply).toMatch(/Prohealth|clinic/i);
+    });
+
+    test('0/back from clinic list → goes to BOOKING_METHOD_OPTIONS', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_clinic',
+        clinic_list: [{ id: 'BIZ-001', business_name: 'Prohealth In Touch' }],
+        clinic_page: 0,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSpecificClinic'], session, '0');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
   // ─── BOOK_SOONEST — choose_type ──────────────────────────────────────────────
   describe('BOOK_SOONEST — choose_type', () => {
     test('entry with multiple types → renders type list', async () => {
