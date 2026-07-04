@@ -1162,7 +1162,7 @@ describe('Booking menu and flow coverage', () => {
       selected_clinic:     { id: 'STALE-BIZ',  business_name: 'Stale Clinic Name' },
       appointment_type_list: [{ id: 'STALE-TYPE', name: 'Stale Appointment Type' }],
       clinic_list:           [{ id: 'STALE-BIZ',  business_name: 'Stale Clinic Name' }],
-      navigation_chain:    [{ step: 'choose_type' }],
+      navigation_chain:    [{ selection_step: 'choose_type' }],
     };
 
     // Two distinct physios so planForward doesn't auto-advance past the physio list.
@@ -1317,7 +1317,7 @@ describe('Booking menu and flow coverage', () => {
       selection_step: 'choose_type',
       selected_physio: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
       last_clinic_id: 'BIZ-001',
-      navigation_chain: [{ step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
     };
 
     test('entry → fetches types, filters out Initial/New, shows remaining types', async () => {
@@ -1357,32 +1357,58 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/clinic|Prohealth/i);
     });
 
-    test('m/more increments page and re-renders list', async () => {
+    test("'next' interactive id increments page (same as typing 'm')", async () => {
       const manyTypes = Array.from({ length: 8 }, (_, i) => ({
         id: `AT-${i}`, name: `Type ${i + 1}`, norm_name: `type ${i + 1}`, ids: [`AT-${i}`]
       }));
-      const session = await seedAt('BOOK_HISTORY', {
-        ...physioListData,
-        appointment_type_list: manyTypes,
-        appt_type_page: 0,
-      });
-      const reply = await callHandler(engine, ['handleBookHistory'], session, 'm');
-      const updated = await db.getSession(session.id);
-      expect(JSON.parse(updated.data || '{}').appt_type_page).toBe(1);
+      const sm = await seedAt('BOOK_HISTORY', { ...physioListData, appointment_type_list: manyTypes, appt_type_page: 0 });
+      const sn = await seedAt('BOOK_HISTORY', { ...physioListData, appointment_type_list: manyTypes, appt_type_page: 0 });
+      await callHandler(engine, ['handleBookHistory'], sm, 'm');
+      await callHandler(engine, ['handleBookHistory'], sn, 'next');
+      expect(JSON.parse((await db.getSession(sm.id)).data || '{}').appt_type_page).toBe(1);
+      expect(JSON.parse((await db.getSession(sn.id)).data || '{}').appt_type_page).toBe(1);
     });
 
-    test('p/prev decrements page (stops at 0)', async () => {
+    test("'prev' interactive id decrements page (same as typing 'p')", async () => {
       const manyTypes = Array.from({ length: 8 }, (_, i) => ({
         id: `AT-${i}`, name: `Type ${i + 1}`, norm_name: `type ${i + 1}`, ids: [`AT-${i}`]
       }));
-      const session = await seedAt('BOOK_HISTORY', {
+      const sp = await seedAt('BOOK_HISTORY', { ...physioListData, appointment_type_list: manyTypes, appt_type_page: 1 });
+      const sv = await seedAt('BOOK_HISTORY', { ...physioListData, appointment_type_list: manyTypes, appt_type_page: 1 });
+      await callHandler(engine, ['handleBookHistory'], sp, 'p');
+      await callHandler(engine, ['handleBookHistory'], sv, 'prev');
+      expect(JSON.parse((await db.getSession(sp.id)).data || '{}').appt_type_page).toBe(0);
+      expect(JSON.parse((await db.getSession(sv.id)).data || '{}').appt_type_page).toBe(0);
+    });
+
+    test("'back' interactive id from choose_type → same contextual back as typing '0'", async () => {
+      const manyTypes = Array.from({ length: 8 }, (_, i) => ({
+        id: `AT-${i}`, name: `Type ${i + 1}`, norm_name: `type ${i + 1}`, ids: [`AT-${i}`]
+      }));
+      const s0 = await seedAt('BOOK_HISTORY', {
         ...physioListData,
-        appointment_type_list: manyTypes,
-        appt_type_page: 1,
+        appointment_type_list: manyTypes, appt_type_page: 0,
+        // navigation_chain has a prior step so navBack returns to physio list
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+        history_physio_list: [
+          { practitioner: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }, last_seen: pastISO(5), last_clinic_id: 'BIZ-001' },
+          { practitioner: { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  }, last_seen: pastISO(10), last_clinic_id: 'BIZ-001' },
+        ],
       });
-      await callHandler(engine, ['handleBookHistory'], session, 'p');
-      const updated = await db.getSession(session.id);
-      expect(JSON.parse(updated.data || '{}').appt_type_page).toBe(0);
+      const sb = await seedAt('BOOK_HISTORY', {
+        ...physioListData,
+        appointment_type_list: manyTypes, appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+        history_physio_list: [
+          { practitioner: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }, last_seen: pastISO(5), last_clinic_id: 'BIZ-001' },
+          { practitioner: { id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  }, last_seen: pastISO(10), last_clinic_id: 'BIZ-001' },
+        ],
+      });
+      const reply0 = await callHandler(engine, ['handleBookHistory'], s0, '0');
+      const replyB = await callHandler(engine, ['handleBookHistory'], sb, 'back');
+      // Both step back to the physio list
+      expect(reply0).toMatch(/Jolinna|Wei|past visits/i);
+      expect(replyB).toMatch(/Jolinna|Wei|past visits/i);
     });
   });
 
@@ -1405,21 +1431,43 @@ describe('Booking menu and flow coverage', () => {
       expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
     });
 
-    test('0/back from choose_type → returns to date picker', async () => {
-      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+    // Interactive list 'back' id must do the same contextual step-back as typing '0',
+    // not the full exit that 'menu' does. This covers the bug where tapping "← Back"
+    // in choose_type jumped to BOOKING_METHOD_OPTIONS instead of the date picker.
+    test("interactive 'back' id from choose_type → returns to date picker (same as typing '0')", async () => {
+      const typeListData = {
         selection_step: 'choose_type',
         appointment_type_list: [{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)', ids: ['AT-001'] }],
         appt_type_page: 0,
         selected_date: '2026-08-01',
-        navigation_chain: [{ step: 'choose_date', had_multiple_options: true, auto: false }],
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+      };
+      const s0 = await seedAt('BOOK_SPECIFIC_DATE', typeListData);
+      const s1 = await seedAt('BOOK_SPECIFIC_DATE', typeListData);
+      const replyText = await callHandler(engine, ['handleBookSpecificDate'], s0, '0');
+      const replyBack = await callHandler(engine, ['handleBookSpecificDate'], s1, 'back');
+      // Both must return the date picker, not the booking method menu
+      expect(replyText).toMatch(/date|Pick/i);
+      expect(replyBack).toMatch(/date|Pick/i);
+      const u0 = await db.getSession(s0.id);
+      const u1 = await db.getSession(s1.id);
+      expect(u0.conversation_state).toBe('BOOK_SPECIFIC_DATE');
+      expect(u1.conversation_state).toBe('BOOK_SPECIFIC_DATE');
+    });
+
+    test("'menu' from any step → full exit to BOOKING_METHOD_OPTIONS", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
       });
-      const reply = await callHandler(engine, ['handleBookSpecificDate'], session, '0');
-      expect(reply).toMatch(/date|Pick/i);
+      await callHandler(engine, ['handleBookSpecificDate'], session, 'menu');
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
     });
   });
 
   // ─── BOOK_SPECIFIC_PHYSIO ─────────────────────────────────────────────────────
-  describe('BOOK_SPECIFIC_PHYSIO — entry and physio selection', () => {
+  describe('BOOK_SPECIFIC_PHYSIO — entry and back navigation', () => {
     test('entry with multiple physios → shows physio list', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [
@@ -1432,7 +1480,31 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/Jolinna|Wei|physio|practitioner/i);
     });
 
-    test('0/back from physio list → goes to BOOKING_METHOD_OPTIONS', async () => {
+    test("interactive 'back' id from choose_type → returns to physio list (same as typing '0')", async () => {
+      const typeStepData = {
+        selection_step: 'choose_type',
+        selected_physio: { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit', norm_name: 'initial 60 min visit', ids: ['AT-001'] },
+          { id: 'AT-002', name: 'Return Visit',         norm_name: 'return visit',          ids: ['AT-002'] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      };
+      const s0 = await seedAt('BOOK_SPECIFIC_PHYSIO', typeStepData);
+      const s1 = await seedAt('BOOK_SPECIFIC_PHYSIO', typeStepData);
+      const replyText = await callHandler(engine, ['handleBookSpecificPhysio'], s0, '0');
+      const replyBack = await callHandler(engine, ['handleBookSpecificPhysio'], s1, 'back');
+      // Both must step back to physio list, not exit to booking method menu
+      expect(replyText).toMatch(/physio|Jolinna|Annika|practitioner/i);
+      expect(replyBack).toMatch(/physio|Jolinna|Annika|practitioner/i);
+      const u0 = await db.getSession(s0.id);
+      const u1 = await db.getSession(s1.id);
+      expect(u0.conversation_state).toBe('BOOK_SPECIFIC_PHYSIO');
+      expect(u1.conversation_state).toBe('BOOK_SPECIFIC_PHYSIO');
+    });
+
+    test("'0' from physio list (no prior step) → exits to BOOKING_METHOD_OPTIONS", async () => {
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
         selection_step: 'choose_physio',
         practitioner_list: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }],
@@ -1446,7 +1518,7 @@ describe('Booking menu and flow coverage', () => {
   });
 
   // ─── BOOK_SPECIFIC_CLINIC ─────────────────────────────────────────────────────
-  describe('BOOK_SPECIFIC_CLINIC — entry and clinic selection', () => {
+  describe('BOOK_SPECIFIC_CLINIC — entry and back navigation', () => {
     test('entry with multiple clinics → shows clinic list', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
@@ -1457,7 +1529,31 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/Prohealth|clinic/i);
     });
 
-    test('0/back from clinic list → goes to BOOKING_METHOD_OPTIONS', async () => {
+    test("interactive 'back' id from choose_type → returns to clinic list (same as typing '0')", async () => {
+      const typeStepData = {
+        selection_step: 'choose_type',
+        selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth In Touch' },
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit', norm_name: 'initial 60 min visit', ids: ['AT-001'] },
+          { id: 'AT-002', name: 'Return Visit',         norm_name: 'return visit',          ids: ['AT-002'] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      };
+      const s0 = await seedAt('BOOK_SPECIFIC_CLINIC', typeStepData);
+      const s1 = await seedAt('BOOK_SPECIFIC_CLINIC', typeStepData);
+      const replyText = await callHandler(engine, ['handleBookSpecificClinic'], s0, '0');
+      const replyBack = await callHandler(engine, ['handleBookSpecificClinic'], s1, 'back');
+      // Both must step back to clinic list, not exit to booking method menu
+      expect(replyText).toMatch(/clinic|Prohealth/i);
+      expect(replyBack).toMatch(/clinic|Prohealth/i);
+      const u0 = await db.getSession(s0.id);
+      const u1 = await db.getSession(s1.id);
+      expect(u0.conversation_state).toBe('BOOK_SPECIFIC_CLINIC');
+      expect(u1.conversation_state).toBe('BOOK_SPECIFIC_CLINIC');
+    });
+
+    test("'0' from clinic list (no prior step) → exits to BOOKING_METHOD_OPTIONS", async () => {
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
         selection_step: 'choose_clinic',
         clinic_list: [{ id: 'BIZ-001', business_name: 'Prohealth In Touch' }],

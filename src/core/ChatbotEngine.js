@@ -2444,11 +2444,12 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // ----- global back/menu -----
-    if (text === 'back' || text === 'menu') {
+    // 'back' (interactive list id) behaves like '0' (contextual step-back), not like 'menu' (full exit).
+    if (text === 'menu') {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
       return await this.goToInteractiveMenu(session);
     }
-    if (text === '0' && data.selection_step && data.selection_step !== 'choose_date') {
+    if ((text === '0' || text === 'back') && data.selection_step && data.selection_step !== 'choose_date') {
       const current = data.selection_step;
       const { step, popped } = typeof navBack === 'function' ? navBack(data) : { step: null };
       if (step && step !== current) {
@@ -2789,11 +2790,12 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // ---------- global back/menu ----------
-    if (text === 'back' || text === 'menu') {
+    // 'back' (interactive list id) behaves like '0' (contextual step-back), not like 'menu' (full exit).
+    if (text === 'menu') {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
       return await this.goToInteractiveMenu(session);
     }
-    if (text === '0' && data.selection_step) {
+    if ((text === '0' || text === 'back') && data.selection_step) {
       const current = data.selection_step;
       const { step, popped } = typeof navBack === 'function' ? navBack(data) : { step: null };
       if (step && step !== current) {
@@ -3055,11 +3057,12 @@ if (/^p(rev)?$/i.test(text)) {
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
 
     // ---------- Back/Menu ----------
-    if (text === 'back' || text === 'menu') {
+    // 'back' (interactive list id) behaves like '0' (contextual step-back), not like 'menu' (full exit).
+    if (text === 'menu') {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
       return await this.goToInteractiveMenu(session);
     }
-    if (text === '0' && data.selection_step) {
+    if ((text === '0' || text === 'back') && data.selection_step) {
       const current = data.selection_step;
       const { step, popped } = typeof navBack === 'function' ? navBack(data) : { step: null };
       if (step && step !== current) {
