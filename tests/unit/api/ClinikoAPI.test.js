@@ -166,13 +166,13 @@ describe('ClinikoAPI', () => {
       );
     });
 
-    test('does not send cancellation_reason in payload', async () => {
+    test('sends cancellation_reason in payload', async () => {
       mockPatch.mockResolvedValue({});
 
       await api.cancelSpecificAppointment('123');
 
       const payload = mockPatch.mock.calls[0][0];
-      expect(payload).not.toHaveProperty('cancellation_reason');
+      expect(payload).toHaveProperty('cancellation_reason', 50);
     });
 
     test('returns {success: false} when PATCH throws', async () => {

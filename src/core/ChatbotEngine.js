@@ -46,8 +46,8 @@ function getMailerConfig() {
 const WHATSAPP_MAX_MESSAGE_LENGTH = 4096;
 const WHATSAPP_SAFE_REPLY_LENGTH = 3500;
 const MAX_SLOT_ITEMS = 10;
-const SLOT_LIST_PAGE_FIRST = 9;  // slots on page 0 (no prev row needed)
-const SLOT_LIST_PAGE_REST  = 8;  // slots on page 1+ (prev row takes one row budget)
+const SLOT_LIST_PAGE_FIRST = 8;  // page 0: up to 8 slots + next + back = 10 rows max
+const SLOT_LIST_PAGE_REST  = 7;  // page 1+: up to 7 slots + prev + next + back = 10 rows max
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 // Interactive selection list page sizes — kept small so the Send button stays
@@ -77,10 +77,12 @@ const REGION_TZ = {
  */
 function normalizeTypeName(s) {
   return String(s || '')
-    .replace(/\s+/g, ' ')           // collapse multiple spaces
-    .replace(/([A-Za-z])\(/g, '$1 (') // add space before '('
-    .replace(/\s+\)/g, ')')        // remove space before ')'
-    .replace(/[\u2010-\u2015]/g, '-') // normalize dashes
+    .replace(/\s+/g, ' ')
+    .replace(/([A-Za-z])\(/g, '$1 (')
+    .replace(/\s+\)/g, ')')
+    .replace(/[\u2010-\u2015]/g, '-') // Unicode dashes \u2192 ASCII hyphen
+    .replace(/-/g, ' ')               // hyphens \u2192 spaces so "Follow-Up" === "Follow Up"
+    .replace(/\s+/g, ' ')             // collapse any new consecutive spaces
     .toLowerCase()
     .trim();
 }
@@ -349,8 +351,9 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
 async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   const normalize = (s) => String(s || '')
     .toLowerCase()
-    .replace(/[\u2010-\u2015]/g, '-') // normalize dashes
-    .replace(/\s+/g, ' ')              // collapse spaces
+    .replace(/[\u2010-\u2015]/g, '-') // Unicode dashes \u2192 ASCII hyphen
+    .replace(/-/g, ' ')               // hyphens \u2192 spaces (same as normalizeTypeName)
+    .replace(/\s+/g, ' ')
     .trim();
 
   const target = normalize(apptTypeName);
@@ -943,25 +946,22 @@ class ChatbotEngine {
     }
 
     if (session.verified) {
-      const body =
-        `${region}What would you like to do?\n\n` +
-        `Type "region" to change region.`;
+      const body = `${region}What would you like to do?`;
       return list(body, 'Select option', [
-        { id: '1', title: 'Book Appointment' },
-        { id: '2', title: 'Cancel Appointment' },
-        { id: '3', title: 'Reschedule' },
-        { id: '9', title: 'Logout & Delete My Data' },
+        { id: '1',      title: 'Book Appointment' },
+        { id: '2',      title: 'Cancel Appointment' },
+        { id: '3',      title: 'Reschedule' },
+        { id: 'region', title: 'Change Region' },
+        { id: '9',      title: 'Logout & Delete My Data' },
       ]);
     } else {
-      const body =
-        `👋 *Welcome to ProHealthAsia*\n\n` +
-        `${region}Please select an option:\n\n` +
-        `Type "region" anytime to change region.`;
+      const body = `👋 *Welcome to ProHealthAsia*\n\n${region}Please select an option:`;
       return list(body, 'Select option', [
-        { id: '1', title: 'Book or Manage' },
-        { id: '2', title: 'View Fees' },
-        { id: '3', title: 'View Locations' },
-        { id: '4', title: 'Register' }
+        { id: '1',      title: 'Book or Manage' },
+        { id: '2',      title: 'View Fees' },
+        { id: '3',      title: 'View Locations' },
+        { id: '4',      title: 'Register' },
+        { id: 'region', title: 'Change Region' },
       ]);
     }
   }
@@ -3638,19 +3638,15 @@ if (/^p(rev)?$/i.test(text)) {
           this.logger.error('[Booking] Confirmation email send failed', { error: e?.message || e, sessionId: session.id });
         }
         // --- Debug: Booking success, show enriched details ---
-        return (
+        const successText =
           `✅ Your appointment is booked for:\n` +
           `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
           `🏥 *${enrichedSlot._business_display || ''}*\n` +
-          `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}\n\n` +
-          await this.goToInteractiveMenu(session)
-        );
+          `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`;
+        return [successText, await this.goToInteractiveMenu(session)];
       } else {
         // --- Debug: Booking failed, show error message ---
-        return (
-          `❌ Could not book your appointment. ${result.message || ''}\n\n` +
-          await this.goToInteractiveMenu(session)
-        );
+        return [`❌ Could not book your appointment. ${result.message || ''}`, await this.goToInteractiveMenu(session)];
       }
     }
 

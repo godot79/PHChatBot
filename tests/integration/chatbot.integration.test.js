@@ -2602,25 +2602,25 @@ describe('Slot list interactive', () => {
     expect(engine._slotPageStart(0)).toBe(0);
   });
 
-  test('_slotPageStart: page 1 starts at index 9 (after page 0 with 9 slots)', () => {
-    expect(engine._slotPageStart(1)).toBe(9);
+  test('_slotPageStart: page 1 starts at index 8 (after page 0 with 8 slots)', () => {
+    expect(engine._slotPageStart(1)).toBe(8);
   });
 
-  test('_slotPageStart: page 2 starts at index 17 (9 + 8)', () => {
-    expect(engine._slotPageStart(2)).toBe(17);
+  test('_slotPageStart: page 2 starts at index 15 (8 + 7)', () => {
+    expect(engine._slotPageStart(2)).toBe(15);
   });
 
-  test('_slotPageStart: page 3 starts at index 25 (9 + 8 + 8)', () => {
-    expect(engine._slotPageStart(3)).toBe(25);
+  test('_slotPageStart: page 3 starts at index 22 (8 + 7 + 7)', () => {
+    expect(engine._slotPageStart(3)).toBe(22);
   });
 
-  test('_slotPageCount: page 0 holds 9 slots', () => {
-    expect(engine._slotPageCount(0)).toBe(9);
+  test('_slotPageCount: page 0 holds 8 slots', () => {
+    expect(engine._slotPageCount(0)).toBe(8);
   });
 
-  test('_slotPageCount: page 1+ holds 8 slots', () => {
-    expect(engine._slotPageCount(1)).toBe(8);
-    expect(engine._slotPageCount(2)).toBe(8);
+  test('_slotPageCount: page 1+ holds 7 slots', () => {
+    expect(engine._slotPageCount(1)).toBe(7);
+    expect(engine._slotPageCount(2)).toBe(7);
   });
 
   // ─── _buildSlotList structure ─────────────────────────────────────────────────
@@ -2643,56 +2643,56 @@ describe('Slot list interactive', () => {
     expect(rows[2].id).toBe('3');
   });
 
-  test('_buildSlotList page 0, 9 slots with no overflow: no prev row, no next row, has back row', () => {
-    const slots = makeSlots(9);
+  test('_buildSlotList page 0, 8 slots with no overflow: no prev row, no next row, has back row', () => {
+    const slots = makeSlots(8);
     const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    // 9 slots + back = 10
-    expect(rows).toHaveLength(10);
+    // 8 slots + back = 9 rows (within WhatsApp 10-row limit)
+    expect(rows).toHaveLength(9);
     expect(rows.map(r => r.id)).not.toContain('prev');
     expect(rows.map(r => r.id)).not.toContain('next');
     expect(rows[rows.length - 1].id).toBe('back');
   });
 
-  test('_buildSlotList page 0, 10+ slots: no prev row, has next row, has back row as last', () => {
-    const slots = makeSlots(10);
+  test('_buildSlotList page 0, 9+ slots: no prev row, has next row, has back row as last', () => {
+    const slots = makeSlots(9);
     const result = engine._buildSlotList(slots, 0, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    // 9 slots + next + back = 11 rows
-    expect(rows).toHaveLength(11);
+    // 8 slots + next + back = 10 rows (exactly at WhatsApp limit)
+    expect(rows).toHaveLength(10);
     expect(rows.map(r => r.id)).not.toContain('prev');
     expect(rows.map(r => r.id)).toContain('next');
     expect(rows[rows.length - 1].id).toBe('back');
-    // Only 9 slot rows (IDs 1–9)
+    // Only 8 slot rows (IDs 1–8)
     const slotRows = rows.filter(r => !['next', 'prev', 'back'].includes(r.id));
-    expect(slotRows).toHaveLength(9);
-    expect(slotRows[8].id).toBe('9');
+    expect(slotRows).toHaveLength(8);
+    expect(slotRows[7].id).toBe('8');
   });
 
-  test('_buildSlotList page 1: has prev row, IDs continue from 10', () => {
-    const slots = makeSlots(17);
+  test('_buildSlotList page 1: has prev row, IDs continue from 9', () => {
+    const slots = makeSlots(16);
     const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
     const slotRows = rows.filter(r => !['prev', 'next', 'back'].includes(r.id));
-    // page 1 start = 9, shows slots 9–16 (IDs 10–17)
-    expect(slotRows[0].id).toBe('10');
-    expect(slotRows[slotRows.length - 1].id).toBe('17');
+    // page 1 start = 8, shows slots 8–14 (IDs 9–15)
+    expect(slotRows[0].id).toBe('9');
+    expect(slotRows[slotRows.length - 1].id).toBe('15');
     expect(rows.map(r => r.id)).toContain('prev');
     expect(rows[rows.length - 1].id).toBe('back');
   });
 
-  test('_buildSlotList page 1 with more: prev + next + back all present, total rows = 11', () => {
-    const slots = makeSlots(18); // 9 on page0, 8 on page1, 1 on page2 → page1 has next
+  test('_buildSlotList page 1 with more: prev + next + back all present, total rows = 10', () => {
+    const slots = makeSlots(16); // 8 on page0, 7 on page1, 1 on page2 → page1 has next
     const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
-    expect(rows).toHaveLength(11); // 8 slots + prev + next + back
+    expect(rows).toHaveLength(10); // 7 slots + prev + next + back (exactly at WhatsApp limit)
     expect(rows.map(r => r.id)).toContain('prev');
     expect(rows.map(r => r.id)).toContain('next');
     expect(rows.map(r => r.id)).toContain('back');
   });
 
   test('_buildSlotList last page (page 1, no more): has prev, no next', () => {
-    const slots = makeSlots(12); // page0=9, page1=3 slots, no more
+    const slots = makeSlots(12); // page0=8, page1=4 slots, no more
     const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
     const rows = result.interactive.action.sections[0].rows;
     expect(rows.map(r => r.id)).toContain('prev');
@@ -2703,8 +2703,8 @@ describe('Slot list interactive', () => {
     const slots = makeSlots(10);
     const result = engine._buildSlotList(slots, 1, 'Pick a slot', 'Asia/Singapore');
     const text = String(result);
-    // Page 1 starts at index 9; first slot should be labeled 10
-    expect(text).toMatch(/^10\./m);
+    // Page 1 starts at index 8; first slot should be labeled 9
+    expect(text).toMatch(/^9\./m);
   });
 
   test('_buildSlotList text fallback shows M/P nav labels, not next/prev IDs', () => {
@@ -2778,14 +2778,14 @@ describe('Slot list interactive', () => {
     expect(data.selected_slot.id).toBe('SLOT-1');
   });
 
-  test('selecting slot 9 on page 0 (last on page) → CONFIRM_BOOKING with correct slot', async () => {
-    const slots = makeSlots(10);
+  test('selecting slot 8 on page 0 (last on page) → CONFIRM_BOOKING with correct slot', async () => {
+    const slots = makeSlots(9);
     const session = await seedAt('SELECT_SLOT', baseSlotSession(slots));
-    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '9');
+    const reply = await callHandler(engine, ['handleSelectSlotState'], session, '8');
     expect(reply).toMatch(/confirm booking|you have selected/i);
     const updated = await db.getSession(session.id);
     const data = JSON.parse(updated.data);
-    expect(data.selected_slot.id).toBe('SLOT-9');
+    expect(data.selected_slot.id).toBe('SLOT-8');
   });
 
   test('selecting slot by page-1 global ID ("10") on page 1 → CONFIRM_BOOKING with correct slot', async () => {
@@ -2802,7 +2802,7 @@ describe('Slot list interactive', () => {
   test('page-0 slot ID typed while on page 1 → validation error (page-scoped)', async () => {
     const slots = makeSlots(12);
     const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
-    // Typing "1" while on page 1 (page 1 expects global IDs 10-17)
+    // Typing "1" while on page 1 (page 1 expects global IDs 9-12 for 12-slot list)
     const reply = await callHandler(engine, ['handleSelectSlotState'], session, '1');
     expect(String(reply)).toMatch(/invalid slot/i);
   });
@@ -2810,7 +2810,7 @@ describe('Slot list interactive', () => {
   test('out-of-range ID on page 1 → validation error', async () => {
     const slots = makeSlots(12);
     const session = await seedAt('SELECT_SLOT', baseSlotSession(slots, { slot_page: 1 }));
-    // page 1 shows slots 10-12 (only 3 remaining), so "17" is out of range
+    // page 1 shows slots 9-12 (only 4 remaining), so "17" is out of range
     const reply = await callHandler(engine, ['handleSelectSlotState'], session, '17');
     expect(String(reply)).toMatch(/invalid slot/i);
   });
@@ -3528,5 +3528,476 @@ describe('L3 regression — cancel/reschedule appointment list pagination', () =
     await engine.handleSelectAppointmentToRescheduleState(session, 'prev');
     const updated = await db.getSession(session.id);
     expect(JSON.parse(updated.data).reschedule_appt_page).toBe(0);
+  });
+});
+
+// =============================================================================
+// Bug-fix regression: appointment type normalisation — hyphen variants merge
+// Covers the production bug where "Follow Up Appointment" and
+// "Follow-Up Appointment" were shown as separate items; picking one would
+// never match slots belonging to the other.
+// =============================================================================
+
+// ── helpers shared across the 4 normalisation suites ─────────────────────────
+const HYPHEN_TYPES_FU = [
+  { id: 'AT-FU1', name: 'Follow Up Appointment' },
+  { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+];
+const HYPHEN_SLOT_FU = {
+  id: 'SL-FU', slot: futureISO(2),
+  appointment_type_id: 'AT-FU2',
+  appointment_type_name: 'Follow-Up Appointment',   // hyphenated variant in Cliniko
+  practitioner_id: 'PRAC-001', business_id: 'BIZ-001',
+  business_name: 'Prohealth HK', practitioner_name: 'Greg Smith',
+};
+const HYPHEN_SLOT_FU_MERGED = { name: 'Follow Up Appointment', ids: ['AT-FU1', 'AT-FU2'] };
+
+// =============================================================================
+describe('Appointment type normalisation — BOOK_HISTORY hyphen variants merge into one list item', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  const PHYSIO_DATA = {
+    selection_step: 'choose_type',
+    selected_physio: { id: 'PRAC-001', first_name: 'Greg', last_name: 'Smith' },
+    last_clinic_id: 'BIZ-001',
+    navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+  };
+
+  async function seedHistoryAt(phone, extra = {}) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_HISTORY',
+      context: JSON.stringify({ region: 'HK' }),
+      data: JSON.stringify({ ...PHYSIO_DATA, ...extra }),
+    });
+    return db.getSession(id);
+  }
+
+  test('Cliniko types "Follow Up Appointment" and "Follow-Up Appointment" are deduplicated into one list item', async () => {
+    // Cliniko returns two types that differ only in hyphen — they should merge.
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU1', name: 'Follow Up Appointment' },
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+    ]);
+    const session = await seedHistoryAt('+85290000001');
+    await callHandler(engine, ['handleBookHistory'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    const list = saved.appointment_type_list || [];
+
+    // Both types share the same normalised key → ONE merged item, not two.
+    expect(list).toHaveLength(1);
+    // The merged item's ids set contains both Cliniko type IDs.
+    expect(list[0].ids).toContain('AT-FU1');
+    expect(list[0].ids).toContain('AT-FU2');
+  });
+
+  test('"New Patient-Sports Massage" and "New Patient Sports Massage" also merge', async () => {
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-NP1', name: 'New Patient-Sports Massage Therapy' },
+      { id: 'AT-NP2', name: 'New Patient Sports Massage Therapy' },
+    ]);
+    const session = await seedHistoryAt('+85290000002');
+    await callHandler(engine, ['handleBookHistory'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    const list = saved.appointment_type_list || [];
+
+    // Filter out any Initial/New-client types if the engine strips them — but
+    // these two are the same type and must merge regardless.
+    // (Engine does NOT strip "New Patient" — only "initial" and "new client".)
+    expect(list).toHaveLength(1);
+    expect(list[0].ids).toContain('AT-NP1');
+    expect(list[0].ids).toContain('AT-NP2');
+  });
+
+  test('hyphen-variant types with different meanings stay separate', async () => {
+    // "Follow Up Appointment" vs "Follow Up Appointment-Physiotherapy" differ
+    // after normalisation ("follow up appointment" vs "follow up appointment physiotherapy").
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU1', name: 'Follow Up Appointment' },
+      { id: 'AT-FU3', name: 'Follow Up Appointment-Physiotherapy' },
+    ]);
+    const session = await seedHistoryAt('+85290000003');
+    await callHandler(engine, ['handleBookHistory'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    const list = saved.appointment_type_list || [];
+
+    expect(list).toHaveLength(2);
+    const ids = list.flatMap(item => item.ids);
+    expect(ids).toContain('AT-FU1');
+    expect(ids).toContain('AT-FU3');
+  });
+
+  test('slot filter matches "Follow-Up Appointment" slots when user selected "Follow Up Appointment"', async () => {
+    // The merged appointment_type_list entry covers both IDs.
+    // getAvailableSlotsByBusinessAndDate returns slots with appointment_type_name
+    // "Follow-Up Appointment" (with hyphen).  The filter must find them.
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-001', clinic_name: 'Prohealth HK', practitioners: [
+        { id: 'PRAC-001', first_name: 'Greg', last_name: 'Smith' }
+      ]},
+    ]);
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([
+      {
+        id: 'SL-HK-01',
+        slot: futureISO(2),
+        appointment_type_id: 'AT-FU2',
+        appointment_type_name: 'Follow-Up Appointment',   // hyphenated variant
+        practitioner_id: 'PRAC-001',
+        business_id: 'BIZ-001',
+        business_name: 'Prohealth HK',
+        practitioner_name: 'Greg Smith',
+      },
+    ]);
+
+    // Pre-populate appointment_type_list with the MERGED entry (both IDs, no-hyphen display name).
+    const session = await seedHistoryAt('+85290000004', {
+      selection_step: 'view_slots',
+      selected_physio: { id: 'PRAC-001', first_name: 'Greg', last_name: 'Smith' },
+      selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth HK' },
+      // The merged entry: display name "Follow Up Appointment" but ids covers both variants.
+      selected_appt_type: { name: 'Follow Up Appointment', norm_name: 'follow up appointment', ids: ['AT-FU1', 'AT-FU2'] },
+      navigation_chain: [
+        { selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_clinic', had_multiple_options: false, auto: true },
+      ],
+    });
+
+    const reply = await callHandler(engine, ['handleBookHistory'], session, '');
+
+    // Should show slots (not the no-slots prompt).
+    const str = String(reply);
+    expect(str).not.toMatch(/no available slots/i);
+    expect(str).not.toMatch(/or message us/i);
+  });
+});
+
+// =============================================================================
+describe('Appointment type normalisation — BOOK_SOONEST hyphen variants', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+    resetWhatsApp();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seedSoonest(phone, extra = {}) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SOONEST',
+      context: JSON.stringify({ region: 'HK' }),
+      data: JSON.stringify({ email: 'p@test.com', patient_name: 'Test', ...extra }),
+    });
+    return db.getSession(id);
+  }
+
+  test('buildTypeCatalogue merges "Follow Up Appointment" and "Follow-Up Appointment" into one list item', async () => {
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-HK', clinic_name: 'Prohealth HK', practitioners: [{ id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' }] },
+    ]);
+    // Cliniko returns both hyphen variants + a different type (so planForward doesn't auto-select)
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU1', name: 'Follow Up Appointment' },
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+      { id: 'AT-NP',  name: 'New Patient' },
+    ]);
+
+    const session = await seedSoonest('+85291000001');
+    await callHandler(engine, ['handleBookSoonest'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    const list = saved.appointment_type_list || [];
+
+    // 3 Cliniko types → 2 after dedup (FU merged, NP separate)
+    expect(list).toHaveLength(2);
+    const fuItem = list.find(item => item.name === 'Follow Up Appointment');
+    expect(fuItem).toBeDefined();
+    // Both IDs are in the catalogue map under the merged key
+    const map = saved.appt_type_name_to_ids_norm || {};
+    const fuIds = map['follow up appointment'] || [];
+    expect(fuIds).toContain('AT-FU1');
+    expect(fuIds).toContain('AT-FU2');
+  });
+
+  test('buildAvailablePhysiosForTypeName finds physio whose Cliniko type uses a hyphen', async () => {
+    // Physio has "Follow-Up Appointment" in Cliniko; user selected the no-hyphen merged display name.
+    // If the normalisation fix is missing, normName("Follow-Up Appointment") !== "follow up appointment"
+    // → physio is filtered out → handler returns "No practitioners have available slots for...".
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-HK', clinic_name: 'Prohealth HK', practitioners: [{ id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' }] },
+    ]);
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+    ]);
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([{
+      id: 'SL-01', slot: futureISO(2),
+      appointment_type_id: 'AT-FU2',
+      appointment_type_name: 'Follow-Up Appointment',
+      practitioner_id: 'PRAC-HK', business_id: 'BIZ-HK',
+    }]);
+
+    // Seed with selected_appt_type already set so handler enters the physio-filtering branch.
+    const session = await seedSoonest('+85291000002', {
+      selection_step: 'choose_type',
+      appointment_type_list: [{ name: 'Follow Up Appointment', id: 'AT-FU2', norm_name: 'follow up appointment' }],
+      selected_appt_type:    { name: 'Follow Up Appointment', id: 'AT-FU2', norm_name: 'follow up appointment' },
+      navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
+    });
+    const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+
+    // If physio was found the handler does NOT return the "no practitioners" error.
+    // (With slots matching the handler auto-advances all the way to SELECT_SLOT and returns
+    // a slot list — so we can't check practitioner_list in DB directly, but we CAN rule out
+    // the one distinctive failure response.)
+    expect(String(reply)).not.toMatch(/no practitioners have available slots/i);
+  });
+});
+
+// =============================================================================
+describe('Appointment type normalisation — BOOK_SPECIFIC_DATE hyphen variants', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+    resetWhatsApp();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  const FUTURE_DATE = futureISO(7).slice(0, 10); // 'YYYY-MM-DD'
+
+  async function seedDate(phone, extra = {}) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SPECIFIC_DATE',
+      context: JSON.stringify({ region: 'HK' }),
+      data: JSON.stringify({ email: 'p@test.com', patient_name: 'Test', selected_date: FUTURE_DATE, ...extra }),
+    });
+    return db.getSession(id);
+  }
+
+  test('choose_physio: getPractitionersForTypeName finds physio whose Cliniko type uses a hyphen', async () => {
+    // Cliniko stores "Follow-Up Appointment" (with hyphen); user selected "Follow Up Appointment".
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-HK', clinic_name: 'Prohealth HK', practitioners: [{ id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' }] },
+    ]);
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+    ]);
+
+    const session = await seedDate('+85292000001', {
+      selection_step: 'choose_physio',
+      selected_appt_type: { name: 'Follow Up Appointment', ids: ['AT-FU1', 'AT-FU2'], norm: 'follow up appointment' },
+      navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: true, auto: false }],
+    });
+    await callHandler(engine, ['handleBookSpecificDate'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    expect(Array.isArray(saved.practitioner_list)).toBe(true);
+    expect(saved.practitioner_list.length).toBeGreaterThan(0);
+    expect(String(saved.practitioner_list[0].id)).toBe('PRAC-HK');
+  });
+
+  test('view_slots: slot with hyphenated appointment_type_name is matched', async () => {
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([{
+      id: 'SL-SD-01', slot: futureISO(7),
+      appointment_type_id: 'AT-FU2',
+      appointment_type_name: 'Follow-Up Appointment',
+      practitioner_id: 'PRAC-HK', business_id: 'BIZ-HK',
+    }]);
+
+    const session = await seedDate('+85292000002', {
+      selection_step: 'view_slots',
+      selected_physio: { id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' },
+      selected_clinic: { id: 'BIZ-HK', business_name: 'Prohealth HK' },
+      selected_appt_type: { name: 'Follow Up Appointment', ids: ['AT-FU1', 'AT-FU2'], norm: 'follow up appointment' },
+      navigation_chain: [
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_physio', had_multiple_options: false, auto: true },
+        { selection_step: 'choose_clinic', had_multiple_options: false, auto: true },
+      ],
+    });
+    const reply = await callHandler(engine, ['handleBookSpecificDate'], session, '');
+    expect(String(reply)).not.toMatch(/no slots/i);
+  });
+});
+
+// =============================================================================
+describe('Appointment type normalisation — BOOK_SPECIFIC_PHYSIO hyphen variants', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+    resetWhatsApp();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seedPhysio(phone, extra = {}) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SPECIFIC_PHYSIO',
+      context: JSON.stringify({ region: 'HK' }),
+      data: JSON.stringify({ email: 'p@test.com', patient_name: 'Test', ...extra }),
+    });
+    return db.getSession(id);
+  }
+
+  test('choose_type merges "Follow Up Appointment" and "Follow-Up Appointment" into one list item', async () => {
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU1', name: 'Follow Up Appointment' },
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+    ]);
+
+    const session = await seedPhysio('+85293000001', {
+      selection_step: 'choose_type',
+      selected_physio: { id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' },
+      navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+    });
+    await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    const list = saved.appointment_type_list || [];
+    expect(list).toHaveLength(1);
+    expect(list[0].ids).toContain('AT-FU1');
+    expect(list[0].ids).toContain('AT-FU2');
+  });
+
+  test('view_slots: slot with hyphenated appointment_type_name is matched', async () => {
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([{
+      id: 'SL-SP-01', slot: futureISO(2),
+      appointment_type_id: 'AT-FU2',
+      appointment_type_name: 'Follow-Up Appointment',
+      practitioner_id: 'PRAC-HK', business_id: 'BIZ-HK',
+    }]);
+
+    const session = await seedPhysio('+85293000002', {
+      selection_step: 'view_slots',
+      selected_physio: { id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' },
+      selected_clinic: { id: 'BIZ-HK', business_name: 'Prohealth HK' },
+      selected_appt_type: { name: 'Follow Up Appointment', ids: ['AT-FU1', 'AT-FU2'], norm: 'follow up appointment' },
+      navigation_chain: [
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: false, auto: true },
+        { selection_step: 'choose_clinic', had_multiple_options: false, auto: true },
+      ],
+    });
+    const reply = await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+    expect(String(reply)).not.toMatch(/no slots/i);
+  });
+});
+
+// =============================================================================
+describe('Appointment type normalisation — BOOK_SPECIFIC_CLINIC hyphen variants', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+    resetWhatsApp();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seedClinic(phone, extra = {}) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SPECIFIC_CLINIC',
+      context: JSON.stringify({ region: 'HK' }),
+      data: JSON.stringify({ email: 'p@test.com', patient_name: 'Test',
+        selected_clinic: { id: 'BIZ-HK', business_name: 'Prohealth HK' }, ...extra }),
+    });
+    return db.getSession(id);
+  }
+
+  test('choose_type merges "Follow Up Appointment" and "Follow-Up Appointment" into one list item', async () => {
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-HK', clinic_name: 'Prohealth HK', practitioners: [{ id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' }] },
+    ]);
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU1', name: 'Follow Up Appointment' },
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+    ]);
+
+    const session = await seedClinic('+85294000001', {
+      selection_step: 'choose_type',
+      navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+    });
+    await callHandler(engine, ['handleBookSpecificClinic'], session, '');
+
+    const saved = JSON.parse((await db.getSession(session.id)).data || '{}');
+    const list = saved.appointment_type_list || [];
+    expect(list).toHaveLength(1);
+    expect(list[0].ids).toContain('AT-FU1');
+    expect(list[0].ids).toContain('AT-FU2');
+  });
+
+  test('choose_physio: practitioner with hyphen-variant type is included via merged IDs', async () => {
+    // choose_physio builds `wanted` from appt_type_name_to_ids_norm (which has both AT-FU1 and AT-FU2).
+    // The physio's Cliniko types include AT-FU2 (hyphenated). wanted.has('AT-FU2') must be TRUE.
+    // If the normalisation fix is missing the map key ("follow up appointment") won't match the
+    // lookup → `wanted` is empty → practitioner is excluded → handler shows empty physio list
+    // (stays at BOOK_SPECIFIC_CLINIC, never reaches SELECT_SLOT).
+    engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+      { clinic_id: 'BIZ-HK', clinic_name: 'Prohealth HK', practitioners: [{ id: 'PRAC-HK', first_name: 'Greg', last_name: 'Smith' }] },
+    ]);
+    engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+      { id: 'AT-FU2', name: 'Follow-Up Appointment' },
+    ]);
+    // view_slots needs a slot with the same hyphenated name so it doesn't loop back
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([{
+      id: 'SL-SC-01', slot: futureISO(2),
+      appointment_type_id: 'AT-FU2',
+      appointment_type_name: 'Follow-Up Appointment',
+      practitioner_id: 'PRAC-HK', business_id: 'BIZ-HK',
+    }]);
+
+    const session = await seedClinic('+85294000002', {
+      selection_step: 'choose_physio',
+      appointment_type_list: [{ name: 'Follow Up Appointment', norm_name: 'follow up appointment', ids: ['AT-FU1', 'AT-FU2'] }],
+      appt_type_name_to_ids_norm: { 'follow up appointment': ['AT-FU1', 'AT-FU2'] },
+      selected_appt_type: { name: 'Follow Up Appointment', norm_name: 'follow up appointment', ids: ['AT-FU1', 'AT-FU2'] },
+      navigation_chain: [
+        { selection_step: 'choose_clinic', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: false, auto: true },
+      ],
+    });
+    await callHandler(engine, ['handleBookSpecificClinic'], session, '');
+
+    // If the physio was found (wanted.has('AT-FU2') = true) the handler auto-advances through
+    // choose_physio → view_slots → slots match → session moves to SELECT_SLOT.
+    // If the physio was NOT found the handler stays at BOOK_SPECIFIC_CLINIC.
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).toBe('SELECT_SLOT');
   });
 });

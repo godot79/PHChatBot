@@ -199,15 +199,14 @@ describe('getBookingsByPatientId() — appointment reference objects', () => {
 // 5. cancelSpecificAppointment — payload shape (dry run, no real cancel)
 // =============================================================================
 describe('cancelSpecificAppointment() — payload validation', () => {
-  maybeIt('payload does not include cancellation_reason field', () => {
-    // This is a static code assertion — no live call needed.
-    // Verifies the fix from M2 is in place in the actual source.
+  maybeIt('payload includes cancellation_reason', () => {
+    // Static code assertion — verifies Cliniko required field is present.
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '../../src/api/ClinikoAPI.js'),
       'utf8'
     );
     const cancelFn = src.match(/async cancelSpecificAppointment[\s\S]+?^\s{2}}/m)?.[0] || '';
-    expect(cancelFn).not.toMatch(/cancellation_reason/);
+    expect(cancelFn).toMatch(/cancellation_reason/);
   });
 
   maybeIt('cancellation_note is sent as string', () => {

@@ -503,6 +503,7 @@ class ClinikoAPI {
   async cancelSpecificAppointment(appointmentId) {
     try {
       const cancelPayload = {
+        cancellation_reason: 50,
         cancellation_note: "Cancelled via chatbot",
       };
       await new SendMessage(`/individual_appointments/${appointmentId}/cancel`).patch(cancelPayload);
