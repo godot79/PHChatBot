@@ -957,7 +957,7 @@ class ChatbotEngine {
     } else {
       const body = `👋 *Welcome to ProHealthAsia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
       return list(body, 'Select option', [
-        { id: '1',      title: '📝 Register as new patient' },
+        { id: '1',      title: 'Register as new patient' },
         { id: '2',      title: 'Book or Manage' },
         { id: '3',      title: 'View Fees' },
         { id: '4',      title: 'View Locations' },

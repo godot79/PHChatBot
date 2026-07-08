@@ -535,11 +535,10 @@ describe('ChatbotEngine — state machine', () => {
       return engine.sessionManager.getSession(s.id);
     }
 
-    test('menu shows Register first, with emoji and hint text', async () => {
+    test('menu shows Register first with hint text', async () => {
       const session = await seedUnverified('+6531000001');
       const reply = await callHandler(engine, ['handleIntroState'], session, '');
       expect(reply).toMatch(/register as new patient/i);
-      expect(reply).toMatch(/📝/);
       expect(reply).toMatch(/new here|register below/i);
       // Register appears before Book or Manage in the fallback list
       expect(reply.indexOf('Register')).toBeLessThan(reply.indexOf('Book or Manage'));
