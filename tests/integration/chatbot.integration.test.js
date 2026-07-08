@@ -523,6 +523,66 @@ describe('ChatbotEngine — state machine', () => {
     expect(r).toMatch(/welcome|hello|verify|email|hi|start/i);
   });
 
+  // ─── Unverified intro menu — display and routing ──────────────────────────────
+  describe('Unverified intro menu — display and routing', () => {
+    async function seedUnverified(phone) {
+      const s = await engine.sessionManager.getOrCreateSession(phone, true);
+      await engine.sessionManager.updateSession(s.id, {
+        conversation_state: 'INTRO',
+        verified: false,
+        context: JSON.stringify({ region: 'SG' }),
+      });
+      return engine.sessionManager.getSession(s.id);
+    }
+
+    test('menu shows Register first, with emoji and hint text', async () => {
+      const session = await seedUnverified('+6531000001');
+      const reply = await callHandler(engine, ['handleIntroState'], session, '');
+      expect(reply).toMatch(/register as new patient/i);
+      expect(reply).toMatch(/📝/);
+      expect(reply).toMatch(/new here|register below/i);
+      // Register appears before Book or Manage in the fallback list
+      expect(reply.indexOf('Register')).toBeLessThan(reply.indexOf('Book or Manage'));
+    });
+
+    test('id "1" → Register as new patient (asks for first name)', async () => {
+      const session = await seedUnverified('+6531000002');
+      const reply = await callHandler(engine, ['handleIntroState'], session, '1');
+      expect(reply).toMatch(/first name/i);
+    });
+
+    test('id "2" → Book or Manage (shows gateway)', async () => {
+      const session = await seedUnverified('+6531000003');
+      const reply = await callHandler(engine, ['handleIntroState'], session, '2');
+      expect(reply).toMatch(/registered with us/i);
+    });
+
+    test('id "3" → View Fees (shows fee schedule)', async () => {
+      const session = await seedUnverified('+6531000004');
+      const reply = await callHandler(engine, ['handleIntroState'], session, '3');
+      expect(reply).toMatch(/fee|price|cost|sgd|hkd|inr|php/i);
+    });
+
+    test('id "4" → View Locations (shows locations)', async () => {
+      engine.clinikoAPI.getClinics.mockResolvedValue([]);
+      const session = await seedUnverified('+6531000005');
+      const reply = await callHandler(engine, ['handleIntroState'], session, '4');
+      expect(reply).toMatch(/location|address|clinic|where|no clinic/i);
+    });
+
+    test('text "register" → Register as new patient', async () => {
+      const session = await seedUnverified('+6531000006');
+      const reply = await callHandler(engine, ['handleIntroState'], session, 'register');
+      expect(reply).toMatch(/first name/i);
+    });
+
+    test('text "book" → Book or Manage (shows gateway)', async () => {
+      const session = await seedUnverified('+6531000007');
+      const reply = await callHandler(engine, ['handleIntroState'], session, 'book');
+      expect(reply).toMatch(/registered with us/i);
+    });
+  });
+
   // Navigation keywords
   test('"0" input always returns a non-empty string', async () => {
     await seedVerified(db, '+6530000010');
@@ -2039,12 +2099,12 @@ describe('Legacy "initial" conversation_state recovery', () => {
     expect(reply).not.toMatch(/I'm sorry, I didn't understand/i);
   });
 
-  test('"1" with "initial" state routes into the INTRO flow (verify or menu)', async () => {
+  test('"1" with "initial" state routes into the INTRO flow (register or menu)', async () => {
     const phone = '+6598000003';
     await seedLegacyState(phone);
     const reply = await engine.handleMessage('1', phone);
-    // INTRO handles "1" by starting the verify flow
-    expect(reply).toMatch(/email|verify|welcome|select|option/i);
+    // INTRO "1" now routes to Register as new patient
+    expect(reply).toMatch(/first name|welcome|select|option/i);
   });
 
   test('"hello" with "initial" state routes to interactive menu, not fallback', async () => {
@@ -2058,8 +2118,8 @@ describe('Legacy "initial" conversation_state recovery', () => {
   test('subsequent message after "initial" state is recovered works normally', async () => {
     const phone = '+6598000005';
     await seedLegacyState(phone);
-    await engine.handleMessage('1', phone); // first msg: triggers INTRO → VERIFY
-    const reply = await engine.handleMessage('test@example.com', phone); // second: should progress in VERIFY
+    await engine.handleMessage('1', phone); // first msg: triggers INTRO → REGISTER_PATIENT
+    const reply = await engine.handleMessage('test@example.com', phone); // second: treated as first_name input
     expect(reply).not.toMatch(/I'm sorry, I didn't understand/i);
   });
 });
@@ -2308,15 +2368,15 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/book|manage|appointment/i);
     });
 
-    test('3 → shows SG support phone number', async () => {
+    test('3 → shows SG WhatsApp link for support', async () => {
       const session = await seedAt('SELECT_SLOT', noSlotsBase());
       const reply = await callHandler(engine, ['handleSelectSlotState'], session, '3');
       expect(typeof reply).toBe('string');
-      expect(reply).toMatch(/\+65/); // SG phone
-      expect(reply).toMatch(/reach|message|contact/i);
+      expect(reply).toMatch(/wa\.me/); // WhatsApp deep link
+      expect(reply).toMatch(/message.*team|tap.*message/i);
     });
 
-    test('3 with HK region → shows HK support phone number', async () => {
+    test('3 with HK region → shows HK WhatsApp link for support', async () => {
       const ph = nextPhone();
       const s  = await seedVerified(db, ph);
       await db.updateSession(s.id, {
@@ -2326,7 +2386,7 @@ describe('Dead-end standardization', () => {
       });
       const session = await db.getSession(s.id);
       const reply = await callHandler(engine, ['handleSelectSlotState'], session, '3');
-      expect(reply).toMatch(/\+852/); // HK phone
+      expect(reply).toMatch(/wa\.me/); // WhatsApp deep link
     });
   });
 
@@ -2346,7 +2406,7 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/booking menu/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message us/i);
-      expect(reply).toMatch(/\+65/);
+      expect(reply).toMatch(/wa\.me/); // WhatsApp deep link replaced bare phone number
     });
 
     test('BOOK_SPECIFIC_DATE view_slots with no results shows canonical labels', async () => {
@@ -2359,7 +2419,7 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/booking menu/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message us/i);
-      expect(reply).toMatch(/\+65/);
+      expect(reply).toMatch(/wa\.me/);
     });
 
     test('BOOK_SPECIFIC_PHYSIO view_slots with no results shows canonical labels', async () => {
@@ -2369,7 +2429,7 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/booking menu/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message us/i);
-      expect(reply).toMatch(/\+65/);
+      expect(reply).toMatch(/wa\.me/);
     });
 
     test('BOOK_HISTORY view_slots with no matching slots shows canonical labels', async () => {
@@ -2382,7 +2442,7 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/booking menu/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message us/i);
-      expect(reply).toMatch(/\+65/);
+      expect(reply).toMatch(/wa\.me/);
     });
   });
 
@@ -2414,6 +2474,63 @@ describe('Dead-end standardization', () => {
     });
   });
 
+  // ─── Verify — gateway screen ─────────────────────────────────────────────────
+  describe('Verify — gateway screen', () => {
+    test('fresh VERIFY entry shows registration gateway', async () => {
+      const session = await seedAt('VERIFY', {});
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '');
+      expect(reply).toMatch(/registered with us/i);
+      expect(reply).toMatch(/register as new patient/i);
+      expect(reply).toMatch(/forgot my details/i);
+    });
+
+    test('gateway option 1 (registered) → asks for email', async () => {
+      const session = await seedAt('VERIFY', { gateway_prompt: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '1');
+      expect(reply).toMatch(/email/i);
+      expect(reply).not.toMatch(/registered with us/i);
+    });
+
+    test('gateway option 2 (register as new patient) → starts registration flow', async () => {
+      const session = await seedAt('VERIFY', { gateway_prompt: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '2');
+      expect(reply).toMatch(/first name/i);
+    });
+
+    test('gateway option 3 (forgot details) → shows support email and main menu', async () => {
+      const session = await seedAt('VERIFY', { gateway_prompt: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '3');
+      expect(reply).toMatch(/contact us at/i);
+      expect(reply).toMatch(/book|manage|appointment/i);
+    });
+
+    test('gateway unknown input → re-shows gateway', async () => {
+      const session = await seedAt('VERIFY', { gateway_prompt: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, 'xyz');
+      expect(reply).toMatch(/registered with us/i);
+    });
+
+    test('gateway 0 → back to main menu', async () => {
+      const session = await seedAt('VERIFY', { gateway_prompt: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '0');
+      expect(reply).toMatch(/book|welcome|select|option/i);
+    });
+
+    test('gateway skipped when verify_error_prompt is set', async () => {
+      const session = await seedAt('VERIFY', { verify_error_prompt: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '');
+      expect(reply).not.toMatch(/registered with us/i);
+      expect(reply).toMatch(/couldn.t verify|try again/i);
+    });
+
+    test('gateway skipped when awaiting_email is set', async () => {
+      const session = await seedAt('VERIFY', { awaiting_email: true });
+      const reply = await callHandler(engine, ['handleVerifyState'], session, '');
+      expect(reply).toMatch(/email/i);
+      expect(reply).not.toMatch(/registered with us/i);
+    });
+  });
+
   // ─── Reschedule no-slots ─────────────────────────────────────────────────────
   describe('Reschedule — no available slots', () => {
     const rescheduleAppt = () => ({
@@ -2435,7 +2552,7 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/booking menu/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message us/i);
-      expect(reply).toMatch(/\+65/);
+      expect(reply).toMatch(/wa\.me/);
     });
 
     test('no_slots_prompt set: option 1 → main booking menu', async () => {
@@ -2457,13 +2574,13 @@ describe('Dead-end standardization', () => {
       expect(reply).toMatch(/be in touch|support team/i);
     });
 
-    test('no_slots_prompt set: option 3 → shows support phone', async () => {
+    test('no_slots_prompt set: option 3 → shows WhatsApp support link', async () => {
       const session = await seedAt('SELECT_APPOINTMENT_TO_RESCHEDULE', {
         no_slots_prompt: true,
         navigation_chain: [],
       });
       const reply = await callHandler(engine, ['handleSelectAppointmentToRescheduleState'], session, '3');
-      expect(reply).toMatch(/\+65/);
+      expect(reply).toMatch(/wa\.me/);
     });
 
     test('no_slots_prompt set: option 0 → navBack or main menu', async () => {
@@ -3385,15 +3502,15 @@ describe('H3 regression — BOOK_SPECIFIC_CLINIC view_slots no-slots gives 3-opt
     return db.getSession(id);
   }
 
-  test('no-slots returns a MessageEnvelope with 3 buttons (not a plain string)', async () => {
+  test('no-slots returns a MessageEnvelope with 2 buttons (not a plain string)', async () => {
     const session = await seedViewSlotsSession('+6582200001');
     const reply = await engine.handleBookSpecificClinic(session, '');
     expect(reply).toHaveProperty('interactive');
     expect(reply.interactive.type).toBe('button');
     const ids = reply.interactive.action.buttons.map(b => b.reply.id);
-    expect(ids).toContain('1');
-    expect(ids).toContain('2');
-    expect(ids).toContain('3');
+    expect(ids).toContain('1'); // Booking menu
+    expect(ids).toContain('2'); // Email us
+    expect(ids).toHaveLength(2); // Message us button removed — wa.me link in body
   });
 
   test('no-slots sets no_slots_prompt so follow-up replies are handled', async () => {

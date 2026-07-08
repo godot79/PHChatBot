@@ -955,12 +955,12 @@ class ChatbotEngine {
         { id: '9',      title: 'Logout & Delete My Data' },
       ]);
     } else {
-      const body = `👋 *Welcome to ProHealthAsia*\n\n${region}Please select an option:`;
+      const body = `👋 *Welcome to ProHealthAsia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
       return list(body, 'Select option', [
-        { id: '1',      title: 'Book or Manage' },
-        { id: '2',      title: 'View Fees' },
-        { id: '3',      title: 'View Locations' },
-        { id: '4',      title: 'Register' },
+        { id: '1',      title: '📝 Register as new patient' },
+        { id: '2',      title: 'Book or Manage' },
+        { id: '3',      title: 'View Fees' },
+        { id: '4',      title: 'View Locations' },
         { id: 'region', title: 'Change Region' },
       ]);
     }
@@ -1147,8 +1147,13 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.renderMainMenu(session);
     }
 
-    // Only "1" (book/manage) transitions to VERIFY (email + DOB)
-    if (text === '1' || text.includes('book') || text.includes('manage')) {
+    // Unverified menu routing — IDs match display order (1=Register, 2=Book, 3=Fees, 4=Locations)
+    if (text === '1' || text.includes('register')) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.REGISTER_PATIENT });
+      const fresh = await this.sessionManager.getSession(session.id);
+      return await this.handleRegisterPatientState(fresh, '');
+    }
+    if (text === '2' || text.includes('book') || text.includes('manage')) {
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.VERIFY,
         verified: false
@@ -1156,22 +1161,15 @@ async handleMessageEnvelope(message, phoneNumber) {
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.handleVerifyState(updatedSession, '');
     }
-
-    // Other options stay in Intro and call their handlers
-    if (text === '2' || text.includes('fee')) {
+    if (text === '3' || text.includes('fee')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_FEES });
       const fresh = await this.sessionManager.getSession(session.id);
       return await this.handleViewFeesState(fresh, '');
     }
-    if (text === '3' || text.includes('location')) {
+    if (text === '4' || text.includes('location')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_LOCATIONS });
       const fresh = await this.sessionManager.getSession(session.id);
       return await this.handleViewLocationsState(fresh, '');
-    }
-    if (text === '4' || text.includes('register')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.REGISTER_PATIENT });
-      const fresh = await this.sessionManager.getSession(session.id);
-      return await this.handleRegisterPatientState(fresh, '');
     }
 
     return prependTextToEnvelope(`Sorry, I didn't understand that.`, await this.renderMainMenu(session));
@@ -1208,6 +1206,54 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updated);
+    }
+
+    // Gateway screen — shown before asking for email, so new patients can self-register
+    const GATEWAY_BUTTONS = buttons(
+      'To get started, are you registered with us?',
+      [
+        { id: '1', title: "Yes, I'm registered" },
+        { id: '2', title: 'Register as new patient' },
+        { id: '3', title: 'Forgot my details' },
+      ]
+    );
+
+    if (!data.verify_email && !data.awaiting_email && !data.verify_error_prompt) {
+      if (!data.gateway_prompt) {
+        data.gateway_prompt = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return GATEWAY_BUTTONS;
+      }
+      if (text === '1') {
+        data.gateway_prompt = false;
+        data.awaiting_email = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        return 'Please enter the email address you registered with.\n\n(0️⃣ Back)';
+      }
+      if (text === '2') {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.REGISTER_PATIENT,
+          data: null
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        return await this.handleRegisterPatientState(updated, '');
+      }
+      if (text === '3') {
+        const region = this._getSessionRegion(session);
+        const info = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+        delete data.gateway_prompt;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.INTRO,
+          data: JSON.stringify(data)
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        return prependTextToEnvelope(
+          `Please contact us at ${info.email} and we'll help you recover your details.`,
+          await this.renderMainMenu(updated)
+        );
+      }
+      // Unknown input — re-render gateway
+      return GATEWAY_BUTTONS;
     }
 
     // DOB parser: accepts "dd mm yyyy", "dd/mm/yyyy", "dd-mm-yyyy", "dd.mm.yyyy"
@@ -1504,6 +1550,41 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
   }
 
+  _buildNoSlotsSummary(session, data) {
+    const src = (key) => data[key] || data.prev_state_data?.[key];
+    const apptName = src('selected_appt_type')?.name || '';
+    const physio   = getPractitionerDisplayName(src('selected_physio'));
+    const clinicObj = src('selected_clinic');
+    const clinic   = clinicObj?.business_name || (typeof clinicObj === 'string' ? clinicObj : '');
+    const userPhone = session.phone_number || session.phoneNumber || '';
+
+    let msg = 'Hi, I tried to book';
+    if (apptName) msg += ` a ${apptName}`;
+    if (physio)   msg += ` with ${physio}`;
+    if (clinic)   msg += ` at ${clinic}`;
+    msg += ' but no slots were available.';
+    if (userPhone) msg += ` My WhatsApp: ${userPhone}.`;
+    return msg;
+  }
+
+  _buildWaLink(phone, summary) {
+    const num = String(phone).replace(/\D/g, '');
+    return `https://wa.me/${num}?text=${encodeURIComponent(summary)}`;
+  }
+
+  _getNoSlotsPhone(session, data) {
+    const region = this._getSessionRegion(session);
+    const info = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+    if (info.clinicPhones) {
+      const src = (key) => data[key] || data.prev_state_data?.[key];
+      const clinicObj = src('selected_clinic');
+      const name = clinicObj?.business_name || (typeof clinicObj === 'string' ? clinicObj : '');
+      const match = name.match(/\((WS|WWH|TST|QB)\)/i);
+      if (match) return info.clinicPhones[match[1].toUpperCase()] || info.phone;
+    }
+    return info.phone;
+  }
+
   async _handleNoSlotsDecision(session, data, stateConst, backHandler, incomingText) {
     const text = (incomingText || '').trim().toLowerCase();
     if (!data.no_slots_prompt) return null;
@@ -1596,19 +1677,19 @@ async handleMessageEnvelope(message, phoneNumber) {
       return prependTextToEnvelope(`Thanks! Our ${region} support team will be in touch shortly.`, await this.renderMainMenu(session));
     }
 
-    // 3 — message us (show support phone number)
+    // 3 — message us (open WhatsApp with pre-filled context)
     if (text === '3') {
       let context = session.context;
       if (context && typeof context === 'string') { try { context = JSON.parse(context); } catch {} }
       const region = (context && context.region) || this._getSessionRegion(session) || 'SG';
-      const info = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+      const waLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
 
       delete data.no_slots_prompt;
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: JSON.stringify(data)
       });
-      return prependTextToEnvelope(`You can reach our ${region} support team at ${info.phone}.`, await this.renderMainMenu(session));
+      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.renderMainMenu(session));
     }
 
     return null;
@@ -1902,11 +1983,10 @@ if (/^p(rev)?$/i.test(text)) {
       if (!filtered.length) {
         data.no_slots_prompt = { context: 'history' };
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
-        const _hsInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
-        return buttons(`No available slots for that combination.\n\nOr message us: ${_hsInfo.phone}\n\n(Reply 0 to go back one step)`, [
+        const _hsLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
+        return buttons(`No available slots for that combination.\n\n👇 Message us directly:\n${_hsLink}\n\n(Reply 0 to go back one step)`, [
           { id: '1', title: 'Booking menu' },
           { id: '2', title: 'Email us' },
-          { id: '3', title: 'Message us' }
         ]);
       }
 
@@ -2718,13 +2798,12 @@ if (/^p(rev)?$/i.test(text)) {
         // Offer support contact option, consistent with other no-slots flows.
         data.no_slots_prompt = true;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        const _sdInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        const _sdLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
         return buttons(
-          `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\nOr message us: ${_sdInfo.phone}\n\n(Reply 0 to go back one step)`,
+          `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n👇 Message us directly:\n${_sdLink}\n\n(Reply 0 to go back one step)`,
           [
             { id: '1', title: 'Booking menu' },
             { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message us' }
           ]
         );
       }
@@ -2983,13 +3062,12 @@ if (/^p(rev)?$/i.test(text)) {
         });
         session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
         session.data = JSON.stringify(data);
-        const _spInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        const _spLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
         return buttons(
-          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\nOr message us: ${_spInfo.phone}\n\n(Reply 0 to go back one step)`,
+          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n👇 Message us directly:\n${_spLink}\n\n(Reply 0 to go back one step)`,
           [
             { id: '1', title: 'Booking menu' },
             { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message us' }
           ]
         );
       }
@@ -3299,13 +3377,12 @@ if (/^p(rev)?$/i.test(text)) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: JSON.stringify(data) });
         session.conversation_state = this.STATES.BOOK_SPECIFIC_CLINIC;
         session.data = JSON.stringify(data);
-        const _scInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
+        const _scLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
         return buttons(
-          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.\n\nOr message us: ${_scInfo.phone}\n\n(Reply 0 to go back one step)`,
+          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.\n\n👇 Message us directly:\n${_scLink}\n\n(Reply 0 to go back one step)`,
           [
             { id: '1', title: 'Booking menu' },
             { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message us' }
           ]
         );
       }
@@ -3450,11 +3527,10 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.SELECT_SLOT,
         data: JSON.stringify(data)
       });
-      const _ssInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
-      return buttons(`No available slots to show.\n\nOr message us: ${_ssInfo.phone}\n\n(Reply 0 to go back one step)`, [
+      const _ssLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
+      return buttons(`No available slots to show.\n\n👇 Message us directly:\n${_ssLink}\n\n(Reply 0 to go back one step)`, [
         { id: '1', title: 'Booking menu' },
         { id: '2', title: 'Email us' },
-        { id: '3', title: 'Message us' }
       ]);
     }
 
@@ -4170,11 +4246,10 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
         data: JSON.stringify(data)
       });
-      const _rsInfo = REGION_SUPPORT_INFO[this._getSessionRegion(session)] || REGION_SUPPORT_INFO.SG;
-      return buttons(`Sorry, no available slots for rescheduling this appointment.\n\nOr message us: ${_rsInfo.phone}\n\n(Reply 0 to go back one step)`, [
+      const _rsLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
+      return buttons(`Sorry, no available slots for rescheduling this appointment.\n\n👇 Message us directly:\n${_rsLink}\n\n(Reply 0 to go back one step)`, [
         { id: '1', title: 'Booking menu' },
         { id: '2', title: 'Email us' },
-        { id: '3', title: 'Message us' }
       ]);
     }
     data.available_times = availableTimes;

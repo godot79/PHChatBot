@@ -10,8 +10,14 @@ const REGION_SUPPORT_INFO = {
     email: 'admin@intouchphysio.com',
   },
   HK: {
-    phone: '+852 25300073',
+    phone: '+852 5542 0407',  // WS (default)
     email: 'appt@physiohk.com',
+    clinicPhones: {
+      WS:  '+852 5542 0407',
+      WWH: '+852 5422 3760',
+      TST: '+852 6946 3575',
+      QB:  '+852 8400 1760',
+    },
   },
   IN: {
     phone: '+91-11-4212-0200',
