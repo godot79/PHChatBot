@@ -31,8 +31,6 @@ class SessionManager {
             COMPLETED: 'completed'
         };
 
-        // Start cleanup interval
-        this.startCleanupInterval();
     }
 
     /**
@@ -43,6 +41,7 @@ class SessionManager {
             if (!this.db.isInitialized) {
                 await this.db.initialize();
             }
+            this.startCleanupInterval();
             this.logger.info('SessionManager initialized');
         } catch (error) {
             this.logger.error('Failed to initialize SessionManager:', error);
@@ -781,7 +780,7 @@ class SessionManager {
      */
     startCleanupInterval() {
         // Clean up expired sessions every 10 minutes
-        setInterval(async () => {
+        this.cleanupInterval = setInterval(async () => {
             try {
                 const cleaned = await this.db.cleanupExpiredSessions();
                 if (cleaned > 0) {

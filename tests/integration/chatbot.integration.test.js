@@ -28,7 +28,7 @@ jest.mock('../../src/core/DatabaseManager', () => {
 
   class DatabaseManager {
     constructor () {
-      this.db = new sqlite3.Database(':memory:');
+      this.db = null;
       this.isInitialized = false;
     }
 
@@ -37,12 +37,14 @@ jest.mock('../../src/core/DatabaseManager', () => {
     }
 
     async testConnection () {
+      if (!this.db) return true;
       return new Promise((res, rej) =>
         this.db.get('SELECT 1', (err) => (err ? rej(err) : res(true)))
       );
     }
 
     async initialize () {
+      this.db = new sqlite3.Database(':memory:');
       return new Promise((res, rej) => {
         this.db.serialize(() => {
           this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
@@ -171,7 +173,10 @@ jest.mock('../../src/core/DatabaseManager', () => {
       );
     }
 
-    close () { this.db.close(); }
+    close () {
+      if (!this.db) return Promise.resolve();
+      return new Promise((res, rej) => this.db.close(err => err ? rej(err) : res()));
+    }
   }
 
   return DatabaseManager;
@@ -2394,7 +2399,7 @@ describe('Legacy "initial" conversation_state recovery', () => {
     engine = new ChatbotEngine(db);
     await engine.initialize();
   });
-  afterAll(() => db.close());
+  afterAll(() => { if (engine.sessionManager.cleanupInterval) clearInterval(engine.sessionManager.cleanupInterval); db.close(); });
   beforeEach(() => resetCliniko());
 
   test('parseSession normalizes "initial" → "INTRO" at the DB boundary', async () => {
@@ -2464,7 +2469,7 @@ describe('Global restart-intent interception (handleMessage)', () => {
     engine = new ChatbotEngine(db);
     await engine.initialize();
   });
-  afterAll(() => db.close());
+  afterAll(() => { if (engine.sessionManager.cleanupInterval) clearInterval(engine.sessionManager.cleanupInterval); db.close(); });
   beforeEach(() => resetCliniko());
 
   const RESTART_WORDS = ['hi', 'hello', 'hey', 'start', 'restart', 'home'];
@@ -2535,7 +2540,7 @@ describe('Global region-change interception', () => {
     await engine.initialize();
     db = engine.sessionManager.db; // same instance as the engine uses
   });
-  afterAll(() => db.close());
+  afterAll(() => { if (engine.sessionManager.cleanupInterval) clearInterval(engine.sessionManager.cleanupInterval); db.close(); });
   beforeEach(() => { resetCliniko(); resetWhatsApp(); });
 
   // Helper: get current session for phone via session manager (phone-normalized lookup)

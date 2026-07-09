@@ -55,6 +55,7 @@
       "<rootDir>/tests/unit/core/DatabaseManager.test.js",
       "<rootDir>/tests/unit/services/NotificationService.test.js",
       "<rootDir>/tests/chatbotEngine.umbrella.test.js"
-    ]
+    ],
+    "forceExit": true
   }
 }
