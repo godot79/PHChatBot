@@ -1597,9 +1597,11 @@ async handleMessageEnvelope(message, phoneNumber) {
         clearForwardStateForPopped(data, popped);
         data.selection_step = step;
         data.suppress_auto_advance = true;
+        session.data = JSON.stringify(data);
+        if (stateConst) session.conversation_state = stateConst;
         await this.sessionManager.updateSession(session.id, {
           conversation_state: stateConst,
-          data: JSON.stringify(data)
+          data: session.data
         });
         return await backHandler.call(this, session, '');
       }
@@ -1610,14 +1612,27 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // 1 — go to main booking menu
+    // 1 — go back one step and try again
     if (text === '1') {
       delete data.no_slots_prompt;
+      const { step, popped } = navBack(data);
+      if (step) {
+        clearForwardStateForPopped(data, popped);
+        data.selection_step = step;
+        data.suppress_auto_advance = true;
+        session.data = JSON.stringify(data);
+        if (stateConst) session.conversation_state = stateConst;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: stateConst,
+          data: session.data
+        });
+        return await backHandler.call(this, session, '');
+      }
       await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(data)
+        conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
+        data: null
       });
-      return await this.renderMainMenu(session);
+      return await this.goToInteractiveMenu(session);
     }
 
     // 2 — email us (sends transcript to support + user)
@@ -1670,9 +1685,10 @@ async handleMessageEnvelope(message, phoneNumber) {
       const userPhone = session.phone_number || session.phoneNumber || emailPayload?.meta?.phone || '';
 
       delete data.no_slots_prompt;
+      session.data = JSON.stringify(data);
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(data)
+        data: session.data
       });
       return prependTextToEnvelope(`Thanks! Our ${region} support team will be in touch shortly.`, await this.renderMainMenu(session));
     }
@@ -1685,9 +1701,10 @@ async handleMessageEnvelope(message, phoneNumber) {
       const waLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
 
       delete data.no_slots_prompt;
+      session.data = JSON.stringify(data);
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
-        data: JSON.stringify(data)
+        data: session.data
       });
       return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.renderMainMenu(session));
     }
@@ -1983,10 +2000,10 @@ if (/^p(rev)?$/i.test(text)) {
       if (!filtered.length) {
         data.no_slots_prompt = { context: 'history' };
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
-        const _hsLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
-        return buttons(`No available slots for that combination.\n\n👇 Message us directly:\n${_hsLink}\n\n(Reply 0 to go back one step)`, [
-          { id: '1', title: 'Booking menu' },
+        return buttons(`No available slots for that combination.`, [
+          { id: '1', title: 'Go back and try again' },
           { id: '2', title: 'Email us' },
+          { id: '3', title: 'Message on WhatsApp' },
         ]);
       }
 
@@ -2138,35 +2155,7 @@ if (/^p(rev)?$/i.test(text)) {
       return available;
     };
 
-    // Handle pending generic no-slots prompt but keep Soonest semantics intact
-    if (data.no_slots_prompt && data.no_slots_prompt.context === 'soonest') {
-      if (text === '1') { // Try another type
-        delete data.no_slots_prompt;
-        data.selection_step = 'choose_type';
-        data.suppress_auto_advance = true; // prevent planForward from re-selecting the only type
-        // clear downstream selections
-        delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio; delete data.clinic_list; delete data.selected_clinic;
-        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return await this.handleBookSoonest(session, '');
-      }
-      if (text === '2') { // Try another physio
-        delete data.no_slots_prompt;
-        data.selection_step = 'choose_physio';
-        delete data.selected_physio; delete data.clinic_list; delete data.selected_clinic;
-        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return await this.handleBookSoonest(session, '');
-      }
-      if (text === '3') { // Try another clinic
-        delete data.no_slots_prompt;
-        data.selection_step = 'choose_clinic';
-        delete data.selected_clinic;
-        delete data.clinic_list; // force re-fetch so stale zero-slot list is not reused
-        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return await this.handleBookSoonest(session, '');
-      }
-      // Any other input falls through and re-renders current step
-    } else if (data.no_slots_prompt) {
-      // Legacy context: fall back to generic handler
+    if (data.no_slots_prompt) {
       const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SOONEST, this.handleBookSoonest, textRaw);
       if (ret) return ret;
     }
@@ -2284,18 +2273,22 @@ if (/^p(rev)?$/i.test(text)) {
       data.selection_step = 'choose_physio';
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
 
-      navPush(data, 'choose_physio', { had_multiple_options: practitioners.length > 1, auto: practitioners.length === 1 });
-      await sync();
-
       if (practitioners.length === 0) {
-        // No physios have slots for this type → let user pick another type
+        // No physios have slots for this type — show standard no-slots prompt (no navPush so back goes to booking menu)
         data.no_slots_prompt = { context: 'soonest' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return buttons(
           `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
-          [{ id: '1', title: 'Try another type' }]
+          [
+            { id: '1', title: 'Go back and try again' },
+            { id: '2', title: 'Email us' },
+            { id: '3', title: 'Message on WhatsApp' },
+          ]
         );
       }
+
+      navPush(data, 'choose_physio', { had_multiple_options: practitioners.length > 1, auto: practitioners.length === 1 });
+      await sync();
 
       if (practitioners.length > 1) {
         const reply = buildInteractiveSelectionList({
@@ -2382,7 +2375,6 @@ if (/^p(rev)?$/i.test(text)) {
 
         if (withSlots.length === 0) {
           // This physio actually has no slots for this type → go back to physio selection
-          data.no_slots_prompt = { context: 'soonest' };
           data.selection_step = 'choose_physio';
           delete data.selected_physio; // force re-pick
           // Rebuild physio list to exclude zero-slot physio
@@ -2452,9 +2444,9 @@ if (/^p(rev)?$/i.test(text)) {
         data.no_slots_prompt = { context: 'soonest' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return buttons(`No slots found for ${data.selected_appt_type?.name}.`, [
-          { id: '1', title: 'Try another type' },
-          { id: '2', title: 'Try another physio' },
-          { id: '3', title: 'Try another clinic' }
+          { id: '1', title: 'Go back and try again' },
+          { id: '2', title: 'Email us' },
+          { id: '3', title: 'Message on WhatsApp' },
         ]);
       }
 
@@ -2735,19 +2727,54 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // =====================================================================
-    // choose_clinic — clinics where that physio works (exclude UWC)
+    // choose_clinic — clinics where that physio works (exclude UWC),
+    // pre-filtered to only those with slots on the selected date
     // =====================================================================
     if (data.selection_step === 'choose_clinic') {
       if (!Array.isArray(data.clinic_list)) {
         const physId = String(data.selected_physio?.id || data.selected_physio);
         const groups = await this.clinikoAPI.getPractitionersByClinic();
-        const clinics = [];
+        const allClinics = [];
         for (const g of groups || []) {
           if (/UWC/i.test(g.clinic_name)) continue;
-          if ((g.practitioners || []).some(p => `${p.id}` === physId)) clinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
+          if ((g.practitioners || []).some(p => `${p.id}` === physId))
+            allClinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
-        data.clinic_list = clinics;
+        const typeNorm = normName(data.selected_appt_type?.name || '');
+        const { from, to } = normalizeDateWindow(data.selected_date, data.selected_date, 1);
+        const withSlots = [];
+        for (const c of allClinics) {
+          const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+            business_id: c.id, practitioner_id: physId, from, to
+          });
+          if ((raw || []).some(s => normName(s.appointment_type_name) === typeNorm)) withSlots.push(c);
+        }
+        data.clinic_list = withSlots;
         data.clinic_page = 0;
+
+        if (withSlots.length === 0) {
+          if (typeof navBack === 'function') navBack(data);
+          data.selection_step = 'choose_physio';
+          delete data.selected_physio;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          const noSlotsDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+          return buildInteractiveSelectionList({
+            items: data.practitioner_list || [],
+            rowFn: (p) => ({ title: String(getPractitionerDisplayName(p)) }),
+            page: data.practitioner_page || 0,
+            header: `No slots on ${noSlotsDate}. Choose a different practitioner for ${data.selected_appt_type?.name}:`
+          });
+        }
+
+        if (withSlots.length === 1) {
+          if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
+          data.selected_clinic = withSlots[0];
+          data.selection_step = 'view_slots';
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          return await this.handleBookSpecificDate(session, '');
+        }
+
+        if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: true, auto: false });
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
@@ -2790,20 +2817,17 @@ if (/^p(rev)?$/i.test(text)) {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
-        // Pop view_slots off the nav stack so a single "0" goes back to choose_clinic,
-        // not back into view_slots (which would just re-fail and need a second "0").
         if (typeof navBack === 'function') navBack(data);
         data.selection_step = 'choose_clinic';
-        delete data.clinic_list; // force clinic list to re-render fresh
-        // Offer support contact option, consistent with other no-slots flows.
-        data.no_slots_prompt = true;
+        delete data.clinic_list;
+        data.no_slots_prompt = { context: 'date' };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        const _sdLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
         return buttons(
-          `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n👇 Message us directly:\n${_sdLink}\n\n(Reply 0 to go back one step)`,
+          `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
           [
-            { id: '1', title: 'Booking menu' },
+            { id: '1', title: 'Go back and try again' },
             { id: '2', title: 'Email us' },
+            { id: '3', title: 'Message on WhatsApp' },
           ]
         );
       }
@@ -2996,19 +3020,53 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // =====================================================================
-    // choose_clinic — clinics where the physio works
+    // choose_clinic — clinics where the physio works (exclude UWC),
+    // pre-filtered to only those with slots for the selected type
     // =====================================================================
     if (data.selection_step === 'choose_clinic') {
       if (!Array.isArray(data.clinic_list)) {
         const physId = String(data.selected_physio?.id || data.selected_physio);
         const groups = await this.clinikoAPI.getPractitionersByClinic();
-        const clinics = [];
+        const allClinics = [];
         for (const g of groups || []) {
           if (/UWC/i.test(g.clinic_name)) continue;
-          if ((g.practitioners || []).some(p => `${p.id}` === physId)) clinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
+          if ((g.practitioners || []).some(p => `${p.id}` === physId))
+            allClinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
-        data.clinic_list = clinics;
+        const typeNorm = normName(data.selected_appt_type?.name || '');
+        const { from, to } = normalizeDateWindow();
+        const withSlots = [];
+        for (const c of allClinics) {
+          const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+            business_id: c.id, practitioner_id: physId, from, to
+          });
+          if ((raw || []).some(s => normName(s.appointment_type_name) === typeNorm)) withSlots.push(c);
+        }
+        data.clinic_list = withSlots;
         data.clinic_page = 0;
+
+        if (withSlots.length === 0) {
+          if (typeof navBack === 'function') navBack(data);
+          data.selection_step = 'choose_type';
+          delete data.selected_appt_type;
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+          return buildInteractiveSelectionList({
+            items: data.appointment_type_list || [],
+            rowFn: (a) => ({ title: String(a.name) }),
+            page: data.appt_type_page || 0,
+            header: `No slots available. Choose a different visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
+          });
+        }
+
+        if (withSlots.length === 1) {
+          if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: false, auto: true });
+          data.selected_clinic = withSlots[0];
+          data.selection_step = 'view_slots';
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+          return await this.handleBookSpecificPhysio(session, '');
+        }
+
+        if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: true, auto: false });
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
@@ -3055,19 +3113,19 @@ if (/^p(rev)?$/i.test(text)) {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
-        data.no_slots_prompt = true;
+        data.no_slots_prompt = { context: 'physio' };
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
           data: JSON.stringify(data)
         });
         session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
         session.data = JSON.stringify(data);
-        const _spLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
         return buttons(
-          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.\n\n👇 Message us directly:\n${_spLink}\n\n(Reply 0 to go back one step)`,
+          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
           [
-            { id: '1', title: 'Booking menu' },
+            { id: '1', title: 'Go back and try again' },
             { id: '2', title: 'Email us' },
+            { id: '3', title: 'Message on WhatsApp' },
           ]
         );
       }
@@ -3370,19 +3428,16 @@ if (/^p(rev)?$/i.test(text)) {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
-        if (typeof navBack === 'function') navBack(data);
-        data.selection_step = 'choose_physio';
-        delete data.practitioner_list;
-        data.no_slots_prompt = true;
+        data.no_slots_prompt = { context: 'clinic' };
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: JSON.stringify(data) });
         session.conversation_state = this.STATES.BOOK_SPECIFIC_CLINIC;
         session.data = JSON.stringify(data);
-        const _scLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
         return buttons(
-          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.\n\n👇 Message us directly:\n${_scLink}\n\n(Reply 0 to go back one step)`,
+          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
           [
-            { id: '1', title: 'Booking menu' },
+            { id: '1', title: 'Go back and try again' },
             { id: '2', title: 'Email us' },
+            { id: '3', title: 'Message on WhatsApp' },
           ]
         );
       }
@@ -3519,18 +3574,18 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // When no slots are present in this state (edge case), offer 3-option prompt
+    // When no slots are present in this state (edge case), offer standard 3-button prompt
     if (!slots.length) {
-      // Prepare no-slots prompt and let helper process next user reply
-      data.no_slots_prompt = true;
+      data.no_slots_prompt = { context: 'slot' };
+      session.data = JSON.stringify(data);
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.SELECT_SLOT,
-        data: JSON.stringify(data)
+        data: session.data
       });
-      const _ssLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
-      return buttons(`No available slots to show.\n\n👇 Message us directly:\n${_ssLink}\n\n(Reply 0 to go back one step)`, [
-        { id: '1', title: 'Booking menu' },
+      return buttons(`No available slots to show.`, [
+        { id: '1', title: 'Go back and try again' },
         { id: '2', title: 'Email us' },
+        { id: '3', title: 'Message on WhatsApp' },
       ]);
     }
 
@@ -4241,15 +4296,16 @@ if (/^p(rev)?$/i.test(text)) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
-      data.no_slots_prompt = true;
+      data.no_slots_prompt = { context: 'reschedule' };
+      session.data = JSON.stringify(data);
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
-        data: JSON.stringify(data)
+        data: session.data
       });
-      const _rsLink = this._buildWaLink(this._getNoSlotsPhone(session, data), this._buildNoSlotsSummary(session, data));
-      return buttons(`Sorry, no available slots for rescheduling this appointment.\n\n👇 Message us directly:\n${_rsLink}\n\n(Reply 0 to go back one step)`, [
-        { id: '1', title: 'Booking menu' },
+      return buttons(`Sorry, no available slots for rescheduling this appointment.`, [
+        { id: '1', title: 'Go back and try again' },
         { id: '2', title: 'Email us' },
+        { id: '3', title: 'Message on WhatsApp' },
       ]);
     }
     data.available_times = availableTimes;
