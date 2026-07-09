@@ -2511,6 +2511,20 @@ if (/^p(rev)?$/i.test(text)) {
     const ymdLocal = (d) => { const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
 
     // ----- no-slots decision (must run before back/nav to handle "1","2","3" replies) -----
+    if (data.no_slots_prompt?.context === 'date_inner' && (text === '1' || text === '0' || text === 'back')) {
+      delete data.no_slots_prompt;
+      navBack(data);
+      delete data.selected_physio;
+      delete data.clinic_list;
+      delete data.clinic_page;
+      delete data.selected_clinic;
+      data.selection_step = 'choose_physio';
+      data.suppress_auto_advance = true;
+      session.data = JSON.stringify(data);
+      session.conversation_state = this.STATES.BOOK_SPECIFIC_DATE;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_DATE, data: session.data });
+      return await this.handleBookSpecificDate(session, '');
+    }
     if (data.no_slots_prompt) {
       const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate, raw);
       if (ret) return ret;
@@ -2753,17 +2767,17 @@ if (/^p(rev)?$/i.test(text)) {
         data.clinic_page = 0;
 
         if (withSlots.length === 0) {
-          if (typeof navBack === 'function') navBack(data);
-          data.selection_step = 'choose_physio';
-          delete data.selected_physio;
-          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           const noSlotsDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-          return buildInteractiveSelectionList({
-            items: data.practitioner_list || [],
-            rowFn: (p) => ({ title: String(getPractitionerDisplayName(p)) }),
-            page: data.practitioner_page || 0,
-            header: `No slots on ${noSlotsDate}. Choose a different practitioner for ${data.selected_appt_type?.name}:`
-          });
+          data.no_slots_prompt = { context: 'date_inner' };
+          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+          return buttons(
+            `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+            [
+              { id: '1', title: 'Try another practitioner' },
+              { id: '2', title: 'Email us' },
+              { id: '3', title: 'Message on WhatsApp' },
+            ]
+          );
         }
 
         if (withSlots.length === 1) {
@@ -2888,6 +2902,21 @@ if (/^p(rev)?$/i.test(text)) {
     const normName = (s) => (typeof normalizeTypeName === 'function' ? normalizeTypeName(s) : String(s || '').toLowerCase().trim());
 
     // ---------- no-slots decision (must run before back/nav to handle "1","2","3" replies) ----------
+    if (data.no_slots_prompt?.context === 'physio_inner' && (text === '1' || text === '0' || text === 'back')) {
+      delete data.no_slots_prompt;
+      navBack(data);
+      delete data.selected_appt_type;
+      delete data.clinic_list;
+      delete data.clinic_page;
+      delete data.selected_clinic;
+      delete data.appt_types_for_physio;
+      data.selection_step = 'choose_type';
+      data.suppress_auto_advance = true;
+      session.data = JSON.stringify(data);
+      session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO, data: session.data });
+      return await this.handleBookSpecificPhysio(session, '');
+    }
     if (data.no_slots_prompt) {
       const ret = await this._handleNoSlotsDecision(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, this.handleBookSpecificPhysio, textRaw);
       if (ret) return ret;
@@ -3046,16 +3075,16 @@ if (/^p(rev)?$/i.test(text)) {
         data.clinic_page = 0;
 
         if (withSlots.length === 0) {
-          if (typeof navBack === 'function') navBack(data);
-          data.selection_step = 'choose_type';
-          delete data.selected_appt_type;
+          data.no_slots_prompt = { context: 'physio_inner' };
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-          return buildInteractiveSelectionList({
-            items: data.appointment_type_list || [],
-            rowFn: (a) => ({ title: String(a.name) }),
-            page: data.appt_type_page || 0,
-            header: `No slots available. Choose a different visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
-          });
+          return buttons(
+            `No slots available for ${getPractitionerDisplayName(data.selected_physio)} with ${data.selected_appt_type?.name || 'that visit type'}.`,
+            [
+              { id: '1', title: 'Try another visit type' },
+              { id: '2', title: 'Email us' },
+              { id: '3', title: 'Message on WhatsApp' },
+            ]
+          );
         }
 
         if (withSlots.length === 1) {

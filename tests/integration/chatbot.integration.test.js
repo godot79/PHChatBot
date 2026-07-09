@@ -1544,13 +1544,17 @@ describe('Booking menu and flow coverage', () => {
       ],
     });
 
-    test('0 clinics with slots → falls back to physio list with no-slots message', async () => {
+    test('0 clinics with slots → shows 3-button dead-end prompt', async () => {
       engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', baseClinicData());
-      const reply = await callHandler(engine, ['handleBookSpecificDate'], session, '');
-      expect(reply).toMatch(/no slots|practitioner|jolinna|wei/i);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/try another practitioner/i);
+      expect(reply).toMatch(/email us/i);
+      expect(reply).toMatch(/message on whatsapp/i);
       const updated = await db.getSession(session.id);
-      expect(JSON.parse(updated.data || '{}').selection_step).toBe('choose_physio');
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.no_slots_prompt).toMatchObject({ context: 'date_inner' });
+      expect(d.selection_step).toBe('choose_clinic');
     });
 
     test('1 clinic with slots → auto-advances past clinic picker to slot list', async () => {
@@ -1608,6 +1612,58 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificDate'], session, '99');
       const updated = await db.getSession(session.id);
       expect(JSON.parse(updated.data || '{}').selection_step).toBe('choose_clinic');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_DATE — inner no-slots dead-end (date_inner) ───────────────
+  describe('BOOK_SPECIFIC_DATE — choose_clinic inner no-slots (date_inner)', () => {
+    const innerNoSlotsData = () => ({
+      selection_step: 'choose_clinic',
+      selected_date: '2026-08-01',
+      selected_appt_type: TYPE_1,
+      selected_physio: PHYSIO_1,
+      practitioner_list: [PHYSIO_1, PHYSIO_2],
+      practitioner_page: 0,
+      no_slots_prompt: { context: 'date_inner' },
+      navigation_chain: [
+        { selection_step: 'choose_date',   had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type',   had_multiple_options: true, auto: false },
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+      ],
+    });
+
+    test("'1' clears physio+clinic state, preserves type+practitioner_list, shows physio list", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', innerNoSlotsData());
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '1'));
+      expect(reply).toMatch(/jolinna|wei|physio|practitioner/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_physio');
+      expect(d.no_slots_prompt).toBeFalsy();
+      expect(d.selected_physio).toBeUndefined();
+      expect(d.selected_appt_type).toMatchObject({ name: TYPE_1.name });
+      expect(Array.isArray(d.practitioner_list)).toBe(true);
+    });
+
+    test("'0' and 'back' behave identically to '1' — return to physio list", async () => {
+      const s0 = await seedAt('BOOK_SPECIFIC_DATE', innerNoSlotsData());
+      const sb = await seedAt('BOOK_SPECIFIC_DATE', innerNoSlotsData());
+      const r0 = String(await callHandler(engine, ['handleBookSpecificDate'], s0, '0'));
+      const rb = String(await callHandler(engine, ['handleBookSpecificDate'], sb, 'back'));
+      expect(r0).toMatch(/jolinna|wei|physio|practitioner/i);
+      expect(rb).toMatch(/jolinna|wei|physio|practitioner/i);
+    });
+
+    test("'2' routes to email escalation", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', innerNoSlotsData());
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '2'));
+      expect(reply).toMatch(/support team|be in touch/i);
+    });
+
+    test("'3' routes to WhatsApp link", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', innerNoSlotsData());
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '3'));
+      expect(reply).toMatch(/wa\.me/i);
     });
   });
 
@@ -1678,13 +1734,17 @@ describe('Booking menu and flow coverage', () => {
       ],
     });
 
-    test('0 clinics with slots → falls back to type list with no-slots message', async () => {
+    test('0 clinics with slots → shows 3-button dead-end prompt', async () => {
       engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', basePhysioClinicData());
-      const reply = await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
-      expect(reply).toMatch(/no slots|visit type|initial|return/i);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/try another visit type/i);
+      expect(reply).toMatch(/email us/i);
+      expect(reply).toMatch(/message on whatsapp/i);
       const updated = await db.getSession(session.id);
-      expect(JSON.parse(updated.data || '{}').selection_step).toBe('choose_type');
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.no_slots_prompt).toMatchObject({ context: 'physio_inner' });
+      expect(d.selection_step).toBe('choose_clinic');
     });
 
     test('1 clinic with slots → auto-advances past clinic picker to slot list', async () => {
@@ -1742,6 +1802,56 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificPhysio'], session, '99');
       const updated = await db.getSession(session.id);
       expect(JSON.parse(updated.data || '{}').selection_step).toBe('choose_clinic');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_PHYSIO — inner no-slots dead-end (physio_inner) ────────────
+  describe('BOOK_SPECIFIC_PHYSIO — choose_clinic inner no-slots (physio_inner)', () => {
+    const innerNoSlotsData = () => ({
+      selection_step: 'choose_clinic',
+      selected_physio: PHYSIO_1,
+      selected_appt_type: TYPE_1,
+      appointment_type_list: [TYPE_1, TYPE_2],
+      appt_type_page: 0,
+      no_slots_prompt: { context: 'physio_inner' },
+      navigation_chain: [
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type',   had_multiple_options: true, auto: false },
+      ],
+    });
+
+    test("'1' clears type+clinic state, preserves physio+type_list, shows type list", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', innerNoSlotsData());
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, '1'));
+      expect(reply).toMatch(/initial|return|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.no_slots_prompt).toBeFalsy();
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.selected_physio).toMatchObject({ id: PHYSIO_1.id });
+      expect(Array.isArray(d.appointment_type_list)).toBe(true);
+    });
+
+    test("'0' and 'back' behave identically to '1' — return to type list", async () => {
+      const s0 = await seedAt('BOOK_SPECIFIC_PHYSIO', innerNoSlotsData());
+      const sb = await seedAt('BOOK_SPECIFIC_PHYSIO', innerNoSlotsData());
+      const r0 = String(await callHandler(engine, ['handleBookSpecificPhysio'], s0, '0'));
+      const rb = String(await callHandler(engine, ['handleBookSpecificPhysio'], sb, 'back'));
+      expect(r0).toMatch(/initial|return|visit type/i);
+      expect(rb).toMatch(/initial|return|visit type/i);
+    });
+
+    test("'2' routes to email escalation", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', innerNoSlotsData());
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, '2'));
+      expect(reply).toMatch(/support team|be in touch/i);
+    });
+
+    test("'3' routes to WhatsApp link", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', innerNoSlotsData());
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, '3'));
+      expect(reply).toMatch(/wa\.me/i);
     });
   });
 
