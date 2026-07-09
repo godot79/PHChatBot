@@ -951,7 +951,7 @@ class ChatbotEngine {
         { id: '1',      title: 'Book Appointment' },
         { id: '2',      title: 'Cancel Appointment' },
         { id: '3',      title: 'Reschedule' },
-        { id: 'region', title: 'Change Region' },
+        { id: 'region', title: 'Change Country' },
         { id: '9',      title: 'Logout & Delete My Data' },
       ]);
     } else {
@@ -961,7 +961,7 @@ class ChatbotEngine {
         { id: '2',      title: 'Book or Manage' },
         { id: '3',      title: 'View Fees' },
         { id: '4',      title: 'View Locations' },
-        { id: 'region', title: 'Change Region' },
+        { id: 'region', title: 'Change Country' },
       ]);
     }
   }
