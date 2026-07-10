@@ -9,6 +9,11 @@ const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('../../prohealth-mailer/EmailTemplates');
 const { REGION_SUPPORT_INFO, REGION_FEES } = require('../config/regions');
+const {
+  getAllAppointmentTypesForAllPractitioners,
+  getPractitionersForType,
+  getPractitionersForTypeName,
+} = require('./_appointmentTypeHelpers');
 
 
 function getMailerConfig() {
@@ -293,86 +298,6 @@ async function uniquePractitionersFromGroups(groups) {
  * @param {Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>} groups
  * @returns {Promise<Array<Object>>} Array of unique appointment type objects.
  */
-async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
-  const seen = new Set();
-  const result = [];
-  for (const group of groups) {
-    for (const p of group.practitioners) {
-      const types = await clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
-      for (const t of types) {
-        if (!seen.has(t.id)) {
-          seen.add(t.id);
-          result.push(t);
-        }
-      }
-    }
-  }
-  return result;
-}
-
-/**
- * Return all unique practitioners who offer the given appointment type ID.
- *
- * Why: Cliniko may return numeric or string IDs. Strict equality causes
- * false negatives. Compare IDs as strings to avoid dropping valid matches.
- *
- * @param {Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>} groups
- * @param {ClinikoAPI} clinikoAPI
- * @param {string|number} apptTypeId
- * @returns {Promise<Array<Object>>}
- */
-
-async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
-  const targetId = String(apptTypeId);
-  const seen = new Set();
-  const result = [];
-  for (const group of (groups || [])) {
-    for (const p of (group.practitioners || [])) {
-      if (seen.has(p.id)) continue;
-      const types = await clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
-      if ((types || []).some(t => String(t.id) === targetId)) {
-        seen.add(p.id);
-        result.push(p);
-      }
-    }
-  }
-  return result;
-}
-
-/**
- * Return all practitioners who offer an appointment type by NAME.
- * Why: Type IDs differ per practitioner for the same label, so ID match is insufficient.
- *
- * @param {Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>} groups
- * @param {ClinikoAPI} clinikoAPI
- * @param {string} apptTypeName
- * @returns {Promise<Array<Object>>}
- */
-async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
-  const normalize = (s) => String(s || '')
-    .toLowerCase()
-    .replace(/[\u2010-\u2015]/g, '-') // Unicode dashes \u2192 ASCII hyphen
-    .replace(/-/g, ' ')               // hyphens \u2192 spaces (same as normalizeTypeName)
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const target = normalize(apptTypeName);
-  const seen = new Set();
-  const result = [];
-
-  for (const group of groups || []) {
-    for (const p of group.practitioners || []) {
-      if (seen.has(p.id)) continue;
-      const types = await clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
-      if ((types || []).some(t => normalize(t.name) === target)) {
-        seen.add(p.id);
-        result.push(p);
-      }
-    }
-  }
-  return result;
-}
-
 /**
  * Returns support info string for the given region code.
  * Defaults to SG if region not found.
@@ -1213,7 +1138,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       'To get started, are you registered with us?',
       [
         { id: '1', title: "Yes, I'm registered" },
-        { id: '2', title: 'Register as new patient' },
+        { id: '2', title: 'Register new patient' },
         { id: '3', title: 'Forgot my details' },
       ]
     );
@@ -2001,7 +1926,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.no_slots_prompt = { context: 'history' };
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         return buttons(`No available slots for that combination.`, [
-          { id: '1', title: 'Go back and try again' },
+          { id: '1', title: 'Try Again' },
           { id: '2', title: 'Email us' },
           { id: '3', title: 'Message on WhatsApp' },
         ]);
@@ -2135,24 +2060,22 @@ if (/^p(rev)?$/i.test(text)) {
      */
     const buildAvailablePhysiosForTypeName = async (typeNorm) => {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
-      const phys = []; const seen = new Set();
-      // First collect by TYPE NAME
-      for (const g of groups || []) {
-        for (const p of g.practitioners || []) {
-          if (seen.has(p.id)) continue;
-          const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
-          if ((types || []).some(t => normName(t.name) === typeNorm)) {
-            seen.add(p.id);
-            phys.push(p);
-          }
-        }
-      }
-      // Filter out those without any slots in window
-      const available = [];
-      for (const p of phys) {
-        if (await practitionerHasSlotsForTypeName(p, typeNorm)) available.push(p);
-      }
-      return available;
+      // Collect unique practitioners across all clinics
+      const allPractitioners = [...new Map(
+        (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
+      ).values()];
+      // Filter by type name — all getAppointmentTypes fetches in parallel
+      const allTypes = await Promise.all(
+        allPractitioners.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+      );
+      const phys = allPractitioners.filter((p, i) =>
+        (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
+      );
+      // Filter by slot availability — all slot checks in parallel
+      const flags = await Promise.all(
+        phys.map(p => practitionerHasSlotsForTypeName(p, typeNorm))
+      );
+      return phys.filter((_, i) => flags[i]);
     };
 
     if (data.no_slots_prompt) {
@@ -2280,7 +2203,7 @@ if (/^p(rev)?$/i.test(text)) {
         return buttons(
           `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
           [
-            { id: '1', title: 'Go back and try again' },
+            { id: '1', title: 'Try Again' },
             { id: '2', title: 'Email us' },
             { id: '3', title: 'Message on WhatsApp' },
           ]
@@ -2359,17 +2282,17 @@ if (/^p(rev)?$/i.test(text)) {
         const allClinics = await clinicsForPractitioner(data.selected_physio.id);
         const typeNorm = normName(data.selected_appt_type.name);
         const { from, to } = normalizeDateWindow();
-        const withSlots = [];
-        for (const c of allClinics) {
-          const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+        const slotResults0 = await Promise.all(
+          allClinics.map(c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
             business_id: String(c.id),
             practitioner_id: String(data.selected_physio.id),
             from,
             to
-          });
-          const any = (raw || []).some(s => normName(s.appointment_type_name) === typeNorm);
-          if (any) withSlots.push(c);
-        }
+          }))
+        );
+        const withSlots = allClinics.filter((c, i) =>
+          (slotResults0[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
+        );
         data.clinic_list = withSlots; data.clinic_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
 
@@ -2444,7 +2367,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.no_slots_prompt = { context: 'soonest' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return buttons(`No slots found for ${data.selected_appt_type?.name}.`, [
-          { id: '1', title: 'Go back and try again' },
+          { id: '1', title: 'Try Again' },
           { id: '2', title: 'Email us' },
           { id: '3', title: 'Message on WhatsApp' },
         ]);
@@ -2756,13 +2679,14 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow(data.selected_date, data.selected_date, 1);
-        const withSlots = [];
-        for (const c of allClinics) {
-          const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+        const slotResults1 = await Promise.all(
+          allClinics.map(c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
             business_id: c.id, practitioner_id: physId, from, to
-          });
-          if ((raw || []).some(s => normName(s.appointment_type_name) === typeNorm)) withSlots.push(c);
-        }
+          }))
+        );
+        const withSlots = allClinics.filter((c, i) =>
+          (slotResults1[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
+        );
         data.clinic_list = withSlots;
         data.clinic_page = 0;
 
@@ -2773,7 +2697,7 @@ if (/^p(rev)?$/i.test(text)) {
           return buttons(
             `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`,
             [
-              { id: '1', title: 'Try another practitioner' },
+              { id: '1', title: 'Try another physio' },
               { id: '2', title: 'Email us' },
               { id: '3', title: 'Message on WhatsApp' },
             ]
@@ -2839,7 +2763,7 @@ if (/^p(rev)?$/i.test(text)) {
         return buttons(
           `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
           [
-            { id: '1', title: 'Go back and try again' },
+            { id: '1', title: 'Try Again' },
             { id: '2', title: 'Email us' },
             { id: '3', title: 'Message on WhatsApp' },
           ]
@@ -3064,13 +2988,14 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow();
-        const withSlots = [];
-        for (const c of allClinics) {
-          const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+        const slotResults2 = await Promise.all(
+          allClinics.map(c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
             business_id: c.id, practitioner_id: physId, from, to
-          });
-          if ((raw || []).some(s => normName(s.appointment_type_name) === typeNorm)) withSlots.push(c);
-        }
+          }))
+        );
+        const withSlots = allClinics.filter((c, i) =>
+          (slotResults2[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
+        );
         data.clinic_list = withSlots;
         data.clinic_page = 0;
 
@@ -3080,7 +3005,7 @@ if (/^p(rev)?$/i.test(text)) {
           return buttons(
             `No slots available for ${getPractitionerDisplayName(data.selected_physio)} with ${data.selected_appt_type?.name || 'that visit type'}.`,
             [
-              { id: '1', title: 'Try another visit type' },
+              { id: '1', title: 'Try another type' },
               { id: '2', title: 'Email us' },
               { id: '3', title: 'Message on WhatsApp' },
             ]
@@ -3152,7 +3077,7 @@ if (/^p(rev)?$/i.test(text)) {
         return buttons(
           `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
           [
-            { id: '1', title: 'Go back and try again' },
+            { id: '1', title: 'Try Again' },
             { id: '2', title: 'Email us' },
             { id: '3', title: 'Message on WhatsApp' },
           ]
@@ -3318,8 +3243,10 @@ if (/^p(rev)?$/i.test(text)) {
         const pracList = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
 
         const buckets = new Map(); // norm -> { display, ids:Set }
-        for (const p of pracList) {
-          const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) });
+        const allClinicTypes = await Promise.all(
+          pracList.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) }))
+        );
+        for (const types of allClinicTypes) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name)) continue;
@@ -3385,11 +3312,12 @@ if (/^p(rev)?$/i.test(text)) {
         const pracInClinic = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
         const wanted = new Set((data.appt_type_name_to_ids_norm?.[normName(data.selected_appt_type?.name || '')] || []).map(String));
 
-        const practitioners = [];
-        for (const p of pracInClinic) {
-          const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) });
-          if ((types || []).some(t => wanted.has(String(t.id)))) practitioners.push(p);
-        }
+        const physioTypeResults = await Promise.all(
+          pracInClinic.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) }))
+        );
+        const practitioners = pracInClinic.filter((p, i) =>
+          (physioTypeResults[i] || []).some(t => wanted.has(String(t.id)))
+        );
 
         data.practitioner_list = practitioners;
         data.practitioner_page = 0;
@@ -3464,7 +3392,7 @@ if (/^p(rev)?$/i.test(text)) {
         return buttons(
           `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
           [
-            { id: '1', title: 'Go back and try again' },
+            { id: '1', title: 'Try Again' },
             { id: '2', title: 'Email us' },
             { id: '3', title: 'Message on WhatsApp' },
           ]
@@ -3612,7 +3540,7 @@ if (/^p(rev)?$/i.test(text)) {
         data: session.data
       });
       return buttons(`No available slots to show.`, [
-        { id: '1', title: 'Go back and try again' },
+        { id: '1', title: 'Try Again' },
         { id: '2', title: 'Email us' },
         { id: '3', title: 'Message on WhatsApp' },
       ]);
@@ -4332,7 +4260,7 @@ if (/^p(rev)?$/i.test(text)) {
         data: session.data
       });
       return buttons(`Sorry, no available slots for rescheduling this appointment.`, [
-        { id: '1', title: 'Go back and try again' },
+        { id: '1', title: 'Try Again' },
         { id: '2', title: 'Email us' },
         { id: '3', title: 'Message on WhatsApp' },
       ]);

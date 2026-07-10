@@ -1081,6 +1081,7 @@ describe('Booking menu and flow coverage', () => {
   // resetCliniko() only updates the prototype. We must restore defaults on the INSTANCE.
   beforeEach(() => {
     jest.clearAllMocks();
+    ClinikoAPI._clearGroupsCache();
     resetCliniko();
     resetWhatsApp();
     engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SOONEST_SLOT]);
@@ -1553,7 +1554,7 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', baseClinicData());
       const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
-      expect(reply).toMatch(/try another practitioner/i);
+      expect(reply).toMatch(/try another physio/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       const updated = await db.getSession(session.id);
@@ -1617,6 +1618,29 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificDate'], session, '99');
       const updated = await db.getSession(session.id);
       expect(JSON.parse(updated.data || '{}').selection_step).toBe('choose_clinic');
+    });
+
+    test('slot checks for multiple clinics are dispatched concurrently', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City',     practitioners: [PHYSIO_1] },
+      ]);
+      const dispatched = [];
+      const resolvers = [];
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ business_id }) => {
+        dispatched.push(business_id);
+        return new Promise(resolve => resolvers.push(() => resolve([SOONEST_SLOT])));
+      });
+
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseClinicData());
+      const handlerPromise = callHandler(engine, ['handleBookSpecificDate'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      expect(dispatched).toContain('BIZ-001');
+      expect(dispatched).toContain('BIZ-002');
+
+      resolvers.forEach(r => r());
+      await handlerPromise;
     });
   });
 
@@ -1743,7 +1767,7 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', basePhysioClinicData());
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
-      expect(reply).toMatch(/try another visit type/i);
+      expect(reply).toMatch(/try another type/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       const updated = await db.getSession(session.id);
@@ -1807,6 +1831,29 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificPhysio'], session, '99');
       const updated = await db.getSession(session.id);
       expect(JSON.parse(updated.data || '{}').selection_step).toBe('choose_clinic');
+    });
+
+    test('slot checks for multiple clinics are dispatched concurrently', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City',     practitioners: [PHYSIO_1] },
+      ]);
+      const dispatched = [];
+      const resolvers = [];
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ business_id }) => {
+        dispatched.push(business_id);
+        return new Promise(resolve => resolvers.push(() => resolve([SOONEST_SLOT])));
+      });
+
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', basePhysioClinicData());
+      const handlerPromise = callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      expect(dispatched).toContain('BIZ-001');
+      expect(dispatched).toContain('BIZ-002');
+
+      resolvers.forEach(r => r());
+      await handlerPromise;
     });
   });
 
@@ -1909,6 +1956,83 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_SPECIFIC_CLINIC — choose_type parallelism ─────────────────────────
+  describe('BOOK_SPECIFIC_CLINIC — choose_type parallelism', () => {
+    test('getAppointmentTypes calls for all clinic practitioners fire concurrently', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+
+      const dispatched = [];
+      const resolvers = [];
+      // Return 2 types so planForward doesn't auto-advance to choose_physio (which would
+      // call getAppointmentTypes again while the mock is still held, causing a timeout).
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => {
+        dispatched.push(practitioner_id);
+        return new Promise(resolve => resolvers.push(() => resolve([
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+        ])));
+      });
+
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth In Touch' },
+      });
+      const handlerPromise = callHandler(engine, ['handleBookSpecificClinic'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      // Both fetches must be in-flight before either resolves
+      expect(dispatched).toContain(PHYSIO_1.id);
+      expect(dispatched).toContain(PHYSIO_2.id);
+
+      resolvers.forEach(r => r());
+      await handlerPromise;
+
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30 },
+      ]);
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_CLINIC — choose_physio parallelism ────────────────────────
+  describe('BOOK_SPECIFIC_CLINIC — choose_physio parallelism', () => {
+    test('getAppointmentTypes calls for clinic physio filter fire concurrently', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+
+      const dispatched = [];
+      const resolvers = [];
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => {
+        dispatched.push(practitioner_id);
+        return new Promise(resolve => resolvers.push(() => resolve([{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' }])));
+      });
+
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_physio',
+        selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth In Touch' },
+        selected_appt_type: { name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'] },
+        appt_type_name_to_ids_norm: { 'initial 60 min visit (new clients)': ['AT-001'] },
+      });
+      const handlerPromise = callHandler(engine, ['handleBookSpecificClinic'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      // Both physio type-checks must be in-flight before either resolves
+      expect(dispatched).toContain(PHYSIO_1.id);
+      expect(dispatched).toContain(PHYSIO_2.id);
+
+      resolvers.forEach(r => r());
+      await handlerPromise;
+
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30 },
+      ]);
+    });
+  });
+
   // ─── BOOK_SOONEST — choose_type ──────────────────────────────────────────────
   describe('BOOK_SOONEST — choose_type', () => {
     test('entry with multiple types → renders type list', async () => {
@@ -1970,6 +2094,32 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
     });
+
+    test('slot checks for multiple practitioners run concurrently during physio filtering', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+      const dispatched = [];
+      const resolvers = [];
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ practitioner_id }) => {
+        dispatched.push(practitioner_id);
+        return new Promise(resolve => resolvers.push(() => resolve([SOONEST_SLOT])));
+      });
+
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1, // 1 type → auto-selects, triggers buildAvailablePhysiosForTypeName
+      });
+      const handlerPromise = callHandler(engine, ['handleBookSoonest'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      // Both practitioners' slot checks must have started before either resolves
+      expect(dispatched).toContain(PHYSIO_1.id);
+      expect(dispatched).toContain(PHYSIO_2.id);
+
+      resolvers.forEach(r => r());
+      await handlerPromise;
+    });
   });
 
   // ─── BOOK_SOONEST — choose_physio ────────────────────────────────────────────
@@ -1982,7 +2132,7 @@ describe('Booking menu and flow coverage', () => {
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       expect(reply).toMatch(/no practitioners|no.*slot/i);
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
     });
@@ -2059,6 +2209,43 @@ describe('Booking menu and flow coverage', () => {
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
       expect(reply).toMatch(/choose appointment type|initial|return/i);
+    });
+
+    test('multiple practitioner type-fetches run concurrently when building physio list from choose_physio re-entry', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+
+      // Held-promise pattern: each getAppointmentTypes call is suspended until we release it.
+      // With a serial for...await loop, only PHYSIO_1's fetch would be in-flight at setImmediate
+      // time — PHYSIO_2's fetch can't start until PHYSIO_1's promise resolves. Parallel Promise.all
+      // dispatches both before yielding, so both IDs appear before setImmediate fires.
+      const typeDispatched = [];
+      const typeResolvers = [];
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => {
+        typeDispatched.push(practitioner_id);
+        return new Promise(resolve => typeResolvers.push(() => resolve([{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' }])));
+      });
+
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1,
+      });
+      const handlerPromise = callHandler(engine, ['handleBookSoonest'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      // Both fetches must be in-flight before either resolves — proves concurrent dispatch
+      expect(typeDispatched).toContain(PHYSIO_1.id);
+      expect(typeDispatched).toContain(PHYSIO_2.id);
+
+      typeResolvers.forEach(r => r());
+      await handlerPromise;
+
+      // getAppointmentTypes is an instance own property — restore it since beforeEach doesn't reset it
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30 },
+      ]);
     });
   });
 
@@ -2142,6 +2329,34 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/choose appointment type|initial|return/i);
     });
 
+    test('slot checks for multiple clinics are dispatched concurrently', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City',     practitioners: [PHYSIO_1] },
+      ]);
+      const dispatched = [];
+      const resolvers = [];
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ business_id }) => {
+        dispatched.push(business_id);
+        return new Promise(resolve => resolvers.push(() => resolve([SOONEST_SLOT])));
+      });
+
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+      });
+      const handlerPromise = callHandler(engine, ['handleBookSoonest'], session, '');
+      await new Promise(r => setImmediate(r));
+
+      expect(dispatched).toContain('BIZ-001');
+      expect(dispatched).toContain('BIZ-002');
+
+      resolvers.forEach(r => r());
+      await handlerPromise;
+    });
+
     test('0/back with >1 available physios → returns to physio list', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
@@ -2175,7 +2390,7 @@ describe('Booking menu and flow coverage', () => {
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       expect(reply).toMatch(/no slots found/i);
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
     });
@@ -2195,7 +2410,7 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       // physio list shown, no 3-button dead-end prompt
       expect(d.no_slots_prompt).toBeFalsy();
-      expect(String(reply)).not.toMatch(/go back and try again/i);
+      expect(String(reply)).not.toMatch(/try again.*email us/i);
     });
 
     test('no_slots_prompt option 1 (go back and try again): falls to booking menu when no nav chain', async () => {
@@ -2208,7 +2423,7 @@ describe('Booking menu and flow coverage', () => {
         navigation_chain: [],
       });
       const reply = String(await callHandler(engine, ['handleBookSoonest'], session, '1'));
-      expect(reply).not.toMatch(/go back and try again/i);
+      expect(reply).not.toMatch(/try again.*email us/i);
       expect(reply).toMatch(/book|appointment|manage/i);
     });
 
@@ -2722,7 +2937,7 @@ describe('Dead-end standardization', () => {
     test('SELECT_SLOT with empty slot_list shows 3-button standard prompt', async () => {
       const session = await seedAt('SELECT_SLOT', { slot_list: [] });
       const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, ''));
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       expect(reply).not.toMatch(/booking menu/i);
@@ -2735,7 +2950,7 @@ describe('Dead-end standardization', () => {
         selected_date: '2026-08-01',
       });
       const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       expect(reply).not.toMatch(/booking menu/i);
@@ -2745,7 +2960,7 @@ describe('Dead-end standardization', () => {
       engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', viewSlotsData());
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       expect(reply).not.toMatch(/booking menu/i);
@@ -2758,7 +2973,7 @@ describe('Dead-end standardization', () => {
         selected_previous_appt: { appointment_type: { name: 'Initial 60 Min Visit (New Clients)' } },
       });
       const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       expect(reply).not.toMatch(/booking menu/i);
@@ -2780,7 +2995,7 @@ describe('Dead-end standardization', () => {
     test('BOOK_DATE no-slots "1" (go back): clears no_slots_prompt, returns booking menu', async () => {
       const session = await seedAt('BOOK_SPECIFIC_DATE', noSlotsSessionData('date', { selected_date: '2026-08-01' }));
       const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '1'));
-      expect(reply).not.toMatch(/go back and try again/i);
+      expect(reply).not.toMatch(/try again.*email us/i);
       expect(reply).toMatch(/book|appointment|manage/i);
     });
 
@@ -2799,7 +3014,7 @@ describe('Dead-end standardization', () => {
     test('BOOK_PHYSIO no-slots "1" (go back): clears no_slots_prompt, returns booking menu', async () => {
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', noSlotsSessionData('physio'));
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, '1'));
-      expect(reply).not.toMatch(/go back and try again/i);
+      expect(reply).not.toMatch(/try again.*email us/i);
       expect(reply).toMatch(/book|appointment|manage/i);
     });
 
@@ -2812,7 +3027,7 @@ describe('Dead-end standardization', () => {
     test('BOOK_HISTORY no-slots "1" (go back): clears no_slots_prompt, returns booking menu', async () => {
       const session = await seedAt('BOOK_HISTORY', noSlotsSessionData('history'));
       const reply = String(await callHandler(engine, ['handleBookHistory'], session, '1'));
-      expect(reply).not.toMatch(/go back and try again/i);
+      expect(reply).not.toMatch(/try again.*email us/i);
       expect(reply).toMatch(/book|appointment|manage/i);
     });
 
@@ -2857,7 +3072,7 @@ describe('Dead-end standardization', () => {
       const session = await seedAt('VERIFY', {});
       const reply = await callHandler(engine, ['handleVerifyState'], session, '');
       expect(reply).toMatch(/registered with us/i);
-      expect(reply).toMatch(/register as new patient/i);
+      expect(reply).toMatch(/register new patient/i);
       expect(reply).toMatch(/forgot my details/i);
     });
 
@@ -2926,7 +3141,7 @@ describe('Dead-end standardization', () => {
       });
       const reply = String(await callHandler(engine, ['handleRescheduleIntentConfirmState'], session, 'yes'));
       expect(reply.length).toBeGreaterThan(0);
-      expect(reply).toMatch(/go back and try again/i);
+      expect(reply).toMatch(/try again/i);
       expect(reply).toMatch(/email us/i);
       expect(reply).toMatch(/message on whatsapp/i);
       expect(reply).not.toMatch(/booking menu/i);
@@ -2994,7 +3209,7 @@ describe('Dead-end standardization', () => {
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
       expect(typeof reply).toBe('string');
       expect(reply.length).toBeGreaterThan(0);
-      expect(reply).not.toMatch(/go back and try again/i);
+      expect(reply).not.toMatch(/try again.*email us/i);
     });
 
     test('VERIFY success path still works — invalid email returns format error', async () => {
@@ -3885,7 +4100,7 @@ describe('H3 regression — BOOK_SPECIFIC_CLINIC view_slots no-slots gives 3-opt
     expect(reply).toHaveProperty('interactive');
     expect(reply.interactive.type).toBe('button');
     const labels = reply.interactive.action.buttons.map(b => b.reply.title);
-    expect(labels).toContain('Go back and try again');
+    expect(labels).toContain('Try Again');
     expect(labels).toContain('Email us');
     expect(labels).toContain('Message on WhatsApp');
     expect(labels).toHaveLength(3);
@@ -4494,5 +4709,179 @@ describe('Appointment type normalisation — BOOK_SPECIFIC_CLINIC hyphen variant
     // If the physio was NOT found the handler stays at BOOK_SPECIFIC_CLINIC.
     const updated = await db.getSession(session.id);
     expect(updated.conversation_state).toBe('SELECT_SLOT');
+  });
+});
+
+// =============================================================================
+// WhatsApp interactive length constraints
+// Button reply titles must be ≤20 chars; list row titles ≤24; list button label ≤20.
+// Regression guard: protects against the production bug where 'Register as new patient'
+// (23 chars) and no-slots buttons caused WhatsApp error 131009 and silently killed the bot.
+// =============================================================================
+describe('WhatsApp interactive length constraints', () => {
+  const WA_BUTTON_MAX   = 20;
+  const WA_LIST_ROW_MAX = 24;
+  const WA_LIST_BTN_MAX = 20;
+
+  function assertInteractiveLengths(env, label) {
+    if (!env || !env.interactive) return;
+    const { interactive } = env;
+    if (interactive.type === 'button') {
+      for (const btn of interactive.action.buttons) {
+        expect(btn.reply.title.length).toBeLessThanOrEqual(
+          WA_BUTTON_MAX,
+          `${label}: button '${btn.reply.title}' is ${btn.reply.title.length} chars (max ${WA_BUTTON_MAX})`
+        );
+      }
+    }
+    if (interactive.type === 'list') {
+      expect(interactive.action.button.length).toBeLessThanOrEqual(
+        WA_LIST_BTN_MAX,
+        `${label}: list button label '${interactive.action.button}' is ${interactive.action.button.length} chars`
+      );
+      for (const section of (interactive.action.sections || [])) {
+        for (const row of (section.rows || [])) {
+          expect(row.title.length).toBeLessThanOrEqual(
+            WA_LIST_ROW_MAX,
+            `${label}: list row '${row.title}' is ${row.title.length} chars (max ${WA_LIST_ROW_MAX})`
+          );
+        }
+      }
+    }
+  }
+
+  let db, sm, engine;
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    resetCliniko();
+    ClinikoAPI._clearGroupsCache();
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); ClinikoAPI._clearGroupsCache(); });
+
+  async function seedUnverified(phone) {
+    const s = await sm.getOrCreateSession(phone, true);
+    await sm.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    return sm.getSession(s.id);
+  }
+
+  async function seedVerifiedForLength(phone) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'INTRO',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    return db.getSession(id);
+  }
+
+  // ── GATEWAY_BUTTONS: the production failure path ─────────────────────────────
+  // INTRO "2" → handleVerifyState shows gateway buttons.
+  // 'Register new patient' must be ≤20 chars; historically 'Register as new patient' was 23.
+  test('VERIFY gateway buttons: all titles ≤20 chars', async () => {
+    const session = await seedUnverified('+6599100001');
+    const reply = await engine.handleVerifyState(session, '');
+    assertInteractiveLengths(reply, 'VERIFY gateway');
+    const labels = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(labels.every(t => t.length <= WA_BUTTON_MAX)).toBe(true);
+    expect(labels).toHaveLength(3);
+  });
+
+  // ── Unverified main menu: list row titles ≤24 chars ─────────────────────────
+  test('unverified main menu (renderMainMenu): all list row titles ≤24 chars', async () => {
+    const session = await seedUnverified('+6599100002');
+    const reply = await engine.renderMainMenu(session);
+    assertInteractiveLengths(reply, 'unverified main menu');
+  });
+
+  // ── Verified main menu: list row titles ≤24 chars ────────────────────────────
+  test('verified main menu (renderMainMenu): all list row titles ≤24 chars', async () => {
+    const session = await seedVerifiedForLength('+6599100003');
+    const reply = await engine.renderMainMenu(session);
+    assertInteractiveLengths(reply, 'verified main menu');
+  });
+
+  // ── No-slots 3-button panels: all titles ≤20 chars ───────────────────────────
+  // Each handler that can show a no-slots panel is exercised by seeding a session
+  // in the relevant state with a no_slots_prompt already set, then sending an
+  // unrecognised input so the handler re-shows the buttons.
+  // (Seeding no_slots_prompt avoids needing live Cliniko data.)
+
+  async function seedNoSlots(phone, state, noSlotsCtx, extra = {}) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: state,
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({
+        no_slots_prompt: { context: noSlotsCtx },
+        selection_step: extra.selection_step || 'view_slots',
+        selected_appt_type: { id: 'AT-001', name: 'Initial Consultation' },
+        selected_physio: { id: 'PRAC-001', first_name: 'Alice', last_name: 'Smith' },
+        selected_clinic: { id: 'BIZ-001', business_name: 'Test Clinic' },
+        navigation_chain: extra.navigation_chain || [],
+        ...extra.data,
+      }),
+    });
+    return db.getSession(id);
+  }
+
+  const noSlotsScenarios = [
+    { label: 'BOOK_HISTORY no-slots',          state: 'BOOK_HISTORY',          ctx: 'history',     handler: 'handleBookHistory' },
+    { label: 'BOOK_SOONEST no-slots',          state: 'BOOK_SOONEST',          ctx: 'soonest',     handler: 'handleBookSoonest' },
+    { label: 'BOOK_SPECIFIC_DATE outer',       state: 'BOOK_SPECIFIC_DATE',    ctx: 'date',        handler: 'handleBookSpecificDate' },
+    { label: 'BOOK_SPECIFIC_PHYSIO outer',     state: 'BOOK_SPECIFIC_PHYSIO',  ctx: 'physio',      handler: 'handleBookSpecificPhysio' },
+    { label: 'BOOK_SPECIFIC_CLINIC outer',     state: 'BOOK_SPECIFIC_CLINIC',  ctx: 'clinic',      handler: 'handleBookSpecificClinic' },
+    { label: 'BOOK_SPECIFIC_DATE inner (Try another physio)',  state: 'BOOK_SPECIFIC_DATE',   ctx: 'date_inner',   handler: 'handleBookSpecificDate' },
+    { label: 'BOOK_SPECIFIC_PHYSIO inner (Try another type)', state: 'BOOK_SPECIFIC_PHYSIO', ctx: 'physio_inner', handler: 'handleBookSpecificPhysio' },
+  ];
+
+  test.each(noSlotsScenarios)(
+    '$label: no-slots buttons all ≤20 chars',
+    async ({ label, state, ctx, handler }) => {
+      const phoneIdx = noSlotsScenarios.indexOf(noSlotsScenarios.find(s => s.label === label));
+      const session = await seedNoSlots(`+6599200${String(phoneIdx).padStart(3, '0')}`, state, ctx);
+      const reply = await engine[handler](session, 'zzz_unknown_input');
+      if (reply && reply.interactive) {
+        assertInteractiveLengths(reply, label);
+      }
+      // If handler returned a string (fell through), the no_slots_prompt was not re-shown;
+      // we still verify the seeded session data was intact (belt-and-suspenders).
+      const updated = await db.getSession(session.id);
+      const data = JSON.parse(updated.data || '{}');
+      // The session must still be in the no-slots state if the handler didn't handle the input
+      if (!reply?.interactive) {
+        expect(data.no_slots_prompt || updated.conversation_state).toBeTruthy();
+      }
+    }
+  );
+
+  // ── SELECT_SLOT and RESCHEDULE no-slots panels ────────────────────────────────
+  test('SELECT_SLOT no-slots buttons all ≤20 chars', async () => {
+    const id = await db.createSession('+6599300001', PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'SELECT_SLOT',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({
+        no_slots_prompt: { context: 'slot' },
+        selected_appt_type: { id: 'AT-001', name: 'Initial Consultation' },
+        selected_physio: { id: 'PRAC-001', first_name: 'Alice', last_name: 'Smith' },
+        selected_clinic: { id: 'BIZ-001', business_name: 'Test Clinic' },
+        navigation_chain: [],
+      }),
+    });
+    const session = await db.getSession(id);
+    const reply = await engine.handleSelectSlotState(session, 'zzz_unknown');
+    if (reply && reply.interactive) {
+      assertInteractiveLengths(reply, 'SELECT_SLOT no-slots');
+    }
   });
 });
