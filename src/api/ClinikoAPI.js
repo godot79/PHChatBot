@@ -1,10 +1,17 @@
 const SendMessage = require("./SendMessage.js");
 const Logger = require("../core/Logger.js");
 const config = require('../config/cliniko.js');
+const RegionContext = require('../core/RegionContext');
 
 // Clinics whose names match this pattern are excluded from all booking flows.
 // Physiofocus SG was shut down; UWC clinics are handled by a separate contract.
 const EXCLUDED_CLINIC_PATTERN = /UWC|physio\s*focus/i;
+
+// Short-lived cache for getPractitionersByClinic(), keyed by region.
+// Practitioners change rarely; 30 s collapses the 14 call sites in the engine
+// to at most one real Cliniko fetch per region per request window.
+const _groupsCache = new Map();
+const GROUPS_CACHE_TTL_MS = 30_000;
 
 /**
  * Cliniko API wrapper for patient, appointment, and clinic actions.
@@ -560,29 +567,36 @@ class ClinikoAPI {
    * @returns {Promise<Array<{clinic_id: string, clinic_name: string, practitioners: Array<Object>}>}
    */
   async getPractitionersByClinic() {
+    const cacheKey = RegionContext.get() || 'default';
+    const cached = _groupsCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) return cached.data;
+
     const params = new URLSearchParams();
     params.append('q[]', 'show_in_online_bookings:=T');
     try {
       const clinics = await this.getClinics();
-      const grouped = [];
-
-      for (const clinic of clinics) {
-        const url = `/businesses/${clinic.id}/practitioners?${params.toString()}`;
-        console.debug(`Fetching physios : ${url}`); 
-        const practitioners = await new SendMessage(url, {}).get();
-
-        grouped.push({
-          clinic_id: clinic.id,
-          clinic_name: clinic.business_name,
-          practitioners: practitioners.practitioners || []
-        });
-      }
-      return grouped;
+      const results = await Promise.all(
+        clinics.map(async (clinic) => {
+          const url = `/businesses/${clinic.id}/practitioners?${params.toString()}`;
+          console.debug(`Fetching physios : ${url}`);
+          const practitioners = await new SendMessage(url, {}).get();
+          return {
+            clinic_id: clinic.id,
+            clinic_name: clinic.business_name,
+            practitioners: practitioners.practitioners || []
+          };
+        })
+      );
+      _groupsCache.set(cacheKey, { data: results, expiresAt: Date.now() + GROUPS_CACHE_TTL_MS });
+      return results;
     } catch (error) {
-      this.logger.error("getPractitionersByClinic failed : ${error}");
+      this.logger.error(`getPractitionersByClinic failed: ${error}`);
       return [];
     }
   }
+
+  // Test helper — clear the groups cache between test cases.
+  static _clearGroupsCache() { _groupsCache.clear(); }
 
   /**
    * Get available slots for a business (and optionally a practitioner) within a date range.

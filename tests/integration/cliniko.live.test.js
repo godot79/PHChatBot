@@ -106,6 +106,23 @@ describe('getPractitionersByClinic()', () => {
     const excluded = groups.filter(g => pattern.test(g.clinic_name));
     expect(excluded).toHaveLength(0);
   }, 60000);
+
+  maybeIt('groups count matches getClinics() count — no clinic dropped or duplicated', async () => {
+    const [clinics, groups] = await hk(() =>
+      Promise.all([api.getClinics(), api.getPractitionersByClinic()])
+    );
+    expect(groups).toHaveLength(clinics.length);
+    const ids = groups.map(g => g.clinic_id);
+    const unique = new Set(ids);
+    expect(unique.size).toBe(ids.length);
+  }, 60000);
+
+  maybeIt('second call returns from cache — completes in under 50ms', async () => {
+    await hk(() => api.getPractitionersByClinic());   // warm the cache
+    const t0 = Date.now();
+    await hk(() => api.getPractitionersByClinic());   // should hit cache
+    expect(Date.now() - t0).toBeLessThan(50);
+  }, 60000);
 });
 
 // =============================================================================

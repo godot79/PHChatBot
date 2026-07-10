@@ -12,6 +12,7 @@ jest.mock('../../../src/core/Logger', () =>
 jest.mock('../../../src/api/SendMessage');
 const SendMessage = require('../../../src/api/SendMessage');
 
+const RegionContext = require('../../../src/core/RegionContext');
 const ClinikoAPI = require('../../../src/api/ClinikoAPI');
 
 describe('ClinikoAPI', () => {
@@ -20,6 +21,7 @@ describe('ClinikoAPI', () => {
   let mockPost;
 
   beforeEach(() => {
+    ClinikoAPI._clearGroupsCache();
     mockGet  = jest.fn();
     mockPost = jest.fn();
     SendMessage.mockImplementation(() => ({ get: mockGet, post: mockPost }));
@@ -232,6 +234,126 @@ describe('ClinikoAPI', () => {
       mockGet.mockRejectedValue({ status: 500, error: 'server error' });
       const result = await api.getBookingsByPatientId('42', { when: 'future' });
       expect(result).toEqual([]);
+    });
+  });
+
+  // ─── getPractitionersByClinic ──────────────────────────────────────────────
+
+  describe('getPractitionersByClinic()', () => {
+    test('returns grouped array for all clinics', async () => {
+      mockGet
+        .mockResolvedValueOnce({
+          businesses: [
+            { id: 'c1', business_name: 'Clinic A' },
+            { id: 'c2', business_name: 'Clinic B' },
+          ],
+        })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p2' }] });
+
+      const result = await api.getPractitionersByClinic();
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({ clinic_id: 'c1', clinic_name: 'Clinic A', practitioners: [{ id: 'p1' }] });
+      expect(result[1]).toEqual({ clinic_id: 'c2', clinic_name: 'Clinic B', practitioners: [{ id: 'p2' }] });
+    });
+
+    test('dispatches all clinic fetches concurrently before any resolves', async () => {
+      mockGet.mockResolvedValueOnce({
+        businesses: [
+          { id: 'c1', business_name: 'Clinic A' },
+          { id: 'c2', business_name: 'Clinic B' },
+        ],
+      });
+
+      const callOrder = [];
+      const resolvers = [];
+      mockGet
+        .mockImplementationOnce(() => {
+          callOrder.push('c1');
+          return new Promise(resolve => resolvers.push({ resolve, data: { practitioners: [] } }));
+        })
+        .mockImplementationOnce(() => {
+          callOrder.push('c2');
+          return new Promise(resolve => resolvers.push({ resolve, data: { practitioners: [] } }));
+        });
+
+      const resultPromise = api.getPractitionersByClinic();
+      await new Promise(r => setImmediate(r));
+
+      // Both fetches must have started before either resolved
+      expect(callOrder).toEqual(['c1', 'c2']);
+
+      resolvers.forEach(r => r.resolve(r.data));
+      await resultPromise;
+    });
+
+    test('returns [] when getClinics() throws', async () => {
+      mockGet.mockRejectedValue(new Error('network error'));
+      const result = await api.getPractitionersByClinic();
+      expect(result).toEqual([]);
+    });
+
+    test('returns [] when a clinic practitioner fetch throws', async () => {
+      mockGet
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockRejectedValueOnce(new Error('timeout'));
+      const result = await api.getPractitionersByClinic();
+      expect(result).toEqual([]);
+    });
+
+    test('returns empty practitioners array when API response has no practitioners key', async () => {
+      mockGet
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockResolvedValueOnce({});
+      const result = await api.getPractitionersByClinic();
+      expect(result[0].practitioners).toEqual([]);
+    });
+
+    test('cache hit: second call returns same data without any HTTP calls', async () => {
+      mockGet
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
+
+      const first  = await api.getPractitionersByClinic();
+      const second = await api.getPractitionersByClinic();
+
+      expect(second).toBe(first);                // same object reference — cache hit
+      expect(mockGet).toHaveBeenCalledTimes(2);  // getClinics + 1 clinic, never re-fetched
+    });
+
+    test('cache miss: expired entry triggers a fresh fetch', async () => {
+      jest.useFakeTimers();
+      mockGet
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] })
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
+
+      await api.getPractitionersByClinic();
+      jest.advanceTimersByTime(31_000);           // expire the cache entry
+      await api.getPractitionersByClinic();
+
+      expect(mockGet).toHaveBeenCalledTimes(4);  // 2 fetches × (getClinics + 1 clinic)
+      jest.useRealTimers();
+    });
+
+    test('different regions are cached independently', async () => {
+      const sgData = [{ id: 'sg1', business_name: 'SG Clinic' }];
+      const hkData = [{ id: 'hk1', business_name: 'HK Clinic' }];
+
+      mockGet
+        .mockResolvedValueOnce({ businesses: sgData })
+        .mockResolvedValueOnce({ practitioners: [] })
+        .mockResolvedValueOnce({ businesses: hkData })
+        .mockResolvedValueOnce({ practitioners: [] });
+
+      const sgResult = await RegionContext.run('SG', () => api.getPractitionersByClinic());
+      const hkResult = await RegionContext.run('HK', () => api.getPractitionersByClinic());
+
+      expect(sgResult[0].clinic_id).toBe('sg1');
+      expect(hkResult[0].clinic_id).toBe('hk1');
+      expect(mockGet).toHaveBeenCalledTimes(4);  // each region fetched independently
     });
   });
 });
