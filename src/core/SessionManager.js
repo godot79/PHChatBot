@@ -131,6 +131,9 @@ class SessionManager {
             if (wasVerified) {
               seedUpdates.verified = 1;
               seedUpdates.verification_status = 'verified';
+              // Skip INTRO for returning verified users — tapping a number from the old
+              // verified menu in a fresh session would otherwise misroute "1" → Register.
+              seedUpdates.conversation_state = 'BOOK_MANAGE_OPTIONS';
             }
 
             // Carry patient_id if present
