@@ -4885,3 +4885,108 @@ describe('WhatsApp interactive length constraints', () => {
     }
   });
 });
+
+// =============================================================================
+// SUITE — goToInteractiveMenu region guard
+// Regression for: unknown-region users (e.g. UK +44) saw the main menu twice —
+// once from goToInteractiveMenu (no region set), then again after handleIntroState
+// consumed their first "1" selection as a region pick instead of a menu action.
+// =============================================================================
+describe('goToInteractiveMenu — region guard', () => {
+  let db, sm, engine;
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedUnverifiedNoRegion(phone) {
+    const s = await sm.getOrCreateSession(phone, true);
+    await sm.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({}),
+    });
+    return sm.getSession(s.id);
+  }
+
+  async function seedUnverifiedWithRegion(phone, region = 'SG') {
+    const s = await sm.getOrCreateSession(phone, true);
+    await sm.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region }),
+    });
+    return sm.getSession(s.id);
+  }
+
+  test('unverified user with no region → goToInteractiveMenu shows region selection, not main menu', async () => {
+    const session = await seedUnverifiedNoRegion('+4478634000001');
+    const reply = String(await engine.goToInteractiveMenu(session));
+    // Region selection must be shown — not the booking/register main menu
+    expect(reply).toMatch(/region|hong kong|singapore|india|philippines/i);
+    expect(reply).not.toMatch(/register as new patient/i);
+  });
+
+  test('unverified user with region set → goToInteractiveMenu shows main menu directly', async () => {
+    const session = await seedUnverifiedWithRegion('+6561000001', 'SG');
+    const reply = String(await engine.goToInteractiveMenu(session));
+    expect(reply).toMatch(/register as new patient/i);
+    // Must NOT prompt for region again
+    expect(reply).not.toMatch(/please select your region/i);
+  });
+
+  test('SG number sends "hello" → main menu shown (region auto-detected, no extra region step)', async () => {
+    const reply = await engine.handleMessage('hello', '+6562000001');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/welcome|register|book/i);
+    // Region selection prompt must not appear for a known-region number
+    expect(reply).not.toMatch(/please select your region/i);
+  });
+
+  test('unknown-region number sends "hello" → region selection shown (not main menu)', async () => {
+    const reply = await engine.handleMessage('hello', '+447700900001');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/region|hong kong|singapore|india|philippines/i);
+    expect(reply).not.toMatch(/register as new patient/i);
+  });
+
+  test('verified user sends "hi" → bypasses region entirely, sees verified menu', async () => {
+    const phone = '+6563000001';
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'INTRO',
+      context: JSON.stringify({ region: 'SG' }),
+    });
+    const reply = await engine.handleMessage('hi', phone);
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/book|cancel|reschedule/i);
+    expect(reply).not.toMatch(/register as new patient/i);
+    expect(reply).not.toMatch(/please select your region/i);
+  });
+
+  test('unknown-region multi-turn: hello → pick region → pick Register → first name (3 steps, not 4)', async () => {
+    const phone = '+447700900002';
+    // Step 1: "hello" → should show region selection
+    const r1 = await engine.handleMessage('hello', phone);
+    expect(String(r1)).toMatch(/region|hong kong|singapore/i);
+
+    // Step 2: "1" → picks first region (HK) → should show main unverified menu
+    const r2 = await engine.handleMessage('1', phone);
+    expect(String(r2)).toMatch(/register as new patient/i);
+
+    // Step 3: "1" → picks Register → should ask for first name (NOT show region/menu again)
+    const r3 = await engine.handleMessage('1', phone);
+    expect(String(r3)).toMatch(/first name/i);
+    expect(String(r3)).not.toMatch(/register as new patient/i);
+    expect(String(r3)).not.toMatch(/region|hong kong/i);
+  });
+});

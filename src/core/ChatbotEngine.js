@@ -823,6 +823,14 @@ class ChatbotEngine {
     if (!updatedSession.verified) {
       await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
       const fresh = await this.sessionManager.getSession(updatedSession.id);
+      // If no region is set, route through handleIntroState so region selection is shown first.
+      // Bypassing this caused unknown-region users to see the main menu twice: once from
+      // goToInteractiveMenu (no region), then again after handleIntroState consumed their
+      // first menu selection as a region pick.
+      const ctx = (() => { try { return typeof fresh.context === 'string' ? JSON.parse(fresh.context) : (fresh.context || {}); } catch { return {}; } })();
+      if (!ctx.region) {
+        return await this.handleIntroState(fresh, '');
+      }
       return await this.renderMainMenu(fresh);
     }
 
