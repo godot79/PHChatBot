@@ -60,6 +60,12 @@ const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
 const INTERACTIVE_SELECT_PAGE_FIRST = 5; // page 0: up to 5 items + next + back = 7
 const INTERACTIVE_SELECT_PAGE_REST  = 4; // page 1+: up to 4 items + prev + next + back = 7
 
+function interactivePageStart(page) {
+  return page === 0 ? 0 : INTERACTIVE_SELECT_PAGE_FIRST + (page - 1) * INTERACTIVE_SELECT_PAGE_REST;
+}
+function interactivePageSize(page) {
+  return page === 0 ? INTERACTIVE_SELECT_PAGE_FIRST : INTERACTIVE_SELECT_PAGE_REST;
+}
 
 const REGION_TZ = {
   SG: 'Asia/Singapore',
@@ -515,11 +521,11 @@ function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPa
   const hasNext = items.length > start + pageSize;
 
   const rows = pageItems.map((item, i) => {
-    const globalIdx = start + i + 1;
-    const { title: rawTitle, description: rawDesc } = rowFn(item, globalIdx);
+    const localIdx = i + 1;
+    const { title: rawTitle, description: rawDesc } = rowFn(item, localIdx);
     const safeTitle = rawTitle.length > 24 ? rawTitle.slice(0, 23) + '…' : rawTitle;
     const description = rawDesc !== undefined ? rawDesc : (rawTitle.length > 24 ? rawTitle.slice(0, 72) : undefined);
-    return { id: String(globalIdx), title: safeTitle, ...(description ? { description: String(description).slice(0, 72) } : {}) };
+    return { id: String(localIdx), title: safeTitle, ...(description ? { description: String(description).slice(0, 72) } : {}) };
   });
 
   if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
@@ -527,8 +533,8 @@ function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPa
   rows.push({ id: 'back', title: '← Back' });
 
   const textLines = pageItems.map((item, i) => {
-    const { title } = rowFn(item, start + i + 1);
-    return `${start + i + 1}. ${title}`;
+    const { title } = rowFn(item, i + 1);
+    return `${i + 1}. ${title}`;
   });
   if (hasPrev) textLines.push('P. Previous');
   if (hasNext) textLines.push('M. More');
@@ -1796,8 +1802,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
-        if (idx < 0 || idx >= list.length) return 'Invalid selection. Reply with a number from the list.';
+        const page = data.history_physio_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
+        const idx = pageStart + localNum - 1;
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid selection. Reply with a number from the list.';
         data.selected_physio = list[idx].practitioner;
         data.last_clinic_id = list[idx].last_clinic_id || '';
         data.selection_step = 'choose_type';
@@ -1862,9 +1872,12 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (/^\d+$/.test(text)) {
         const page = data.appt_type_page || 0;
-        const idx = parseInt(text, 10) - 1;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
         const list = data.appointment_type_list || [];
-        if (idx < 0 || idx >= list.length) return 'Invalid appointment type selection.';
+        const idx = pageStart + localNum - 1;
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid appointment type selection.';
         data.selected_appt_type = list[idx];
         data.selection_step = 'choose_clinic';
         navPush(data, 'choose_clinic', { had_multiple_options: (list.length > 1), auto: false });
@@ -1916,9 +1929,13 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
+        const page = data.clinic_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
         const list = data.clinic_list || [];
-        if (idx < 0 || idx >= list.length) return 'Invalid clinic selection.';
+        const idx = pageStart + localNum - 1;
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid clinic selection.';
         data.selected_clinic = list[idx];
         data.selection_step = 'view_slots';
         navPush(data, 'view_slots', { had_multiple_options: (list.length > 1), auto: false });
@@ -2200,8 +2217,11 @@ if (/^p(rev)?$/i.test(text)) {
       const { advanced } = planForward(data, 'choose_type', apptTypes.length, () => { data.selected_appt_type = apptTypes[0]; });
 
       if (!advanced && /^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
-        if (idx < 0 || idx >= apptTypes.length) return 'Invalid appointment type selection. Reply with a number from the list.';
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
+        const idx = pageStart + localNum - 1;
+        if (localNum < 1 || localNum > Math.min(pageSize, apptTypes.length - pageStart) || !apptTypes[idx]) return 'Invalid appointment type selection. Reply with a number from the list.';
         data.selected_appt_type = apptTypes[idx];
         await sync();
       }
@@ -2275,8 +2295,11 @@ if (/^p(rev)?$/i.test(text)) {
       const page = data.practitioner_page || 0;
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
-        if (idx < 0 || idx >= practitionerList.length) return 'Invalid practitioner selection. Reply with a number from the list.';
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
+        const idx = pageStart + localNum - 1;
+        if (localNum < 1 || localNum > Math.min(pageSize, practitionerList.length - pageStart) || !practitionerList[idx]) return 'Invalid practitioner selection. Reply with a number from the list.';
         data.selected_physio = practitionerList[idx];
         data.selection_step = 'choose_clinic';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -2362,8 +2385,11 @@ if (/^p(rev)?$/i.test(text)) {
       const page = data.clinic_page || 0;
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
-        if (idx < 0 || idx >= clinics.length) return 'Invalid clinic selection. Reply with a number from the list.';
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
+        const idx = pageStart + localNum - 1;
+        if (localNum < 1 || localNum > Math.min(pageSize, clinics.length - pageStart) || !clinics[idx]) return 'Invalid clinic selection. Reply with a number from the list.';
         data.selected_clinic = clinics[idx];
         await sync();
       }
@@ -2679,9 +2705,13 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
+        const page = data.practitioner_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
         const list = data.practitioner_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_physio = list[idx];
           data.selection_step = 'choose_clinic';
           if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: list.length > 1, auto: false });
@@ -2755,8 +2785,12 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (/^\d+$/.test(text)) {
         const list = data.clinic_list || [];
-        const idx = parseInt(text, 10) - 1;
-        if (idx >= 0 && idx < list.length) {
+        const page = data.clinic_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_clinic = list[idx];
           data.selection_step = 'view_slots';
           if (typeof navPush === 'function') navPush(data, 'view_slots', { had_multiple_options: list.length > 1, auto: false });
@@ -2937,9 +2971,13 @@ if (/^p(rev)?$/i.test(text)) {
 }
 
       if (/^\d+$/.test(text)) {
-        const idx = parseInt(text,10) - 1;
+        const page = data.practitioner_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
         const list = data.practitioner_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_physio = list[idx];
           data.selection_step = 'choose_type';
           if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: list.length > 1, auto: false });
@@ -2989,9 +3027,12 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (/^\d+$/.test(text)) {
         const page = data.appt_type_page || 0;
-        const idx = parseInt(text,10) - 1;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
         const list = data.appointment_type_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_appt_type = list[idx];
           data.selection_step = 'choose_clinic';
           if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: list.length > 1, auto: false });
@@ -3063,8 +3104,12 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (/^\d+$/.test(text)) {
         const list = data.clinic_list || [];
-        const idx = parseInt(text, 10) - 1;
-        if (idx >= 0 && idx < list.length) {
+        const page = data.clinic_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(text, 10);
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_clinic = list[idx];
           data.selection_step = 'view_slots';
           if (typeof navPush === 'function') navPush(data, 'view_slots', { had_multiple_options: list.length > 1, auto: false });
@@ -3249,9 +3294,13 @@ if (/^p(rev)?$/i.test(text)) {
 }
 
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1;
+        const page = data.clinic_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(numStr, 10);
         const list = data.clinic_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_clinic = list[idx];
           data.selection_step = 'choose_type';
           if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: list.length > 1, auto: false });
@@ -3318,9 +3367,12 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (numStr && !data.selected_appt_type) {
         const page = data.appt_type_page || 0;
-        const idx = parseInt(numStr, 10) - 1;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(numStr, 10);
         const list = data.appointment_type_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_appt_type = list[idx];
           data.selection_step = 'choose_physio';
           if (typeof navPush === 'function') navPush(data, 'choose_physio', { had_multiple_options: list.length > 1, auto: false });
@@ -3377,9 +3429,13 @@ if (/^p(rev)?$/i.test(text)) {
 }
 
       if (numStr) {
-        const idx = parseInt(numStr, 10) - 1;
+        const page = data.practitioner_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(numStr, 10);
         const list = data.practitioner_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_physio = list[idx];
           data.selection_step = 'view_slots';
           if (typeof navPush === 'function') navPush(data, 'view_slots', { had_multiple_options: list.length > 1, auto: false });
@@ -4009,8 +4065,12 @@ if (/^p(rev)?$/i.test(text)) {
     };
     if (text === 'prev') return renderCancelList(Math.max(0, (Number(data.cancel_appt_page) || 0) - 1));
     if (text === 'next') return renderCancelList((Number(data.cancel_appt_page) || 0) + 1);
-    const idx = parseInt(text, 10) - 1;
-    if (isNaN(idx) || !appts[idx]) {
+    const page = Number(data.cancel_appt_page) || 0;
+    const pageStart = interactivePageStart(page);
+    const pageSize = interactivePageSize(page);
+    const localNum = parseInt(text, 10);
+    const idx = pageStart + localNum - 1;
+    if (isNaN(localNum) || localNum < 1 || localNum > Math.min(pageSize, appts.length - pageStart) || !appts[idx]) {
       return 'Invalid selection. Please reply with the number of the appointment you want to cancel, or "0" to go back.';
     }
     data.selected_cancel_appt = appts[idx];
@@ -4214,8 +4274,12 @@ if (/^p(rev)?$/i.test(text)) {
     };
     if (text === 'prev') return renderRescheduleList(Math.max(0, (Number(data.reschedule_appt_page) || 0) - 1));
     if (text === 'next') return renderRescheduleList((Number(data.reschedule_appt_page) || 0) + 1);
-    const idx = parseInt(text, 10) - 1;
-    if (isNaN(idx) || !appts[idx]) {
+    const page = Number(data.reschedule_appt_page) || 0;
+    const pageStart = interactivePageStart(page);
+    const pageSize = interactivePageSize(page);
+    const localNum = parseInt(text, 10);
+    const idx = pageStart + localNum - 1;
+    if (isNaN(localNum) || localNum < 1 || localNum > Math.min(pageSize, appts.length - pageStart) || !appts[idx]) {
       return 'Invalid selection. Please reply with the number of the appointment you want to reschedule, or "0" to go back.';
     }
     data.selected_reschedule_appt = appts[idx];
@@ -4413,7 +4477,12 @@ if (/^p(rev)?$/i.test(text)) {
     const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
     const starts_at = slot.starts_at || slot.appointment_start || slot.slot;
     let ends_at = slot.ends_at || slot.appointment_end;
-    if (!ends_at && starts_at) ends_at = new Date(new Date(starts_at).getTime() + 30 * 60000).toISOString();
+    if (!ends_at && appt.starts_at && appt.ends_at) {
+      // Cliniko's available_times API never returns appointment_end.
+      // Derive the correct duration from the original appointment rather than guessing 30 min.
+      const origDuration = new Date(appt.ends_at).getTime() - new Date(appt.starts_at).getTime();
+      if (origDuration > 0) ends_at = new Date(new Date(starts_at).getTime() + origDuration).toISOString();
+    }
 
     if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
       delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;

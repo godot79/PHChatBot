@@ -1412,7 +1412,7 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).not.toMatch(/Frank/i);
     });
 
-    test('selecting global index 6 → selects 6th physio (Frank)', async () => {
+    test('local index 1 on page 1 selects 6th physio (Frank)', async () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
         { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
         { id: 'AT-003', name: 'Follow Up Appointment' },
@@ -1423,7 +1423,7 @@ describe('Booking menu and flow coverage', () => {
         history_physio_page: 1,
         navigation_chain: [],
       });
-      const reply = await callHandler(engine, ['handleBookHistory'], session, '6');
+      const reply = await callHandler(engine, ['handleBookHistory'], session, '1');
       expect(reply).toMatch(/appointment type|Return Visit|Follow Up/i);
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data);
@@ -1610,7 +1610,7 @@ describe('Booking menu and flow coverage', () => {
       expect(d.clinic_page).toBe(0);
     });
 
-    test("global index '6' from page 1 selects 6th clinic", async () => {
+    test("local index '1' on page 1 selects 6th clinic", async () => {
       engine.clinikoAPI.getAvailableSlots = jest.fn().mockResolvedValue([]);
       const session = await seedAt('BOOK_HISTORY', {
         ...baseData,
@@ -1618,7 +1618,7 @@ describe('Booking menu and flow coverage', () => {
         clinic_list: SIX_CLINICS_MOCK.map(g => ({ id: String(g.clinic_id), business_name: g.clinic_name })),
         clinic_page: 1,
       });
-      await callHandler(engine, ['handleBookHistory'], session, '6');
+      await callHandler(engine, ['handleBookHistory'], session, '1');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       expect(String(d.selected_clinic?.id)).toBe('BIZ-006');
     });
@@ -1720,12 +1720,12 @@ describe('Booking menu and flow coverage', () => {
       expect(d.practitioner_page).toBe(0);
     });
 
-    test("global index '6' from page 1 selects 6th physio", async () => {
+    test("local index '1' on page 1 selects 6th physio", async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: SIX_PHYSIOS },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', { ...baseData, practitioner_page: 1 });
-      await callHandler(engine, ['handleBookSpecificDate'], session, '6');
+      await callHandler(engine, ['handleBookSpecificDate'], session, '1');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       expect(String(d.selected_physio?.id)).toBe('PRAC-006');
     });
@@ -1916,10 +1916,10 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/More/i);
     });
 
-    test("'next' increments page and shows 6th physio", async () => {
+    test("'next' increments page and shows Frank (6th overall) as item 1", async () => {
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'next'));
-      expect(reply).toMatch(/6\. F Phy/i);
+      expect(reply).toMatch(/1\. F Phy/i);
       expect(reply).not.toMatch(/1\. A Phy/i);
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       expect(d.practitioner_page).toBe(1);
@@ -1933,13 +1933,13 @@ describe('Booking menu and flow coverage', () => {
       expect(d.practitioner_page).toBe(0);
     });
 
-    test("global index '6' from page 1 → selects 6th physio", async () => {
+    test("local index '1' on page 1 → selects 6th physio", async () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
         { id: 'AT-002', name: 'Return Visit' },
         { id: 'AT-003', name: 'Follow Up' },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { ...baseData, practitioner_page: 1 });
-      await callHandler(engine, ['handleBookSpecificPhysio'], session, '6');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '1');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       expect(String(d.selected_physio?.id)).toBe('PRAC-006');
       expect(d.selection_step).toBe('choose_type');
@@ -3539,9 +3539,13 @@ describe('Slot list interactive', () => {
   }));
 
   // Reschedule appointment fixture (has all required Cliniko link fields)
+  // ends_at = starts_at + 60 min, matching the "Initial 60 Min Visit" type
+  const RESCHEDULE_APPT_STARTS = new Date(Date.now() + 86400000 * 5).toISOString();
+  const RESCHEDULE_APPT_ENDS   = new Date(new Date(RESCHEDULE_APPT_STARTS).getTime() + 60 * 60000).toISOString();
   const RESCHEDULE_APPT = {
     id: 'APPT-R',
-    starts_at: new Date(Date.now() + 86400000 * 5).toISOString(),
+    starts_at: RESCHEDULE_APPT_STARTS,
+    ends_at:   RESCHEDULE_APPT_ENDS,
     practitioner:     { id: 'PRAC-001' },
     appointment_type: { id: 'AT-001' },
     business:         { id: 'BIZ-001' },
@@ -3828,18 +3832,29 @@ describe('Slot list interactive', () => {
     expect(JSON.parse(updated.data).slot_page).toBe(0);
   });
 
-  test('reschedule slot selection on page 0 → creates booking (slot 1)', async () => {
+  test('reschedule slot selection on page 0 → PATCH uses original appointment_type_id and duration-derived ends_at', async () => {
     const slots = makeSlots(3);
-    engine.clinikoAPI.updateAppointment = jest.fn().mockResolvedValue({ id: 'APPT-UPD' });
+    let capturedPayload;
+    engine.clinikoAPI.updateIndividualAppointment = jest.fn().mockImplementation((_id, payload) => {
+      capturedPayload = payload;
+      return Promise.resolve({ success: true, appointmentId: _id });
+    });
     const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots));
-    // Just check it doesn't return an error — full booking path may need more stubs
-    const reply = await callHandler(engine, ['handleConfirmRescheduleState'], session, '1').catch(e => String(e));
-    expect(typeof String(reply)).toBe('string');
+    await callHandler(engine, ['handleConfirmRescheduleState'], session, '1');
+
+    expect(capturedPayload).toBeDefined();
+    // appointment_type_id must come from the original appointment, not the slot
+    expect(capturedPayload.appointment_type_id).toBe('AT-001');
+    // ends_at must be derived from the original appointment's 60-min duration, not hardcoded 30 min
+    const newStart  = new Date(capturedPayload.starts_at).getTime();
+    const newEnd    = new Date(capturedPayload.ends_at).getTime();
+    const durMin    = (newEnd - newStart) / 60000;
+    expect(durMin).toBe(60);
   });
 
   test('reschedule slot selection by global ID on page 1 → not a validation error', async () => {
     const slots = makeSlots(12);
-    engine.clinikoAPI.updateAppointment = jest.fn().mockResolvedValue({ id: 'APPT-UPD' });
+    engine.clinikoAPI.updateIndividualAppointment = jest.fn().mockResolvedValue({ success: true, appointmentId: 'X' });
     const session = await seedAt('CONFIRM_RESCHEDULE', rescheduleSlotSession(slots, { slot_page: 1 }));
     const reply = await callHandler(engine, ['handleConfirmRescheduleState'], session, '10').catch(e => String(e));
     expect(String(reply)).not.toMatch(/invalid slot/i);

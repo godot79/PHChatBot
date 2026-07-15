@@ -163,6 +163,50 @@ describe('getAvailableSlotsByBusinessAndDate() — slot field names', () => {
 });
 
 // =============================================================================
+// 3b. getAvailableTimes — slot shape (reschedule engine contract)
+// =============================================================================
+describe('getAvailableTimes() — slot field names', () => {
+  maybeIt('slots have appointment_start but NO appointment_end (Cliniko API contract)', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const group = groups.find(g => g.practitioners.length > 0);
+    if (!group) return;
+
+    const prac = group.practitioners[0];
+    const types = await hk(() => api.getAppointmentTypes({ practitioner_id: prac.id }));
+    if (!types.length) return;
+
+    const from = new Date(Date.now() + 24 * 3600000);
+    const to   = new Date(Date.now() + 7 * 24 * 3600000);
+    const fmt  = d => d.toISOString().slice(0, 10);
+
+    let slots = [];
+    for (const t of types) {
+      slots = await hk(() => api.getAvailableTimes({
+        practitioner_id: prac.id,
+        business_id: group.clinic_id,
+        appt_type: t.id,
+        from: fmt(from),
+        to: fmt(to),
+      })).catch(() => []);
+      if (slots.length) break;
+    }
+
+    if (!slots.length) {
+      console.warn('[live] No available_times slots found — skipping field check');
+      return;
+    }
+
+    const slot = slots[0];
+    expect(slot.appointment_start).toBeDefined();
+    // Cliniko never returns appointment_end on available_times slots.
+    // If this assertion starts failing, the engine's duration-derivation fallback
+    // in handleConfirmRescheduleState can be simplified.
+    expect(slot.appointment_end).toBeUndefined();
+    expect(slot.ends_at).toBeUndefined();
+  }, 60000);
+});
+
+// =============================================================================
 // 4. getBookingsByPatientId — appointment reference shape
 // =============================================================================
 describe('getBookingsByPatientId() — appointment reference objects', () => {
