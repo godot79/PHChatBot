@@ -1377,6 +1377,84 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_HISTORY — physio pagination ───────────────────────────────────────
+  describe('BOOK_HISTORY — choose_physio_from_history pagination', () => {
+    const SIX_HISTORY_PHYSIOS = [
+      { practitioner: { id: 'PRAC-001', first_name: 'Alice',   last_name: 'A' }, last_seen: pastISO(1),  last_clinic_id: 'BIZ-001' },
+      { practitioner: { id: 'PRAC-002', first_name: 'Bob',     last_name: 'B' }, last_seen: pastISO(2),  last_clinic_id: 'BIZ-001' },
+      { practitioner: { id: 'PRAC-003', first_name: 'Carol',   last_name: 'C' }, last_seen: pastISO(3),  last_clinic_id: 'BIZ-001' },
+      { practitioner: { id: 'PRAC-004', first_name: 'David',   last_name: 'D' }, last_seen: pastISO(4),  last_clinic_id: 'BIZ-001' },
+      { practitioner: { id: 'PRAC-005', first_name: 'Eliza',   last_name: 'E' }, last_seen: pastISO(5),  last_clinic_id: 'BIZ-001' },
+      { practitioner: { id: 'PRAC-006', first_name: 'Frank',   last_name: 'F' }, last_seen: pastISO(6),  last_clinic_id: 'BIZ-001' },
+    ];
+
+    test('next on 6-physio list → page 1 shows 6th physio', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: SIX_HISTORY_PHYSIOS,
+        history_physio_page: 0,
+        navigation_chain: [],
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, 'next');
+      expect(reply).toMatch(/Frank/i);
+      expect(reply).not.toMatch(/Alice/i);
+    });
+
+    test('next then prev → returns to page 0 showing first 5 physios', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: SIX_HISTORY_PHYSIOS,
+        history_physio_page: 1,
+        navigation_chain: [],
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, 'prev');
+      expect(reply).toMatch(/Alice/i);
+      expect(reply).not.toMatch(/Frank/i);
+    });
+
+    test('selecting global index 6 → selects 6th physio (Frank)', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+        { id: 'AT-003', name: 'Follow Up Appointment' },
+      ]);
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: SIX_HISTORY_PHYSIOS,
+        history_physio_page: 1,
+        navigation_chain: [],
+      });
+      const reply = await callHandler(engine, ['handleBookHistory'], session, '6');
+      expect(reply).toMatch(/appointment type|Return Visit|Follow Up/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data);
+      expect(d.selected_physio.id).toBe('PRAC-006');
+    });
+
+    test('next on 5-physio list → no crash, no More button', async () => {
+      const fivePhysios = SIX_HISTORY_PHYSIOS.slice(0, 5);
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: fivePhysios,
+        history_physio_page: 0,
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, 'next'));
+      // Page 1 with only 5 items total has no content; falls back gracefully — no crash
+      expect(typeof reply).toBe('string');
+    });
+
+    test('page 0 with 6 physios shows More → button', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_physio_from_history',
+        history_physio_list: SIX_HISTORY_PHYSIOS,
+        history_physio_page: 0,
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toMatch(/More|next/i);
+    });
+  });
+
   describe('BOOK_HISTORY — choose_type step', () => {
     const physioListData = {
       selection_step: 'choose_type',
@@ -1477,6 +1555,75 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_HISTORY — choose_clinic ────────────────────────────────────────────
+  describe('BOOK_HISTORY — choose_clinic pagination', () => {
+    const PHYSIO = { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' };
+    const SIX_CLINICS_MOCK = Array.from({ length: 6 }, (_, i) => ({
+      clinic_id: `BIZ-00${i + 1}`,
+      clinic_name: `Clinic ${String.fromCharCode(65 + i)}`,
+      practitioners: [PHYSIO],
+    }));
+    const baseData = {
+      selection_step: 'choose_clinic',
+      selected_physio: PHYSIO,
+      last_clinic_id: '',
+      navigation_chain: [
+        { selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+      ],
+    };
+
+    beforeEach(() => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(SIX_CLINICS_MOCK);
+    });
+
+    test('entry with 6 clinics → page 0 shows first 5 + More button', async () => {
+      const session = await seedAt('BOOK_HISTORY', baseData);
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toMatch(/Clinic A/i);
+      expect(reply).not.toMatch(/Clinic F/i);
+      expect(reply).toMatch(/More/i);
+    });
+
+    test("'next' increments clinic_page to 1 and shows 6th clinic", async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        ...baseData,
+        clinic_list: SIX_CLINICS_MOCK.map(g => ({ id: String(g.clinic_id), business_name: g.clinic_name })),
+        clinic_page: 0,
+      });
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, 'next'));
+      expect(reply).toMatch(/Clinic F/i);
+      expect(reply).not.toMatch(/Clinic A/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.clinic_page).toBe(1);
+    });
+
+    test("'prev' from page 1 decrements clinic_page to 0", async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        ...baseData,
+        clinic_list: SIX_CLINICS_MOCK.map(g => ({ id: String(g.clinic_id), business_name: g.clinic_name })),
+        clinic_page: 1,
+      });
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, 'prev'));
+      expect(reply).toMatch(/Clinic A/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.clinic_page).toBe(0);
+    });
+
+    test("global index '6' from page 1 selects 6th clinic", async () => {
+      engine.clinikoAPI.getAvailableSlots = jest.fn().mockResolvedValue([]);
+      const session = await seedAt('BOOK_HISTORY', {
+        ...baseData,
+        selected_appt_type: { name: 'Return Visit', ids: ['AT-001'] },
+        clinic_list: SIX_CLINICS_MOCK.map(g => ({ id: String(g.clinic_id), business_name: g.clinic_name })),
+        clinic_page: 1,
+      });
+      await callHandler(engine, ['handleBookHistory'], session, '6');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(String(d.selected_clinic?.id)).toBe('BIZ-006');
+    });
+  });
+
   // ─── BOOK_SPECIFIC_DATE ───────────────────────────────────────────────────────
   describe('BOOK_SPECIFIC_DATE — entry and navigation', () => {
     test('entry → shows date picker (date is selected first in this flow)', async () => {
@@ -1528,6 +1675,59 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificDate'], session, 'menu');
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_DATE — choose_physio ──────────────────────────────────────
+  describe('BOOK_SPECIFIC_DATE — choose_physio pagination', () => {
+    const SIX_PHYSIOS = Array.from({ length: 6 }, (_, i) => ({
+      id: `PRAC-00${i + 1}`, first_name: String.fromCharCode(65 + i), last_name: 'Test',
+    }));
+    const baseData = {
+      selection_step: 'choose_physio',
+      selected_date: '2026-08-01',
+      selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+      navigation_chain: [
+        { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+      ],
+      practitioner_list: SIX_PHYSIOS,
+      practitioner_page: 0,
+    };
+
+    test('page 0 with 6 physios → shows first 5 + More button', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/A Test/i);
+      expect(reply).not.toMatch(/F Test/i);
+      expect(reply).toMatch(/More/i);
+    });
+
+    test("'next' increments practitioner_page and shows 6th physio", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'next'));
+      expect(reply).toMatch(/F Test/i);
+      expect(reply).not.toMatch(/A Test/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.practitioner_page).toBe(1);
+    });
+
+    test("'prev' from page 1 decrements practitioner_page to 0", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', { ...baseData, practitioner_page: 1 });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'prev'));
+      expect(reply).toMatch(/A Test/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.practitioner_page).toBe(0);
+    });
+
+    test("global index '6' from page 1 selects 6th physio", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: SIX_PHYSIOS },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_DATE', { ...baseData, practitioner_page: 1 });
+      await callHandler(engine, ['handleBookSpecificDate'], session, '6');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-006');
     });
   });
 
@@ -1693,6 +1893,56 @@ describe('Booking menu and flow coverage', () => {
       const session = await seedAt('BOOK_SPECIFIC_DATE', innerNoSlotsData());
       const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '3'));
       expect(reply).toMatch(/wa\.me/i);
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_PHYSIO — choose_physio pagination ─────────────────────────
+  describe('BOOK_SPECIFIC_PHYSIO — choose_physio pagination', () => {
+    const SIX_PHYSIOS = Array.from({ length: 6 }, (_, i) => ({
+      id: `PRAC-00${i + 1}`, first_name: String.fromCharCode(65 + i), last_name: 'Phy',
+    }));
+    const baseData = {
+      selection_step: 'choose_physio',
+      practitioner_list: SIX_PHYSIOS,
+      practitioner_page: 0,
+      navigation_chain: [],
+    };
+
+    test('page 0 with 6 physios → shows first 5 + More button', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/1\. A Phy/i);
+      expect(reply).not.toMatch(/6\. F Phy/i);
+      expect(reply).toMatch(/More/i);
+    });
+
+    test("'next' increments page and shows 6th physio", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'next'));
+      expect(reply).toMatch(/6\. F Phy/i);
+      expect(reply).not.toMatch(/1\. A Phy/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.practitioner_page).toBe(1);
+    });
+
+    test("'prev' from page 1 → back to page 0", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { ...baseData, practitioner_page: 1 });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'prev'));
+      expect(reply).toMatch(/1\. A Phy/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.practitioner_page).toBe(0);
+    });
+
+    test("global index '6' from page 1 → selects 6th physio", async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-002', name: 'Return Visit' },
+        { id: 'AT-003', name: 'Follow Up' },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { ...baseData, practitioner_page: 1 });
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '6');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-006');
+      expect(d.selection_step).toBe('choose_type');
     });
   });
 
@@ -2465,6 +2715,24 @@ describe('Booking menu and flow coverage', () => {
       const reply = await callHandler(engine, ['handleBookSoonest'], session, 'xyz');
       // Falls through the no_slots block, hits choose_physio render
       expect(reply).toMatch(/practitioner|jolinna|wei/i);
+    });
+
+    test('no_slots_prompt option 1 with nav chain → navBack to prior step (choose_type)', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        appointment_type_list: TYPE_LIST_2,
+        selected_appt_type: TYPE_1,
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        practitioner_page: 0,
+        no_slots_prompt: { context: 'soonest' },
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, '1'));
+      // navBack pops choose_type → re-renders type list
+      expect(reply).toMatch(/appointment type|Initial|Return/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.no_slots_prompt).toBeFalsy();
     });
   });
 

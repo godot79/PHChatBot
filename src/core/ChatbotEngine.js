@@ -1770,6 +1770,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       data.history_physio_list = physios;
+      data.history_physio_page = 0;
       data.selection_step = 'choose_physio_from_history';
 
       const fwd = planForward(data, 'choose_physio_from_history', physios.length, () => {
@@ -1784,6 +1785,15 @@ async handleMessageEnvelope(message, phoneNumber) {
     // ===== choose_physio_from_history =====
     if (data.selection_step === 'choose_physio_from_history') {
       const list = data.history_physio_list || [];
+
+      if (/^m(ore)?$|^next$/i.test(text)) {
+        data.history_physio_page = (data.history_physio_page || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      }
+      if (/^p(rev)?$/i.test(text)) {
+        data.history_physio_page = Math.max(0, (data.history_physio_page || 0) - 1);
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      }
 
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
@@ -1802,7 +1812,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           title: getPractitionerDisplayName(p.practitioner) || '',
           description: `Last seen: ${formatSlotDateTime(p.last_seen, this._regionTz(session))}`
         }),
-        page: 0,
+        page: data.history_physio_page || 0,
         header: 'Choose a physio from your past visits:'
       });
       return reply;
@@ -1886,6 +1896,7 @@ if (/^p(rev)?$/i.test(text)) {
         const lastId = String(data.last_clinic_id || '');
         clinics.sort((a, b) => (String(a.id) === lastId ? -1 : String(b.id) === lastId ? 1 : a.business_name.localeCompare(b.business_name)));
         data.clinic_list = clinics;
+        data.clinic_page = 0;
 
         const fwd = planForward(data, 'choose_clinic', clinics.length, () => {
           data.selected_clinic = clinics[0];
@@ -1893,6 +1904,15 @@ if (/^p(rev)?$/i.test(text)) {
         });
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         if (fwd.advanced) return await this.handleBookHistory(session, '');
+      }
+
+      if (/^m(ore)?$|^next$/i.test(text)) {
+        data.clinic_page = (data.clinic_page || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      }
+      if (/^p(rev)?$/i.test(text)) {
+        data.clinic_page = Math.max(0, (data.clinic_page || 0) - 1);
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
       }
 
       if (/^\d+$/.test(text)) {
@@ -1909,7 +1929,7 @@ if (/^p(rev)?$/i.test(text)) {
       const reply3 = buildInteractiveSelectionList({
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(c.business_name) }),
-        page: 0,
+        page: data.clinic_page || 0,
         header: 'Select a clinic:'
       });
       return reply3;
@@ -2646,6 +2666,15 @@ if (/^p(rev)?$/i.test(text)) {
         const practitioners = await getPractitionersForTypeName(groups || [], this.clinikoAPI, data.selected_appt_type?.name || '');
         data.practitioner_list = (practitioners || []).map(p => ({ id: String(p.id), ...p }));
         data.practitioner_page = 0;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      }
+
+      if (/^m(ore)?$|^next$/i.test(text)) {
+        data.practitioner_page = (data.practitioner_page || 0) + 1;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      }
+      if (/^p(rev)?$/i.test(text)) {
+        data.practitioner_page = Math.max(0, (data.practitioner_page || 0) - 1);
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
