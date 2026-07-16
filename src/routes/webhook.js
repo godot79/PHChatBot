@@ -105,6 +105,17 @@ async function handleIncomingMessage(data) {
         message.interactive?.list_reply?.id ||
         message.interactive?.button_reply?.title ||
         message.interactive?.list_reply?.title;
+      if (!content) {
+        const interactiveSubtype = message.interactive?.type;
+        logger.warn(`Unhandled interactive subtype: ${interactiveSubtype} payload: ${JSON.stringify(message.interactive)}`);
+        // If message.interactive is absent this is an automatic WhatsApp system event
+        // (e.g. delivery/render notification), not a user tap — drop silently.
+        if (message.interactive == null) continue;
+        // Real tap with unrecognised subtype — send a plain text nudge so the user
+        // can type their choice instead (avoids re-sending buttons which would loop).
+        await whatsAppAPI.sendTextMessage(phone, "Sorry, that tap didn't come through. Please type a number to respond (e.g. type 1, 2, or 3).");
+        continue;
+      }
     }
     if (!content) {
       logger.warn(`Unsupported message type: ${type}`);
@@ -112,9 +123,13 @@ async function handleIncomingMessage(data) {
     }
 
     logger.info(`📩 [${phone}] ${type} - ${content}`);
-    const reply = await chatbotEngine.handleMessageEnvelope(content, phone);
-    const result = await sendReply(whatsAppAPI, phone, reply);
-    logger.info(`📤 Reply sent to ${phone}`, result);
+    try {
+      const reply = await chatbotEngine.handleMessageEnvelope(content, phone);
+      const result = await sendReply(whatsAppAPI, phone, reply);
+      logger.info(`📤 Reply sent to ${phone}`, result);
+    } catch (err) {
+      logger.error(`Failed to process or send reply to ${phone}`, err);
+    }
   }
 }
 
