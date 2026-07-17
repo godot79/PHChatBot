@@ -1021,6 +1021,15 @@ class SessionManager {
             this.logger.debug(`[deleteSessionAndData] Deleted verification codes for phone: ${phoneNumber}`);
         }
 
+        // Delete persistent patient state (region, appt_preference) keyed by phone
+        if (phoneNumber) {
+            await this.db.query(
+                `DELETE FROM patient_state WHERE phone_number = ?`,
+                [phoneNumber]
+            );
+            this.logger.debug(`[deleteSessionAndData] Deleted patient_state for phone: ${phoneNumber}`);
+        }
+
         // Delete the session itself (use DatabaseManager.deleteSession)
         const deleted = await this.db.deleteSession(sessionId);
         this.logger.debug(`[deleteSessionAndData] Deleted session row: ${sessionId}`);

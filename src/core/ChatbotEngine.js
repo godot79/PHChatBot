@@ -1214,8 +1214,8 @@ async handleMessageEnvelope(message, phoneNumber) {
           await this.renderMainMenu(updated)
         );
       }
-      // Unknown input — re-render gateway
-      return GATEWAY_BUTTONS;
+      // Unknown input — re-render gateway with error prefix so text clients see the options
+      return prependTextToEnvelope("Sorry, please reply with 1, 2, or 3.", GATEWAY_BUTTONS);
     }
 
     // DOB parser: accepts "dd mm yyyy", "dd/mm/yyyy", "dd-mm-yyyy", "dd.mm.yyyy"
@@ -1267,8 +1267,8 @@ async handleMessageEnvelope(message, phoneNumber) {
         const updated = await this.sessionManager.getSession(session.id);
         return await this.renderMainMenu(updated);
       }
-      // Unknown input in fail prompt — reprint it
-      return FAIL_PROMPT;
+      // Unknown input in fail prompt — reprint with prefix
+      return prependTextToEnvelope("Please reply with 1, 2, or 3.", FAIL_PROMPT);
     }
 
     // Step 1: ask for email
@@ -1380,20 +1380,24 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.renderMainMenu(updatedSession);
     }
     if (text === '9' || text.includes('logout')) {
-      await this.sessionManager.deleteSessionAndData(session.id);
-      const updatedSession = await this.sessionManager.getOrCreateSession(
-        session.phone_number || session.phoneNumber,
-        true
-      );
-      // Explicitly clear any seeded verified state from prior sessions
-      await this.sessionManager.updateSession(updatedSession.id, {
-        verified: false,
-        verification_status: 'unverified',
-        patient_id: null,
-        conversation_state: this.STATES.INTRO
-      });
-      const freshSession = await this.sessionManager.getSession(updatedSession.id);
-      return prependTextToEnvelope('✅ All your data has been deleted and you are logged out.', await this.renderMainMenu(freshSession));
+      try {
+        await this.sessionManager.deleteSessionAndData(session.id);
+        const updatedSession = await this.sessionManager.getOrCreateSession(
+          session.phone_number || session.phoneNumber,
+          true
+        );
+        await this.sessionManager.updateSession(updatedSession.id, {
+          verified: false,
+          verification_status: 'unverified',
+          patient_id: null,
+          conversation_state: this.STATES.INTRO
+        });
+        const freshSession = await this.sessionManager.getSession(updatedSession.id);
+        return prependTextToEnvelope('✅ All your data has been deleted and you are logged out.', await this.renderMainMenu(freshSession));
+      } catch (e) {
+        this.logger.error('[Logout] deleteSessionAndData failed', { error: e?.message || e, sessionId: session.id });
+        return prependTextToEnvelope('You have been logged out.', await this.renderMainMenu(session));
+      }
     }
 
     if (text === '1' || text.includes('book')) {
@@ -2038,6 +2042,8 @@ if (/^p(rev)?$/i.test(text)) {
    */
   async _stepApptFunnel(session, data, text) {
     const catalogue = data.funnel_catalogue || [];
+    // True when text was a real user reply that failed to match — prepend error to re-shown menus.
+    const badInput = text !== '' && text !== 'yes' && text !== 'change';
 
     // First entry: offer shortcut if preference exists, otherwise start at service
     if (!data.funnel_step) {
@@ -2095,14 +2101,12 @@ if (/^p(rev)?$/i.test(text)) {
           text = '';
           continue;
         }
-        if (services.length <= 3) {
-          return { reply: buttons('What type of appointment?',
-            services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) }))
-          ) };
+        {
+          const menu = services.length <= 3
+            ? buttons('What type of appointment?', services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
+            : list('What type of appointment?', 'Select type', services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 24) })));
+          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
         }
-        return { reply: list('What type of appointment?', 'Select type',
-          services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 24) }))
-        ) };
       }
 
       // ── patient_type ──
@@ -2130,9 +2134,10 @@ if (/^p(rev)?$/i.test(text)) {
           text = '';
           continue;
         }
-        return { reply: buttons('New or returning patient?',
-          ptypes.map((t, i) => ({ id: String(i + 1), title: labels[t] || t }))
-        ) };
+        {
+          const menu = buttons('New or returning patient?', ptypes.map((t, i) => ({ id: String(i + 1), title: labels[t] || t })));
+          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+        }
       }
 
       // ── insurer ──
@@ -2154,14 +2159,12 @@ if (/^p(rev)?$/i.test(text)) {
           text = '';
           continue;
         }
-        if (options.length <= 3) {
-          return { reply: buttons('How is this covered?',
-            options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) }))
-          ) };
+        {
+          const menu = options.length <= 3
+            ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
+            : list('How is this covered?', 'Select coverage', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 24) })));
+          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
         }
-        return { reply: list('How is this covered?', 'Select coverage',
-          options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 24) }))
-        ) };
       }
 
       // ── duration ──
@@ -2188,9 +2191,10 @@ if (/^p(rev)?$/i.test(text)) {
           this._saveFunnelPref(session, sel);
           return { resolved };
         }
-        return { reply: buttons('Select duration:',
-          durations.slice(0, 3).map((d, i) => ({ id: String(i + 1), title: `${d} min` }))
-        ) };
+        {
+          const menu = buttons('Select duration:', durations.slice(0, 3).map((d, i) => ({ id: String(i + 1), title: `${d} min` })));
+          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+        }
       }
 
       break;
@@ -4074,16 +4078,19 @@ if (/^p(rev)?$/i.test(text)) {
       }
     }
 
-    // --- Debug: Default, show confirmation message ---
-    return buttons(
-      `You have selected:\n\n` +
-      `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
-      `🏥 *${enrichedSlot._business_display || ''}*\n` +
-      `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`,
-      [
-        { id: 'yes', title: 'Confirm booking' },
-        { id: '0',   title: 'Go back' }
-      ]
+    // Unknown input — re-show confirmation with error prefix
+    return prependTextToEnvelope(
+      "Please reply 'Yes' to confirm your booking, or '0' to go back.",
+      buttons(
+        `You have selected:\n\n` +
+        `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
+        `🏥 *${enrichedSlot._business_display || ''}*\n` +
+        `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`,
+        [
+          { id: 'yes', title: 'Confirm booking' },
+          { id: '0',   title: 'Go back' }
+        ]
+      )
     );
   }
 
@@ -4376,16 +4383,19 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // Require explicit yes
+    // Require explicit yes — unknown input re-shows prompt with prefix
     if (text !== 'yes') {
       const appt = data.selected_cancel_appt;
       const intro = appt
         ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
         : 'Confirm cancellation?';
-      return buttons(`${intro}\n\nConfirm cancellation?`, [
-        { id: 'yes', title: 'Yes, cancel' },
-        { id: '0',   title: 'Go back' }
-      ]);
+      return prependTextToEnvelope(
+        "Please reply 'Yes' to confirm cancellation, or '0' to go back.",
+        buttons(`${intro}\n\nConfirm cancellation?`, [
+          { id: 'yes', title: 'Yes, cancel' },
+          { id: '0',   title: 'Go back' }
+        ])
+      );
     }
 
     const appt = data.selected_cancel_appt;
@@ -4653,10 +4663,13 @@ if (/^p(rev)?$/i.test(text)) {
     const intro = data.is_single_reschedule_appt
       ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
       : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
-    return buttons(`${intro}\n\nWould you like to proceed?`, [
-      { id: 'yes', title: 'Yes, reschedule' },
-      { id: '0',   title: 'Go back' }
-    ]);
+    return prependTextToEnvelope(
+      "Please reply 'Yes' to proceed, or '0' to go back.",
+      buttons(`${intro}\n\nWould you like to proceed?`, [
+        { id: 'yes', title: 'Yes, reschedule' },
+        { id: '0',   title: 'Go back' }
+      ])
+    );
   }
 
   /**
