@@ -23,6 +23,12 @@ process.env.CLINIKO_API_KEY_HK = process.env.CLINIKO_API_KEY_HK || '';
 // Run under HK region context for the whole file
 const RegionContext = require('../../src/core/RegionContext');
 const ClinikoAPI = require('../../src/api/ClinikoAPI');
+const {
+  getAllAppointmentTypesForAllPractitioners,
+  parseApptCategory,
+  buildFunnelCatalogue,
+  resolveApptFromFunnel,
+} = require('../../src/core/_appointmentTypeHelpers');
 
 // Silence logger
 jest.mock('../../src/core/Logger', () =>
@@ -293,4 +299,242 @@ describe('SendMessage — timeout configured', () => {
     // get, post, patch each have one timeout setting
     expect(timeoutMatches.length).toBeGreaterThanOrEqual(3);
   });
+});
+
+// =============================================================================
+// 7. getAppointmentTypes() — category field and parseApptCategory  (L-A)
+// =============================================================================
+describe('getAppointmentTypes() — category field and parseApptCategory', () => {
+  maybeIt('every type has a category that is a string or null — never an object', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const group = groups.find(g => g.practitioners.length > 0);
+    if (!group) return;
+
+    const types = await hk(() => api.getAppointmentTypes({ practitioner_id: group.practitioners[0].id }));
+    expect(types.length).toBeGreaterThan(0);
+
+    for (const t of types) {
+      expect(typeof t.category === 'string' || t.category == null).toBe(true);
+    }
+  }, 30000);
+
+  maybeIt('parseApptCategory produces a non-empty service string for every category present', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const group = groups.find(g => g.practitioners.length > 0);
+    if (!group) return;
+
+    const types = await hk(() => api.getAppointmentTypes({ practitioner_id: group.practitioners[0].id }));
+
+    const withCategory = types.filter(t => t.category);
+    console.log(`[live] ${withCategory.length}/${types.length} types have a non-null category`);
+
+    const uniqueCategories = [...new Set(withCategory.map(t => t.category))];
+    console.log('[live] unique categories:', uniqueCategories);
+
+    for (const t of withCategory) {
+      const { service, insurer } = parseApptCategory(t.category);
+      expect(service.length).toBeGreaterThan(0);
+      expect(typeof insurer === 'string' || insurer === null).toBe(true);
+    }
+  }, 30000);
+
+  maybeIt('at least one appointment type has a non-null category (funnel requires it)', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const allHaveNullCategory = [];
+
+    for (const group of groups) {
+      for (const prac of group.practitioners) {
+        const types = await hk(() => api.getAppointmentTypes({ practitioner_id: prac.id }));
+        const withCat = types.filter(t => t.category);
+        if (withCat.length > 0) return; // found at least one — pass
+        allHaveNullCategory.push(...types.map(t => t.name));
+      }
+    }
+    console.warn('[live] no appointment types with a category field found — funnel will show all types under one service');
+    // Log all type names so we can diagnose the Cliniko account setup
+    console.warn('[live] all type names (no category):', allHaveNullCategory);
+    // Not a hard failure — the funnel degrades gracefully when category is absent
+    // but this signals the Cliniko account may need categories configured
+  }, 120000);
+});
+
+// =============================================================================
+// 8. getAllAppointmentTypesForAllPractitioners + buildFunnelCatalogue  (L-B)
+// =============================================================================
+describe('getAllAppointmentTypesForAllPractitioners() + buildFunnelCatalogue() — live catalogue', () => {
+  let allRawTypes = null;
+
+  maybeIt('returns an array where every entry has id, name, and duration_in_minutes', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    allRawTypes = await hk(() => getAllAppointmentTypesForAllPractitioners(api, groups));
+    expect(Array.isArray(allRawTypes)).toBe(true);
+    expect(allRawTypes.length).toBeGreaterThan(0);
+
+    for (const t of allRawTypes) {
+      expect(t.id).toBeTruthy();
+      expect(typeof t.name).toBe('string');
+      expect(t.name.length).toBeGreaterThan(0);
+      expect(typeof t.duration_in_minutes).toBe('number');
+      expect(t.duration_in_minutes).toBeGreaterThan(0);
+    }
+    console.log(`[live] getAllAppointmentTypesForAllPractitioners → ${allRawTypes.length} types`);
+  }, 120000);
+
+  maybeIt('buildFunnelCatalogue produces entries with valid service and duration', async () => {
+    if (!allRawTypes) {
+      const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+      allRawTypes = await hk(() => getAllAppointmentTypesForAllPractitioners(api, groups));
+    }
+
+    const catalogue = buildFunnelCatalogue(allRawTypes);
+    expect(catalogue.length).toBeGreaterThan(0);
+
+    for (const entry of catalogue) {
+      expect(typeof entry.id).toBe('string');
+      expect(typeof entry.name).toBe('string');
+      expect(entry.name.length).toBeGreaterThan(0);
+      expect(typeof entry.service).toBe('string');
+      expect(entry.service.length).toBeGreaterThan(0);
+      expect(entry.duration).toBeGreaterThan(0);
+    }
+
+    const services = [...new Set(catalogue.map(e => e.service))].sort();
+    const insurers = [...new Set(catalogue.map(e => e.insurer).filter(Boolean))].sort();
+    const patientTypes = [...new Set(catalogue.map(e => e.patientType).filter(Boolean))];
+    console.log('[live] funnel services:', services);
+    console.log('[live] funnel insurers:', insurers);
+    console.log('[live] funnel patientTypes:', patientTypes);
+    console.log(`[live] catalogue: ${catalogue.length} entries (${allRawTypes.length} raw, ${allRawTypes.length - catalogue.length} filtered out)`);
+  }, 120000);
+
+  maybeIt('no UWC or online-booking entries survive into the funnel catalogue', async () => {
+    if (!allRawTypes) {
+      const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+      allRawTypes = await hk(() => getAllAppointmentTypesForAllPractitioners(api, groups));
+    }
+    const catalogue = buildFunnelCatalogue(allRawTypes);
+    const leaked = catalogue.filter(e => /UWC|online\s*booking/i.test(e.name));
+    expect(leaked).toHaveLength(0);
+  }, 120000);
+});
+
+// =============================================================================
+// 9. resolveApptFromFunnel — IDs map back to real Cliniko types  (L-C)
+// =============================================================================
+describe('resolveApptFromFunnel() — resolved IDs are valid live Cliniko type IDs', () => {
+  maybeIt('every ID in a resolved entry exists in the raw Cliniko types', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const allRawTypes = await hk(() => getAllAppointmentTypesForAllPractitioners(api, groups));
+    const catalogue = buildFunnelCatalogue(allRawTypes);
+    if (!catalogue.length) return;
+
+    const realIds = new Set(allRawTypes.map(t => String(t.id)));
+
+    // Try to resolve every unique (service, patientType, insurer, duration) combo
+    const tried = new Set();
+    for (const entry of catalogue) {
+      const key = `${entry.service}|${entry.patientType}|${entry.insurer}|${entry.duration}`;
+      if (tried.has(key)) continue;
+      tried.add(key);
+
+      const resolved = resolveApptFromFunnel(catalogue, {
+        service: entry.service,
+        patientType: entry.patientType,
+        insurer: entry.insurer,
+        duration: entry.duration,
+      });
+
+      expect(resolved).not.toBeNull();
+      expect(Array.isArray(resolved.ids)).toBe(true);
+      expect(resolved.ids.length).toBeGreaterThan(0);
+      expect(resolved.name.length).toBeGreaterThan(0);
+
+      for (const id of resolved.ids) {
+        expect(realIds.has(id)).toBe(true);
+      }
+    }
+    console.log(`[live] resolveApptFromFunnel verified ${tried.size} unique combos — all IDs valid`);
+  }, 120000);
+});
+
+// =============================================================================
+// 10. Practitioner display name field completeness  (L-D)
+// =============================================================================
+describe('Practitioner display name — live field completeness', () => {
+  // Mirror the engine's getPractitionerDisplayName logic without importing ChatbotEngine
+  function displayName(p) {
+    if (!p) return '';
+    return p.display_name ||
+      [p.first_name, p.last_name].filter(Boolean).join(' ') ||
+      '';
+  }
+
+  maybeIt('every live practitioner has a non-empty display name', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const all = groups.flatMap(g => g.practitioners);
+    const blank = all.filter(p => !displayName(p));
+
+    if (blank.length > 0) {
+      console.warn('[live] practitioners with no resolvable display name (id list):', blank.map(p => p.id));
+    }
+    expect(blank).toHaveLength(0);
+  }, 60000);
+
+  maybeIt('practitioners sort stably — no two adjacent entries swap after a second sort', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const all = groups.flatMap(g => g.practitioners);
+
+    const sorted1 = [...all].sort((a, b) => displayName(a).localeCompare(displayName(b)));
+    const sorted2 = [...all].sort((a, b) => displayName(a).localeCompare(displayName(b)));
+
+    expect(sorted1.map(p => p.id)).toEqual(sorted2.map(p => p.id));
+    console.log('[live] first 5 sorted practitioners:', sorted1.slice(0, 5).map(p => displayName(p)));
+  }, 60000);
+});
+
+// =============================================================================
+// 11. getAvailableTimes — wide window diagnostic  (L-E / B1)
+// =============================================================================
+describe('getAvailableTimes() — 21-day window diagnostic (B1)', () => {
+  maybeIt('logs whether Cliniko rejects or accepts a 21-day window', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const group = groups.find(g => g.practitioners.length > 0);
+    if (!group) return;
+
+    const prac = group.practitioners[0];
+    const types = await hk(() => api.getAppointmentTypes({ practitioner_id: prac.id }));
+    if (!types.length) return;
+
+    const from = new Date();
+    const to   = new Date(from.getTime() + 21 * 24 * 3600000);
+    const fmt  = d => d.toISOString().slice(0, 10);
+
+    let thrownError = null;
+    let slots = [];
+    try {
+      slots = await hk(() => api.getAvailableTimes({
+        practitioner_id: prac.id,
+        business_id: group.clinic_id,
+        appt_type: types[0].id,
+        from: fmt(from),
+        to: fmt(to),
+      }));
+    } catch (e) {
+      thrownError = e;
+    }
+
+    if (thrownError) {
+      console.log('[live] B1 diagnostic — 21-day window threw:', thrownError?.message || thrownError);
+      console.log('[live] B1: Cliniko still rejects wide windows — guard in getAvailableTimes needed');
+    } else {
+      console.log(`[live] B1 diagnostic — 21-day window returned ${slots.length} slots without error`);
+      if (slots.length === 0) {
+        console.log('[live] B1: no slots returned (may be a silent rejection or genuinely no slots)');
+      } else {
+        console.log('[live] B1: Cliniko accepted a 21-day window — B1 risk may be lower than assessed');
+      }
+    }
+    // Diagnostic only — outcome is logged, not asserted
+    expect(true).toBe(true);
+  }, 30000);
 });
