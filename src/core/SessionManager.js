@@ -1021,13 +1021,13 @@ class SessionManager {
             this.logger.debug(`[deleteSessionAndData] Deleted verification codes for phone: ${phoneNumber}`);
         }
 
-        // Delete persistent patient state (region, appt_preference) keyed by phone
+        // Clear appt_preference but keep region so the user skips region-select on next login
         if (phoneNumber) {
             await this.db.query(
-                `DELETE FROM patient_state WHERE phone_number = ?`,
+                `UPDATE patient_state SET appt_preference = NULL WHERE phone_number = ?`,
                 [phoneNumber]
             );
-            this.logger.debug(`[deleteSessionAndData] Deleted patient_state for phone: ${phoneNumber}`);
+            this.logger.debug(`[deleteSessionAndData] Cleared appt_preference for phone: ${phoneNumber}`);
         }
 
         // Delete the session itself (use DatabaseManager.deleteSession)
