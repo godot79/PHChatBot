@@ -3148,10 +3148,12 @@ if (/^p(rev)?$/i.test(text)) {
         const physios = typeNorm ? await buildAvailablePhysiosForTypeName(typeNorm) : [];
         if (physios.length > 1) {
           data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
+          data.physio_funnel_step = 'done'; // skip funnel on back — pref already captured
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+          const effectiveList = this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories);
           const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
-            items: data.practitioner_list,
+            items: effectiveList,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
             header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || '' })
