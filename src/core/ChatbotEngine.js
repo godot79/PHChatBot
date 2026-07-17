@@ -13,6 +13,7 @@ const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
   getPractitionersForTypeName,
+  parseApptCategory,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
 } = require('./_appointmentTypeHelpers');
@@ -628,6 +629,17 @@ function sortPractitioners(practitioners) {
   return [...practitioners].sort((a, b) =>
     getPractitionerDisplayName(a).localeCompare(getPractitionerDisplayName(b))
   );
+}
+
+/**
+ * Derive gender from a practitioner's title field.
+ * Returns 'male', 'female', or null (unknown / no title).
+ */
+function practitionerGender(p) {
+  const t = (p && p.title) ? String(p.title).trim() : '';
+  if (t === 'Mr') return 'male';
+  if (t === 'Ms' || t === 'Miss' || t === 'Mrs') return 'female';
+  return null;
 }
 
 /**
@@ -2043,7 +2055,8 @@ if (/^p(rev)?$/i.test(text)) {
   async _stepApptFunnel(session, data, text) {
     const catalogue = data.funnel_catalogue || [];
     // True when text was a real user reply that failed to match — prepend error to re-shown menus.
-    const badInput = text !== '' && text !== 'yes' && text !== 'change';
+    // Must be let so it can be reset to false once a step consumes the text via text=''.
+    let badInput = text !== '' && text !== 'yes' && text !== 'change';
 
     // First entry: offer shortcut if preference exists, otherwise start at service
     if (!data.funnel_step) {
@@ -2098,7 +2111,7 @@ if (/^p(rev)?$/i.test(text)) {
           sel.service = services[idx];
           data.funnel_sel = sel;
           data.funnel_step = 'insurer';
-          text = '';
+          text = ''; badInput = false;
           continue;
         }
         {
@@ -2125,7 +2138,7 @@ if (/^p(rev)?$/i.test(text)) {
           sel.insurer = options[idx] === 'Self-pay' ? null : options[idx];
           data.funnel_sel = sel;
           data.funnel_step = 'final_pick';
-          text = '';
+          text = ''; badInput = false;
           continue;
         }
         {
@@ -2214,6 +2227,175 @@ if (/^p(rev)?$/i.test(text)) {
     if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
     if (ctx && typeof ctx === 'object') { ctx.appt_preference = pref; session.context = ctx; }
     this.sessionManager.db.upsertPatientState(phone, { appt_preference: JSON.stringify(pref) }).catch(() => {});
+  }
+
+  /**
+   * Progressive funnel for choosing a physio by gender and treatment category.
+   * Steps: gender → category (auto-skipped when only one option).
+   * Offers a "same as last time?" shortcut when a saved physio_preference exists.
+   *
+   * Returns { reply } while gathering input, or {} when the funnel is complete
+   * (data.physio_funnel_step === 'done', data.physio_funnel_sel populated).
+   */
+  async _stepPhysioFunnel(session, data, text) {
+    const pracList = data.practitioner_list || [];
+
+    // First entry
+    if (!data.physio_funnel_step) {
+      let ctx = session.context;
+      if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = null; } }
+      const pref = ctx && ctx.physio_preference;
+      if (pref && text === '') {
+        const label = this._formatPhysioPrefLabel(pref);
+        if (label) {
+          data.physio_funnel_step = 'shortcut';
+          return { reply: buttons(`Last time: ${label}\nSame preference?`, [
+            { id: 'yes', title: 'Yes' },
+            { id: 'change', title: 'Change' },
+          ]) };
+        }
+      }
+      data.physio_funnel_step = 'gender';
+      data.physio_funnel_sel = {};
+    }
+
+    if (data.physio_funnel_step === 'shortcut') {
+      if (text === 'yes') {
+        let ctx = session.context;
+        if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = null; } }
+        const pref = ctx && ctx.physio_preference;
+        if (pref) {
+          data.physio_funnel_sel = { gender: pref.gender || null, category: pref.category || null };
+          data.physio_funnel_step = 'done';
+          return {};
+        }
+      }
+      data.physio_funnel_step = 'gender';
+      data.physio_funnel_sel = {};
+      text = '';
+    }
+
+    if (data.physio_funnel_step === 'gender') {
+      const genderMap = ['male', 'female', null];
+      const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+      if (idx >= 0 && idx <= 2) {
+        data.physio_funnel_sel = { gender: genderMap[idx], category: null };
+        data.physio_funnel_step = 'category';
+        text = '';
+      } else {
+        const badInput = text !== '' && text !== 'yes' && text !== 'change';
+        const menu = buttons('Do you have a preference for your physio?', [
+          { id: '1', title: 'Male' },
+          { id: '2', title: 'Female' },
+          { id: '3', title: 'No preference' },
+        ]);
+        return { reply: badInput ? prependTextToEnvelope('Please choose an option.', menu) : menu };
+      }
+    }
+
+    if (data.physio_funnel_step === 'category') {
+      const sel = data.physio_funnel_sel || {};
+
+      // Fetch and cache per-practitioner categories for the gender-filtered set
+      if (!data.physio_categories) {
+        const genderFiltered = pracList.filter(p => {
+          if (!sel.gender) return true;
+          const g = practitionerGender(p);
+          return g === null || g === sel.gender;
+        });
+        const allTypes = await Promise.all(
+          genderFiltered.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+        );
+        data.physio_categories = genderFiltered.map((p, i) => ({
+          id: String(p.id),
+          categories: [...new Set(
+            (allTypes[i] || [])
+              .filter(t => t && t.name && !/UWC/i.test(t.name) && !/online\s*booking/i.test(t.name))
+              .map(t => parseApptCategory(t.category).service)
+              .filter(Boolean)
+          )],
+        }));
+      }
+
+      const genderFiltered = pracList.filter(p => {
+        if (!sel.gender) return true;
+        const g = practitionerGender(p);
+        return g === null || g === sel.gender;
+      });
+      const catMap = new Map((data.physio_categories || []).map(pc => [pc.id, pc.categories]));
+      const allCats = [...new Set(genderFiltered.flatMap(p => catMap.get(String(p.id)) || []))].sort();
+
+      // Auto-advance: zero or one category — nothing meaningful to ask
+      if (allCats.length <= 1) {
+        sel.category = allCats[0] || null;
+        data.physio_funnel_sel = sel;
+        data.physio_funnel_step = 'done';
+        this._savePhysioPref(session, sel);
+        return {};
+      }
+
+      const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+      if (idx >= 0 && idx < allCats.length) {
+        sel.category = allCats[idx];
+        data.physio_funnel_sel = sel;
+        data.physio_funnel_step = 'done';
+        this._savePhysioPref(session, sel);
+        return {};
+      }
+
+      const badInput = text !== '';
+      const catMenu = allCats.length <= 3
+        ? buttons('What type of treatment?', allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 20) })))
+        : list('What type of treatment?', 'Select type', allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 24) })));
+      return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', catMenu) : catMenu };
+    }
+
+    return {};
+  }
+
+  /**
+   * Filter a practitioner list by the resolved physio preference (gender + category).
+   * Practitioners with unknown gender (null title) are included in either gender filter.
+   * Falls back to the full list if the filter would produce an empty result.
+   */
+  _applyPhysioFilter(fullList, sel, physioCategories) {
+    if (!sel || !fullList || !fullList.length) return fullList || [];
+    let result = fullList;
+
+    if (sel.gender) {
+      result = result.filter(p => {
+        const g = practitionerGender(p);
+        return g === null || g === sel.gender;
+      });
+    }
+
+    if (sel.category && physioCategories && physioCategories.length) {
+      const catMap = new Map(physioCategories.map(pc => [pc.id, pc.categories]));
+      result = result.filter(p => {
+        const cats = catMap.get(String(p.id)) || [];
+        return cats.length === 0 || cats.includes(sel.category);
+      });
+    }
+
+    return result.length > 0 ? result : fullList;
+  }
+
+  _savePhysioPref(session, sel) {
+    const phone = session.phone_number || session.phoneNumber;
+    const pref = { gender: sel.gender || null, category: sel.category || null };
+    let ctx = session.context;
+    if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
+    if (ctx && typeof ctx === 'object') { ctx.physio_preference = pref; session.context = ctx; }
+    this.sessionManager.db.upsertPatientState(phone, { physio_preference: JSON.stringify(pref) }).catch(() => {});
+  }
+
+  _formatPhysioPrefLabel(pref) {
+    if (!pref) return null;
+    const parts = [];
+    if (pref.gender === 'male') parts.push('Male');
+    else if (pref.gender === 'female') parts.push('Female');
+    if (pref.category) parts.push(pref.category);
+    return parts.length ? parts.join(' · ') : null;
   }
 
   /**
@@ -3187,38 +3369,49 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
+      // Run preference funnel (gender → category) before showing the list.
+      // Recurse with empty text once done so the list renders on a clean turn.
+      if (data.physio_funnel_step !== 'done') {
+        const fr = await this._stepPhysioFunnel(session, data, text);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+        if (fr.reply) return fr.reply;
+        return await this.handleBookSpecificPhysio(session, '');
+      }
+
+      // Filtered list based on preference (falls back to full list if filter is too narrow)
+      const effectiveList = this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories);
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
-if (/^p(rev)?$/i.test(text)) {
-  data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
-  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-}
+      if (/^p(rev)?$/i.test(text)) {
+        data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
 
       if (/^\d+$/.test(text)) {
         const page = data.practitioner_page || 0;
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
-        const list = data.practitioner_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_physio = list[idx];
+        if (localNum >= 1 && localNum <= Math.min(pageSize, effectiveList.length - pageStart) && effectiveList[idx]) {
+          data.selected_physio = effectiveList[idx];
           data.selection_step = 'choose_type';
-          if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: list.length > 1, auto: false });
+          if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: effectiveList.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
           return await this.handleBookSpecificPhysio(session, '');
         }
       }
 
-      const reply = buildInteractiveSelectionList({
-        items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
+      const phyReply = buildInteractiveSelectionList({
+        items: effectiveList,
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name)) }),
         page: data.practitioner_page || 0,
-        header: 'Choose a physio:'
+        header: 'Choose a physio:',
       });
-      return reply;
+      return phyReply;
     }
 
     // =====================================================================

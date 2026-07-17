@@ -74,6 +74,7 @@ class DatabaseManager {
           phone_number TEXT PRIMARY KEY,
           region TEXT,
           appt_preference TEXT,
+          physio_preference TEXT,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`, (err) => {
           if (err) {
@@ -320,16 +321,18 @@ class DatabaseManager {
   }
 
   async upsertPatientState(phone, updates) {
-    const { region, appt_preference } = updates;
+    const { region, appt_preference, physio_preference } = updates;
     return new Promise((resolve, reject) => {
       this.db.run(
-        `INSERT INTO patient_state (phone_number, region, appt_preference, updated_at)
-         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO patient_state (phone_number, region, appt_preference, physio_preference, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(phone_number) DO UPDATE SET
            region = COALESCE(?, region),
            appt_preference = COALESCE(?, appt_preference),
+           physio_preference = COALESCE(?, physio_preference),
            updated_at = CURRENT_TIMESTAMP`,
-        [phone, region ?? null, appt_preference ?? null, region ?? null, appt_preference ?? null],
+        [phone, region ?? null, appt_preference ?? null, physio_preference ?? null,
+         region ?? null, appt_preference ?? null, physio_preference ?? null],
         (err) => err ? reject(err) : resolve()
       );
     });

@@ -80,6 +80,7 @@ jest.mock('../../src/core/DatabaseManager', () => {
             phone_number TEXT PRIMARY KEY,
             region TEXT,
             appt_preference TEXT,
+            physio_preference TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
           )`, (err) => {
             if (err) return rej(err);
@@ -187,16 +188,18 @@ jest.mock('../../src/core/DatabaseManager', () => {
     }
 
     async upsertPatientState (phone, updates) {
-      const { region, appt_preference } = updates;
+      const { region, appt_preference, physio_preference } = updates;
       return new Promise((res, rej) =>
         this.db.run(
-          `INSERT INTO patient_state (phone_number, region, appt_preference, updated_at)
-           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+          `INSERT INTO patient_state (phone_number, region, appt_preference, physio_preference, updated_at)
+           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(phone_number) DO UPDATE SET
              region = COALESCE(?, region),
              appt_preference = COALESCE(?, appt_preference),
+             physio_preference = COALESCE(?, physio_preference),
              updated_at = CURRENT_TIMESTAMP`,
-          [phone, region ?? null, appt_preference ?? null, region ?? null, appt_preference ?? null],
+          [phone, region ?? null, appt_preference ?? null, physio_preference ?? null,
+           region ?? null, appt_preference ?? null, physio_preference ?? null],
           (err) => (err ? rej(err) : res())
         )
       );
@@ -1956,6 +1959,9 @@ describe('Booking menu and flow coverage', () => {
       practitioner_list: SIX_PHYSIOS,
       practitioner_page: 0,
       navigation_chain: [],
+      // Funnel already completed so pagination tests bypass the preference steps
+      physio_funnel_step: 'done',
+      physio_funnel_sel: { gender: null, category: null },
     };
 
     test('page 0 with 6 physios → shows first 5 + More button', async () => {
@@ -2044,6 +2050,149 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificPhysio'], session, '0');
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_PHYSIO — physio preference funnel ────────────────────────
+  describe('BOOK_SPECIFIC_PHYSIO — physio preference funnel', () => {
+    // Shared helper: two practitioners with distinct categories, sorted Amy < Zara
+    const TWO_PRAC_GROUPS = [
+      { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+        { id: 'PRAC-001', first_name: 'Amy',  last_name: 'Lee',  title: 'Ms' },  // female, sorted first
+        { id: 'PRAC-002', first_name: 'Zara', last_name: 'Wong', title: 'Mr' },  // male, sorted second
+      ]},
+    ];
+    // Physiotherapy only — causes category step to auto-advance
+    const SINGLE_CAT_TYPES = [
+      { id: 'AT-001', name: 'New Patient', category: 'Physiotherapy', duration_in_minutes: 60 },
+    ];
+
+    test('entry with no saved preference → shows gender question', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/preference.*physio|physio.*preference|male|female|no preference/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
+    });
+
+    test("'1' (Male) at gender step with two categories → shows category question", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Leo', last_name: 'Choi', title: 'Mr' },
+        ]},
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-P', name: 'New Patient',   category: 'Physiotherapy',        duration_in_minutes: 60 },
+        { id: 'AT-M', name: 'Massage Visit', category: 'Sports Massage Therapy', duration_in_minutes: 30 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');     // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, '1')); // Male
+      expect(reply).toMatch(/type of treatment|Physiotherapy|Sports Massage/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.gender).toBe('male');
+      expect(d.physio_funnel_step).toBe('category');
+    });
+
+    test("'3' (No preference) with single category → funnel completes and physio list shown", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PRAC_GROUPS);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue(SINGLE_CAT_TYPES);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, '3')); // No pref
+      // Category auto-advances (only Physiotherapy) → physio list shown
+      expect(reply).toMatch(/Amy|Zara|Choose a physio/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBeNull();
+    });
+
+    test('Male filter excludes female physios but keeps unknown-title practitioners', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Leo',    last_name: 'Choi',  title: 'Mr'   }, // male
+          { id: 'PRAC-002', first_name: 'Angela', last_name: 'Leung', title: 'Ms'   }, // female
+          { id: 'PRAC-003', first_name: 'Pinky',  last_name: 'Chan',  title: null   }, // unknown
+        ]},
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue(SINGLE_CAT_TYPES);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, '1')); // Male
+      // Leo (Mr) and Pinky (null) included; Angela (Ms) excluded
+      expect(reply).toMatch(/Leo|Pinky/i);
+      expect(reply).not.toMatch(/Angela/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('male');
+    });
+
+    test('category filter: selecting a category shows only practitioners offering it', async () => {
+      // Sorted: Anna Lee < Zara Wong
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Anna', last_name: 'Lee'  },
+          { id: 'PRAC-002', first_name: 'Zara', last_name: 'Wong' },
+        ]},
+      ]);
+      // Anna (first in sorted order) → Physiotherapy; Zara → Osteopathy
+      engine.clinikoAPI.getAppointmentTypes
+        .mockResolvedValueOnce([{ id: 'AT-P', name: 'New Patient',      category: 'Physiotherapy', duration_in_minutes: 60 }])
+        .mockResolvedValueOnce([{ id: 'AT-O', name: 'Osteopathy Initial', category: 'Osteopathy',   duration_in_minutes: 60 }]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificPhysio'], s2, '3');       // No pref → category q
+      const s3 = await db.getSession(session.id);
+      // Sorted categories: Osteopathy=1, Physiotherapy=2 → pick '2' for Physiotherapy
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s3, '2'));
+      expect(reply).toMatch(/Anna/i);
+      expect(reply).not.toMatch(/Zara/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.category).toBe('Physiotherapy');
+    });
+
+    test('saved physio_preference → shortcut offered', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: 'Physiotherapy' } }),
+      });
+      const s = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s, ''));
+      expect(reply).toMatch(/Female.*Physiotherapy|last time|same preference/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('shortcut');
+    });
+
+    test("shortcut 'yes' → funnel completes with saved preference without re-asking", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PRAC_GROUPS);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue(SINGLE_CAT_TYPES);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: null } }),
+      });
+      const s = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificPhysio'], s, '');         // → shortcut q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, 'yes'));
+      // Funnel done — should show physio list (female filter: Amy only)
+      expect(reply).toMatch(/Amy|Choose a physio/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('female');
+    });
+
+    test('bad input at gender step → error prefix shown, still at gender step', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, 'xyz'));
+      expect(reply).toMatch(/Please choose an option|preference|male|female/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
     });
   });
 
