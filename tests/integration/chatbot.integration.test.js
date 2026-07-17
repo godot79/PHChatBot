@@ -1238,10 +1238,11 @@ describe('Booking menu and flow coverage', () => {
       expect(reply.length).toBeGreaterThan(0);
     });
 
-    test('invalid input → validation message', async () => {
+    test('invalid input → validation message with menu (not a dead end)', async () => {
       const session = await seedAt('BOOKING_METHOD_OPTIONS');
-      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, 'xyz');
-      expect(reply).toMatch(/valid|1.5|booking method/i);
+      const reply   = await engine.handleBookingMethodOptions(session, 'xyz');
+      expect(reply).toHaveProperty('interactive');
+      expect(reply._textFallback).toMatch(/valid|1–5|booking method/i);
     });
 
     test('menu includes a ← Back row (id 0) so users can return without typing', async () => {
@@ -5822,5 +5823,230 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(String(r3)).toMatch(/first name/i);
     expect(String(r3)).not.toMatch(/register as new patient/i);
     expect(String(r3)).not.toMatch(/region|hong kong/i);
+  });
+});
+
+// =============================================================================
+// F1 regression — BOOK_SPECIFIC_DATE choose_type used global idx on page 1+
+// Bug: typing "1" on page 1 selected list[0] (global) instead of list[5] (page-local).
+// Fix: idx = interactivePageStart(page) + localNum - 1, with local page-range guard.
+// Why existing tests missed it: all choose_type tests used ≤5 types (fit on page 0).
+// =============================================================================
+describe('F1 regression — BOOK_SPECIFIC_DATE choose_type page-local selection', () => {
+  let db, sm, engine;
+  const PATIENT_ID = 'PT-F1-001';
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  function makeTypes(n) {
+    return Array.from({ length: n }, (_, i) => ({ id: i + 1, name: `Type ${i + 1}` }));
+  }
+
+  async function seedChooseType(phone, page, types) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOK_SPECIFIC_DATE',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({
+        selection_step: 'choose_type',
+        selected_date: '2026-08-01',
+        appt_type_page: page,
+        appointment_type_list: types,
+      }),
+    });
+    return db.getSession(id);
+  }
+
+  test('page 0: typing "1" selects Type 1 (first item)', async () => {
+    const types = makeTypes(6);
+    const session = await seedChooseType('+6591000001', 0, types);
+    await engine.handleBookSpecificDate(session, '1');
+    const d = JSON.parse((await db.getSession(session.id)).data);
+    expect(d.selected_appt_type.name).toBe('Type 1');
+  });
+
+  test('page 1: typing "1" selects Type 6 (first item on page 1), not Type 1', async () => {
+    // page 1 starts at index 5 (INTERACTIVE_SELECT_PAGE_FIRST=5)
+    const types = makeTypes(6);
+    const session = await seedChooseType('+6591000002', 1, types);
+    await engine.handleBookSpecificDate(session, '1');
+    const d = JSON.parse((await db.getSession(session.id)).data);
+    expect(d.selected_appt_type.name).toBe('Type 6');
+  });
+
+  test('page 0: typing "6" (out of page range) does not select anything', async () => {
+    // page 0 holds 5 items; "6" is beyond the page — must re-render, not select
+    const types = makeTypes(6);
+    const session = await seedChooseType('+6591000003', 0, types);
+    const reply = await engine.handleBookSpecificDate(session, '6');
+    const d = JSON.parse((await db.getSession(session.id)).data);
+    expect(d.selected_appt_type).toBeUndefined();
+    expect(reply).toHaveProperty('interactive');
+  });
+});
+
+// =============================================================================
+// F2 regression — BOOKING_METHOD_OPTIONS unrecognized input was a dead end
+// Bug: returned a bare string with no menu, leaving the user stranded.
+// Fix: prependTextToEnvelope(error, await this.renderBookingMethodMenu(session)).
+// Why existing tests missed it: all existing tests sent valid inputs (1-5, 0, back).
+// =============================================================================
+describe('F2 regression — BOOKING_METHOD_OPTIONS invalid input re-renders interactive menu', () => {
+  let db, sm, engine;
+  const PATIENT_ID = 'PT-F2-001';
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedBookingMethod(phone) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'BOOKING_METHOD_OPTIONS',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({}),
+    });
+    return db.getSession(id);
+  }
+
+  test('out-of-range "6" → re-renders interactive booking menu with error prefix', async () => {
+    const session = await seedBookingMethod('+6592000001');
+    const reply = await engine.handleBookingMethodOptions(session, '6');
+    expect(reply).toHaveProperty('interactive');
+    expect(reply._textFallback).toMatch(/valid|1–5|booking method/i);
+  });
+
+  test('garbage text → re-renders interactive booking menu (no dead end)', async () => {
+    const session = await seedBookingMethod('+6592000002');
+    const reply = await engine.handleBookingMethodOptions(session, 'hello there');
+    expect(reply).toHaveProperty('interactive');
+  });
+
+  test('session stays at BOOKING_METHOD_OPTIONS after invalid input', async () => {
+    const session = await seedBookingMethod('+6592000003');
+    await engine.handleBookingMethodOptions(session, 'nope');
+    const updated = await db.getSession(session.id);
+    expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+  });
+});
+
+// =============================================================================
+// F3 regression — cancel/reschedule list text-mode aliases 'p'/'m'/'more' not handled
+// Bug: only exact 'prev'/'next' (interactive row IDs) were matched; text-mode aliases
+//   used throughout every other paginated list were missing from these two handlers.
+// Fix: /^p(rev)?$/i and /^m(ore)?$|^next$/i, consistent with all other handlers.
+// Why existing tests missed it: L3 tests only checked 'prev'/'next', never 'p'/'m'.
+// =============================================================================
+describe('F3 regression — SELECT_APPOINTMENT_TO_CANCEL text-mode pagination aliases', () => {
+  let db, sm, engine;
+  const PATIENT_ID = 'PT-F3C-001';
+  const MANY_APPTS = Array.from({ length: 7 }, (_, i) => ({
+    id: `APPT-${i}`, starts_at: '2026-09-01T09:00:00Z', cancelled_at: null,
+    _practitioner_display: `Dr ${i}`, _appointment_type_display: 'Physio', _display_dt: `Day ${i + 1}`,
+  }));
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seed(phone, page = 0) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'SELECT_APPOINTMENT_TO_CANCEL',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ cancel_appt_list: MANY_APPTS, cancel_appt_page: page }),
+    });
+    return db.getSession(id);
+  }
+
+  test('"p" on page 1 goes back to page 0', async () => {
+    const session = await seed('+6593000001', 1);
+    const reply = await engine.handleSelectAppointmentToCancelState(session, 'p');
+    expect(reply).toHaveProperty('interactive');
+    expect(JSON.parse((await db.getSession(session.id)).data).cancel_appt_page).toBe(0);
+  });
+
+  test('"m" on page 0 advances to page 1', async () => {
+    const session = await seed('+6593000002', 0);
+    const reply = await engine.handleSelectAppointmentToCancelState(session, 'm');
+    expect(reply).toHaveProperty('interactive');
+    expect(JSON.parse((await db.getSession(session.id)).data).cancel_appt_page).toBe(1);
+  });
+
+  test('"more" on page 0 advances to page 1', async () => {
+    const session = await seed('+6593000003', 0);
+    await engine.handleSelectAppointmentToCancelState(session, 'more');
+    expect(JSON.parse((await db.getSession(session.id)).data).cancel_appt_page).toBe(1);
+  });
+});
+
+describe('F3 regression — SELECT_APPOINTMENT_TO_RESCHEDULE text-mode pagination aliases', () => {
+  let db, sm, engine;
+  const PATIENT_ID = 'PT-F3R-001';
+  const MANY_APPTS = Array.from({ length: 7 }, (_, i) => ({
+    id: `APPT-${i}`, starts_at: '2026-09-01T09:00:00Z', cancelled_at: null,
+    _practitioner_display: `Dr ${i}`, _appointment_type_display: 'Physio', _display_dt: `Day ${i + 1}`,
+  }));
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => { if (sm.cleanupInterval) clearInterval(sm.cleanupInterval); db.close(); });
+
+  async function seed(phone, page = 0) {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'SELECT_APPOINTMENT_TO_RESCHEDULE',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ reschedule_appt_list: MANY_APPTS, reschedule_appt_page: page }),
+    });
+    return db.getSession(id);
+  }
+
+  test('"p" on page 1 goes back to page 0', async () => {
+    const session = await seed('+6594000001', 1);
+    const reply = await engine.handleSelectAppointmentToRescheduleState(session, 'p');
+    expect(reply).toHaveProperty('interactive');
+    expect(JSON.parse((await db.getSession(session.id)).data).reschedule_appt_page).toBe(0);
+  });
+
+  test('"m" on page 0 advances to page 1', async () => {
+    const session = await seed('+6594000002', 0);
+    const reply = await engine.handleSelectAppointmentToRescheduleState(session, 'm');
+    expect(reply).toHaveProperty('interactive');
+    expect(JSON.parse((await db.getSession(session.id)).data).reschedule_appt_page).toBe(1);
+  });
+
+  test('"more" on page 0 advances to page 1', async () => {
+    const session = await seed('+6594000003', 0);
+    await engine.handleSelectAppointmentToRescheduleState(session, 'more');
+    expect(JSON.parse((await db.getSession(session.id)).data).reschedule_appt_page).toBe(1);
   });
 });

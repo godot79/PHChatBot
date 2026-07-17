@@ -1465,7 +1465,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = null;
       return await this.handleBookSpecificClinic(session, '');
     }
-    return 'Please reply with a valid booking method (1-5).';
+    return prependTextToEnvelope('Please reply with a valid booking method (1–5).', await this.renderBookingMethodMenu(session));
   }
 
   /**
@@ -2885,9 +2885,12 @@ if (/^p(rev)?$/i.test(text)) {
       const numOnly = text.replace(/[^\d]/g, '');
       if (numOnly) {
         const page = data.appt_type_page || 0;
-        const idx = parseInt(numOnly, 10) - 1;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = parseInt(numOnly, 10);
         const list = data.appointment_type_list || [];
-        if (idx >= 0 && idx < list.length) {
+        const idx = pageStart + localNum - 1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_appt_type = list[idx];
           data.selection_step = 'choose_physio';
           if (typeof navPush === 'function') navPush(data, 'choose_physio', { had_multiple_options: list.length > 1, auto: false });
@@ -4317,8 +4320,8 @@ if (/^p(rev)?$/i.test(text)) {
         page
       });
     };
-    if (text === 'prev') return renderCancelList(Math.max(0, (Number(data.cancel_appt_page) || 0) - 1));
-    if (text === 'next') return renderCancelList((Number(data.cancel_appt_page) || 0) + 1);
+    if (/^p(rev)?$/i.test(text)) return renderCancelList(Math.max(0, (Number(data.cancel_appt_page) || 0) - 1));
+    if (/^m(ore)?$|^next$/i.test(text)) return renderCancelList((Number(data.cancel_appt_page) || 0) + 1);
     const page = Number(data.cancel_appt_page) || 0;
     const pageStart = interactivePageStart(page);
     const pageSize = interactivePageSize(page);
@@ -4529,8 +4532,8 @@ if (/^p(rev)?$/i.test(text)) {
         page
       });
     };
-    if (text === 'prev') return renderRescheduleList(Math.max(0, (Number(data.reschedule_appt_page) || 0) - 1));
-    if (text === 'next') return renderRescheduleList((Number(data.reschedule_appt_page) || 0) + 1);
+    if (/^p(rev)?$/i.test(text)) return renderRescheduleList(Math.max(0, (Number(data.reschedule_appt_page) || 0) - 1));
+    if (/^m(ore)?$|^next$/i.test(text)) return renderRescheduleList((Number(data.reschedule_appt_page) || 0) + 1);
     const page = Number(data.reschedule_appt_page) || 0;
     const pageStart = interactivePageStart(page);
     const pageSize = interactivePageSize(page);
