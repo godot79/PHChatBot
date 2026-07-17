@@ -162,7 +162,7 @@ function planForward(data, selection_step, optionsCount, onAuto) {
 const CLEAR_FIELDS_BY_STEP = {
   choose_date: ['selected_date', 'appointment_type_list', 'appt_type_page', 'selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
   choose_type: ['selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
-  choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
+  choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type', 'physio_funnel_step', 'physio_funnel_sel', 'physio_categories'],
   choose_clinic: ['selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_appt_type: ['selected_appt_type']
 };
@@ -2237,7 +2237,7 @@ if (/^p(rev)?$/i.test(text)) {
    * Returns { reply } while gathering input, or {} when the funnel is complete
    * (data.physio_funnel_step === 'done', data.physio_funnel_sel populated).
    */
-  async _stepPhysioFunnel(session, data, text) {
+  async _stepPhysioFunnel(session, data, text, { skipCategory = false } = {}) {
     const pracList = data.practitioner_list || [];
 
     // First entry
@@ -2246,7 +2246,9 @@ if (/^p(rev)?$/i.test(text)) {
       if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = null; } }
       const pref = ctx && ctx.physio_preference;
       if (pref && text === '') {
-        const label = this._formatPhysioPrefLabel(pref);
+        // When skipCategory: only show gender in the shortcut label so it's not misleading
+        const displayPref = skipCategory ? { gender: pref.gender, category: null } : pref;
+        const label = this._formatPhysioPrefLabel(displayPref);
         if (label) {
           data.physio_funnel_step = 'shortcut';
           return { reply: buttons(`Last time: ${label}\nSame preference?`, [
@@ -2265,7 +2267,10 @@ if (/^p(rev)?$/i.test(text)) {
         if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = null; } }
         const pref = ctx && ctx.physio_preference;
         if (pref) {
-          data.physio_funnel_sel = { gender: pref.gender || null, category: pref.category || null };
+          data.physio_funnel_sel = {
+            gender: pref.gender || null,
+            category: skipCategory ? null : (pref.category || null),
+          };
           data.physio_funnel_step = 'done';
           return {};
         }
@@ -2284,17 +2289,28 @@ if (/^p(rev)?$/i.test(text)) {
         text = '';
       } else {
         const badInput = text !== '' && text !== 'yes' && text !== 'change';
-        const menu = buttons('Do you have a preference for your physio?', [
+        const genderBody = 'Do you have a preference for your physio?\n\n1. Male\n2. Female\n3. No preference\n\nTap a button, or type a number.';
+        const menu = buttons(genderBody, [
           { id: '1', title: 'Male' },
           { id: '2', title: 'Female' },
           { id: '3', title: 'No preference' },
         ]);
+        menu._textFallback = 'Do you have a preference for your physio?\n\n1. Male\n2. Female\n3. No preference\n\nReply with the number.';
         return { reply: badInput ? prependTextToEnvelope('Please choose an option.', menu) : menu };
       }
     }
 
     if (data.physio_funnel_step === 'category') {
       const sel = data.physio_funnel_sel || {};
+
+      // Gender-only flows skip the category step entirely
+      if (skipCategory) {
+        sel.category = null;
+        data.physio_funnel_sel = sel;
+        data.physio_funnel_step = 'done';
+        this._savePhysioPref(session, sel);
+        return {};
+      }
 
       // Fetch and cache per-practitioner categories for the gender-filtered set
       if (!data.physio_categories) {
@@ -2344,9 +2360,14 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       const badInput = text !== '';
-      const catMenu = allCats.length <= 3
-        ? buttons('What type of treatment?', allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 20) })))
-        : list('What type of treatment?', 'Select type', allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 24) })));
+      let catMenu;
+      if (allCats.length <= 3) {
+        const catBody = 'What type of treatment?\n\n' + allCats.map((c, i) => `${i + 1}. ${c}`).join('\n') + '\n\nTap a button, or type a number.';
+        catMenu = buttons(catBody, allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 20) })));
+        catMenu._textFallback = 'What type of treatment?\n\n' + allCats.map((c, i) => `${i + 1}. ${c}`).join('\n') + '\n\nReply with the number.';
+      } else {
+        catMenu = list('What type of treatment?', 'Select type', allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 24) })));
+      }
       return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', catMenu) : catMenu };
     }
 
@@ -2536,6 +2557,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.appointment_type_list = list; data.appt_type_name_to_ids_norm = map; data.appt_type_page = 0;
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio;
         delete data.funnel_step; delete data.funnel_sel;
+        delete data.physio_funnel_step; delete data.physio_funnel_sel; delete data.physio_categories;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return await this.handleBookSoonest(session, '');
@@ -2683,20 +2705,30 @@ if (/^p(rev)?$/i.test(text)) {
       const practitionerList = data.practitioner_list || [];
       const page = data.practitioner_page || 0;
 
+      // Gender-only preference funnel (no category step — type already chosen)
+      if (data.physio_funnel_step !== 'done') {
+        const fr = await this._stepPhysioFunnel(session, data, text, { skipCategory: true });
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+        if (fr.reply) return fr.reply;
+        return await this.handleBookSoonest(session, '');
+      }
+
+      const effectiveList = this._applyPhysioFilter(practitionerList, data.physio_funnel_sel, data.physio_categories);
+
       if (/^\d+$/.test(text)) {
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, practitionerList.length - pageStart) || !practitionerList[idx]) return 'Invalid practitioner selection. Reply with a number from the list.';
-        data.selected_physio = practitionerList[idx];
+        if (localNum < 1 || localNum > Math.min(pageSize, effectiveList.length - pageStart) || !effectiveList[idx]) return 'Invalid practitioner selection. Reply with a number from the list.';
+        data.selected_physio = effectiveList[idx];
         data.selection_step = 'choose_clinic';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return await this.handleBookSoonest(session, '');
       }
 
       const reply = buildInteractiveSelectionList({
-        items: practitionerList,
+        items: effectiveList,
         rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
         page,
         header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
@@ -3103,6 +3135,16 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
+      // Gender-only preference funnel (no category step — type already chosen)
+      if (data.physio_funnel_step !== 'done') {
+        const fr = await this._stepPhysioFunnel(session, data, text, { skipCategory: true });
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        if (fr.reply) return fr.reply;
+        return await this.handleBookSpecificDate(session, '');
+      }
+
+      const effectiveList = this._applyPhysioFilter(data.practitioner_list || [], data.physio_funnel_sel, data.physio_categories);
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (data.practitioner_page || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3117,12 +3159,11 @@ if (/^p(rev)?$/i.test(text)) {
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
-        const list = data.practitioner_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_physio = list[idx];
+        if (localNum >= 1 && localNum <= Math.min(pageSize, effectiveList.length - pageStart) && effectiveList[idx]) {
+          data.selected_physio = effectiveList[idx];
           data.selection_step = 'choose_clinic';
-          if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: list.length > 1, auto: false });
+          if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: effectiveList.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           return await this.handleBookSpecificDate(session, '');
         }
@@ -3130,7 +3171,7 @@ if (/^p(rev)?$/i.test(text)) {
 
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
       const reply = buildInteractiveSelectionList({
-        items: data.practitioner_list || [],
+        items: effectiveList,
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
         header: `Choose a physio for ${data.selected_appt_type?.name || 'visit'} on ${headerDate}:`

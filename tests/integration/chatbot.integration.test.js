@@ -1746,6 +1746,8 @@ describe('Booking menu and flow coverage', () => {
       ],
       practitioner_list: SIX_PHYSIOS,
       practitioner_page: 0,
+      physio_funnel_step: 'done',
+      physio_funnel_sel: { gender: null, category: null },
     };
 
     test('page 0 with 6 physios → shows first 5 + More button', async () => {
@@ -2748,6 +2750,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
       expect(typeof reply).toBe('string');
@@ -2760,6 +2764,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '99');
       expect(reply).toMatch(/invalid practitioner/i);
@@ -2771,6 +2777,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, 'm');
       expect(typeof reply).toBe('string');
@@ -2783,6 +2791,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         appointment_type_list: TYPE_LIST_2,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
       expect(reply).toMatch(/select duration|30 min|60 min/i);
@@ -2822,6 +2832,238 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
         { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
         { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
+  });
+
+  // ─── BOOK_SOONEST — gender preference funnel ─────────────────────────────────
+  describe('BOOK_SOONEST — gender preference funnel', () => {
+    // Mixed-gender practitioner pool used across tests
+    const FEMALE = { id: 'PRAC-F', first_name: 'Amy',  last_name: 'Lee',  title: 'Ms' };
+    const MALE   = { id: 'PRAC-M', first_name: 'Leo',  last_name: 'Chan', title: 'Mr' };
+    const UNKNOWN= { id: 'PRAC-U', first_name: 'Sasha',last_name: 'Wong', title: null  };
+
+    test('entering choose_physio for the first time shows gender question, not physio list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/preference.*physio|male|female|no preference/i);
+      expect(reply).not.toMatch(/Amy|Leo/i); // physio list not shown yet
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
+    });
+
+    test("gender '2' (Female) filters list: only female + unknown-title physios shown", async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE, UNKNOWN],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');       // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s2, '2')); // Female
+      // Amy (Ms) and Sasha (null) included; Leo (Mr) excluded
+      expect(reply).toMatch(/Amy|Sasha/i);
+      expect(reply).not.toMatch(/Leo/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('female');
+      expect(d.physio_funnel_sel?.category).toBeNull(); // category skipped
+    });
+
+    test("gender '3' (No preference) shows full practitioner list unfiltered", async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');       // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s2, '3')); // No pref
+      expect(reply).toMatch(/Amy/i);
+      expect(reply).toMatch(/Leo/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.gender).toBeNull();
+    });
+
+    test('gender question text fallback is numbered so text-mode users know to type 1/2/3', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      const envelope = await callHandler(engine, ['handleBookSoonest'], session, '');
+      // _textFallback must include numbered items so users on plain-text WhatsApp can type a number
+      const fallback = String(envelope);
+      expect(fallback).toMatch(/1\.\s*Male/i);
+      expect(fallback).toMatch(/2\.\s*Female/i);
+      expect(fallback).toMatch(/3\.\s*No preference/i);
+    });
+
+    test('saved gender preference → shortcut offered showing gender only (no category)', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      // Saved pref has both gender and category — but category should NOT appear in shortcut label
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: 'Physiotherapy' } }),
+      });
+      const s = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s, ''));
+      expect(reply).toMatch(/Female/i);
+      expect(reply).toMatch(/same preference/i);
+      // Category should NOT appear in label since this is a gender-only flow
+      expect(reply).not.toMatch(/Physiotherapy/i);
+    });
+
+    test("shortcut 'yes' applies saved gender, category stays null, shows filtered list", async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE, UNKNOWN],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: 'Physiotherapy' } }),
+      });
+      const s = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSoonest'], s, '');             // → shortcut
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s2, 'yes'));
+      // Female filter: Amy and Sasha visible, Leo not
+      expect(reply).toMatch(/Amy|Sasha/i);
+      expect(reply).not.toMatch(/Leo/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.category).toBeNull();
+    });
+
+    test('0/back from gender question → clears physio funnel state and returns to type selection', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');       // → gender q
+      const s2 = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSoonest'], s2, '0');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.physio_funnel_step).toBeUndefined();
+      expect(d.physio_funnel_sel).toBeUndefined();
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_DATE — gender preference funnel ───────────────────────────
+  describe('BOOK_SPECIFIC_DATE — gender preference funnel', () => {
+    const FEMALE_D = { id: 'PRAC-F2', first_name: 'Mei',   last_name: 'Tan',  title: 'Ms' };
+    const MALE_D   = { id: 'PRAC-M2', first_name: 'John',  last_name: 'Lim',  title: 'Mr' };
+    const UNKNOWN_D= { id: 'PRAC-U2', first_name: 'Casey', last_name: 'Park', title: null  };
+
+    const baseChoosePhysio = {
+      selection_step: 'choose_physio',
+      selected_date: '2026-08-05',
+      selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+      navigation_chain: [
+        { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+      ],
+      practitioner_list: [FEMALE_D, MALE_D, UNKNOWN_D],
+      practitioner_page: 0,
+    };
+
+    test('entering choose_physio shows gender question, not physio list', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseChoosePhysio);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/preference.*physio|male|female|no preference/i);
+      expect(reply).not.toMatch(/Mei|John|Casey/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
+    });
+
+    test("gender '1' (Male) filters list: only male + unknown-title physios shown", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseChoosePhysio);
+      await callHandler(engine, ['handleBookSpecificDate'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], s2, '1')); // Male
+      expect(reply).toMatch(/John|Casey/i);
+      expect(reply).not.toMatch(/Mei/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('male');
+      expect(d.physio_funnel_sel?.category).toBeNull();
+    });
+
+    test('back from choose_physio to choose_type clears physio_funnel_step (clearForwardStateForPopped)', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseChoosePhysio);
+      await callHandler(engine, ['handleBookSpecificDate'], session, '');   // → gender q (funnel_step = 'gender')
+      const s2 = await db.getSession(session.id);
+      // Press back while in the funnel
+      await callHandler(engine, ['handleBookSpecificDate'], s2, '0');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      // Should have navigated back to choose_type and cleared physio funnel state
+      expect(d.physio_funnel_step).toBeUndefined();
+      expect(d.physio_funnel_sel).toBeUndefined();
+    });
+  });
+
+  // ─── Text fallback alignment ──────────────────────────────────────────────────
+  describe('physio funnel — text fallback alignment', () => {
+    test('gender step interactive body includes numbered list for Mac Desktop fallback', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const envelope = await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+      // Interactive body must include numbers so Mac Desktop users can type 1/2/3
+      const body = envelope?.interactive?.body?.text || String(envelope);
+      expect(body).toMatch(/1\.\s*Male/i);
+      expect(body).toMatch(/2\.\s*Female/i);
+      expect(body).toMatch(/3\.\s*No preference/i);
+    });
+
+    test('category buttons (≤3 options) text fallback is numbered, not dot-separated titles', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Leo', last_name: 'Choi', title: 'Mr' },
+        ]},
+      ]);
+      // Two categories → buttons (≤3), not list
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-P', name: 'New Patient',   category: 'Physiotherapy',        duration_in_minutes: 60 },
+        { id: 'AT-M', name: 'Massage Visit', category: 'Sports Massage Therapy', duration_in_minutes: 30 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');      // → gender q
+      const s2 = await db.getSession(session.id);
+      const catEnvelope = await callHandler(engine, ['handleBookSpecificPhysio'], s2, '3'); // No pref → category
+      // Must be numbered in both fallback and body — NOT "Physiotherapy · Sports Massage Therapy"
+      const fallback = String(catEnvelope);
+      expect(fallback).toMatch(/1\.\s*Physiotherapy|1\.\s*Sports Massage/i);
+      expect(fallback).not.toMatch(/Physiotherapy\s*·\s*Sports Massage/i);
+      // restore instance mocks — resetCliniko only sets prototype, not instance own property
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
       ]);
     });
   });
@@ -3038,6 +3280,8 @@ describe('Booking menu and flow coverage', () => {
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
         no_slots_prompt: { context: 'soonest' },
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, 'xyz');
       // Falls through the no_slots block, hits choose_physio render
