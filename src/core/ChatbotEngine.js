@@ -4046,6 +4046,15 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (result.success) {
+        // After a confirmed booking, the patient is no longer "new" — flip for next session
+        const ctx = (() => { try { return typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {}); } catch { return {}; } })();
+        if (ctx.appt_preference && ctx.appt_preference.patientType === 'new') {
+          ctx.appt_preference.patientType = 'follow_up';
+          session.context = ctx;
+          const phone = session.phone_number || session.phoneNumber;
+          if (phone) this.sessionManager.db.upsertPatientState(phone, { appt_preference: JSON.stringify(ctx.appt_preference) }).catch(() => {});
+        }
+
         // Send booking confirmation email (best-effort)
         try {
           const { subject, html, text } = bookingConfirmed({
