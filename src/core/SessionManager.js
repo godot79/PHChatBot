@@ -159,7 +159,7 @@ class SessionManager {
           this.logger.warn('Seeding new session from prior session failed (non-fatal):', seedErr?.message || seedErr);
         }
 
-        // Load persistent patient state (region + appt_preference) — overrides prior-session values
+        // Load persistent patient state (region, appt_preference, physio_preference) — overrides prior-session values
         try {
           const ps = await this.db.getPatientState(normalizedPhone);
           if (ps) {
@@ -167,6 +167,9 @@ class SessionManager {
             if (ps.region) psContext.region = ps.region;
             if (ps.appt_preference) {
               try { psContext.appt_preference = JSON.parse(ps.appt_preference); } catch {}
+            }
+            if (ps.physio_preference) {
+              try { psContext.physio_preference = JSON.parse(ps.physio_preference); } catch {}
             }
             if (Object.keys(psContext).length > 0) {
               let currentCtx = {};
@@ -1021,7 +1024,7 @@ class SessionManager {
             this.logger.debug(`[deleteSessionAndData] Deleted verification codes for phone: ${phoneNumber}`);
         }
 
-        // Clear appt_preference but keep region so the user skips region-select on next login
+        // Clear appt_preference but keep region and physio_preference (long-lived preferences)
         if (phoneNumber) {
             await this.db.query(
                 `UPDATE patient_state SET appt_preference = NULL WHERE phone_number = ?`,

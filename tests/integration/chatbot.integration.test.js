@@ -4700,6 +4700,25 @@ describe('renderMainMenu — verified menu must include logout row', () => {
     const freshSession = await db.getSessionByPhone('+6560000005');
     expect(freshSession.verified).toBeFalsy();
   });
+
+  test('logout clears appt_preference but preserves physio_preference in patient_state', async () => {
+    const phone = '+6560000006';
+    // Seed patient_state with both preferences before login
+    await db.upsertPatientState(phone, {
+      region: 'HK',
+      appt_preference: JSON.stringify({ service: 'Physiotherapy', insurer: null }),
+      physio_preference: JSON.stringify({ gender: 'female', category: 'Physiotherapy' }),
+    });
+
+    const session = await verifiedSession(phone);
+    await engine.handleMessage('9', phone);
+
+    const ps = await db.getPatientState(phone);
+    expect(ps).not.toBeNull();
+    expect(ps.appt_preference).toBeNull();
+    expect(ps.physio_preference).not.toBeNull();
+    expect(JSON.parse(ps.physio_preference)).toEqual({ gender: 'female', category: 'Physiotherapy' });
+  });
 });
 
 // =============================================================================
