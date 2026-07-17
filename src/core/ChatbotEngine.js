@@ -34,7 +34,6 @@ const {
   parseApptCategory,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
-  parseApptCategory,
   _markPartial,
 } = require('./_appointmentTypeHelpers');
 const { bulkAll } = require('./BulkContext');

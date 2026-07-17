@@ -177,7 +177,7 @@ class SessionManager {
           this.logger.warn('Seeding new session from prior session failed (non-fatal):', seedErr?.message || seedErr);
         }
 
-        // Apply persistent patient state (region + appt_preference) — overrides prior-session values
+        // Apply persistent patient state (region, appt_preference, preferred_insurer, physio_preference) — overrides prior-session values
         try {
           const ps = patientState;
           if (ps) {
@@ -188,6 +188,9 @@ class SessionManager {
               try { psContext.appt_preference = JSON.parse(ps.appt_preference); } catch {}
             }
             if (ps.preferred_insurer) psContext.preferred_insurer = ps.preferred_insurer;
+            if (ps.physio_preference) {
+              try { psContext.physio_preference = JSON.parse(ps.physio_preference); } catch {}
+            }
 
             const psUpdates = {};
             if (Object.keys(psContext).length > 0) {
@@ -1059,9 +1062,10 @@ class SessionManager {
             this.logger.debug(`[deleteSessionAndData] Deleted verification codes for phone: ${phoneNumber}`);
         }
 
-        // Clear appt_preference, verified, and patient_id but keep region so the
-        // user skips region-select on next login. Verified/patient_id must be
-        // cleared here — otherwise the returning-verified-user carryover in
+        // Clear appt_preference, verified, and patient_id but keep region and
+        // physio_preference (long-lived preferences) so the user skips
+        // region-select on next login. Verified/patient_id must be cleared
+        // here — otherwise the returning-verified-user carryover in
         // getOrCreateSession() would silently undo this logout on the next message.
         if (phoneNumber) {
             await this.db.query(
