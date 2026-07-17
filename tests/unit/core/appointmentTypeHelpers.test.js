@@ -21,6 +21,10 @@ const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
   getPractitionersForTypeName,
+  parseApptCategory,
+  parseApptPatientType,
+  buildFunnelCatalogue,
+  resolveApptFromFunnel,
 } = require('../../../src/core/_appointmentTypeHelpers');
 
 // Minimal mock of clinikoAPI — only getAppointmentTypes is needed here
@@ -232,5 +236,243 @@ describe('rejection propagation — current fast-fail behaviour', () => {
 
     await expect(getPractitionersForTypeName(groups, api, 'Initial'))
       .rejects.toThrow('timeout');
+  });
+});
+
+// ─── parseApptCategory ────────────────────────────────────────────────────────
+
+describe('parseApptCategory()', () => {
+  test('self-pay format (no " : ") → insurer null, full string as service', () => {
+    expect(parseApptCategory('Physiotherapy')).toEqual({ insurer: null, service: 'Physiotherapy' });
+  });
+
+  test('insured format "Insurer : Service" → splits on first " : "', () => {
+    expect(parseApptCategory('Bupa Global : Physiotherapy')).toEqual({
+      insurer: 'Bupa Global',
+      service: 'Physiotherapy',
+    });
+  });
+
+  test('insured with extra spaces around " : " → trims both parts', () => {
+    expect(parseApptCategory('  Cigna  :  Sports Massage  ')).toEqual({
+      insurer: 'Cigna',
+      service: 'Sports Massage',
+    });
+  });
+
+  test('service name that contains " : " keeps only first split', () => {
+    // Hypothetical: "Insurer : A : B" — insurer is "Insurer", service is "A : B"
+    expect(parseApptCategory('April : Clinical Pilates : Advanced')).toEqual({
+      insurer: 'April',
+      service: 'Clinical Pilates : Advanced',
+    });
+  });
+
+  test('null input → insurer null, service empty string', () => {
+    expect(parseApptCategory(null)).toEqual({ insurer: null, service: '' });
+  });
+
+  test('undefined input → insurer null, service empty string', () => {
+    expect(parseApptCategory(undefined)).toEqual({ insurer: null, service: '' });
+  });
+
+  test('empty string → insurer null, service empty string', () => {
+    expect(parseApptCategory('')).toEqual({ insurer: null, service: '' });
+  });
+});
+
+// ─── parseApptPatientType ─────────────────────────────────────────────────────
+
+describe('parseApptPatientType()', () => {
+  test('"New Patient" → "new"', () => {
+    expect(parseApptPatientType('New Patient 60 Min')).toBe('new');
+  });
+
+  test('"new patient" (lowercase) → "new"', () => {
+    expect(parseApptPatientType('new patient initial')).toBe('new');
+  });
+
+  test('"NewPatient" (no space) → "new"', () => {
+    expect(parseApptPatientType('NewPatient')).toBe('new');
+  });
+
+  test('"Follow-Up" → "follow_up"', () => {
+    expect(parseApptPatientType('Follow-Up 40 Min')).toBe('follow_up');
+  });
+
+  test('"Follow Up" (space instead of hyphen) → "follow_up"', () => {
+    expect(parseApptPatientType('Follow Up Visit')).toBe('follow_up');
+  });
+
+  test('"FOLLOW-UP" (uppercase) → "follow_up"', () => {
+    expect(parseApptPatientType('FOLLOW-UP')).toBe('follow_up');
+  });
+
+  test('generic name with no patient type marker → null', () => {
+    expect(parseApptPatientType('Physiotherapy 60 Min')).toBeNull();
+  });
+
+  test('null input → null', () => {
+    expect(parseApptPatientType(null)).toBeNull();
+  });
+
+  test('empty string → null', () => {
+    expect(parseApptPatientType('')).toBeNull();
+  });
+});
+
+// ─── buildFunnelCatalogue ────────────────────────────────────────────────────
+
+describe('buildFunnelCatalogue()', () => {
+  const selfPayPhysio = { id: 1, name: 'New Patient 60 Min', category: 'Physiotherapy', duration_in_minutes: 60 };
+  const bupaFollowUp = { id: 2, name: 'Follow-Up 40 Min', category: 'Bupa Global : Physiotherapy', duration_in_minutes: 40 };
+  const onlineBooking = { id: 3, name: 'Online Booking', category: 'Physiotherapy', duration_in_minutes: 60 };
+  const uwcType      = { id: 4, name: 'UWC New Patient', category: 'Physiotherapy', duration_in_minutes: 60 };
+  const massageNew   = { id: 5, name: 'New Patient 60 Min', category: 'Sports Massage Therapy', duration_in_minutes: 60 };
+
+  test('maps self-pay type correctly', () => {
+    const [entry] = buildFunnelCatalogue([selfPayPhysio]);
+    expect(entry).toEqual({
+      id: '1',
+      name: 'New Patient 60 Min',
+      service: 'Physiotherapy',
+      insurer: null,
+      patientType: 'new',
+      duration: 60,
+    });
+  });
+
+  test('maps insured type correctly — insurer extracted from category', () => {
+    const [entry] = buildFunnelCatalogue([bupaFollowUp]);
+    expect(entry).toEqual({
+      id: '2',
+      name: 'Follow-Up 40 Min',
+      service: 'Physiotherapy',
+      insurer: 'Bupa Global',
+      patientType: 'follow_up',
+      duration: 40,
+    });
+  });
+
+  test('filters out "Online Booking" types', () => {
+    const result = buildFunnelCatalogue([selfPayPhysio, onlineBooking]);
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('1');
+  });
+
+  test('filters out UWC types (case-insensitive)', () => {
+    const result = buildFunnelCatalogue([selfPayPhysio, uwcType]);
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('1');
+  });
+
+  test('IDs are coerced to string', () => {
+    const [entry] = buildFunnelCatalogue([selfPayPhysio]);
+    expect(typeof entry.id).toBe('string');
+  });
+
+  test('names with extra whitespace are normalised', () => {
+    const raw = { id: 10, name: '  New  Patient  60 Min  ', category: 'Physiotherapy', duration_in_minutes: 60 };
+    const [entry] = buildFunnelCatalogue([raw]);
+    expect(entry.name).toBe('New Patient 60 Min');
+  });
+
+  test('keeps multiple types with same name but different services', () => {
+    const result = buildFunnelCatalogue([selfPayPhysio, massageNew]);
+    expect(result).toHaveLength(2);
+    expect(result.map(t => t.service)).toEqual(['Physiotherapy', 'Sports Massage Therapy']);
+  });
+
+  test('null/undefined entries in array are skipped', () => {
+    const result = buildFunnelCatalogue([null, selfPayPhysio, undefined]);
+    expect(result).toHaveLength(1);
+  });
+
+  test('empty array → []', () => {
+    expect(buildFunnelCatalogue([])).toEqual([]);
+  });
+
+  test('null input → []', () => {
+    expect(buildFunnelCatalogue(null)).toEqual([]);
+  });
+});
+
+// ─── resolveApptFromFunnel ────────────────────────────────────────────────────
+
+describe('resolveApptFromFunnel()', () => {
+  const catalogue = [
+    { id: '1', name: 'New Patient 60 Min', service: 'Physiotherapy', insurer: null,          patientType: 'new',       duration: 60 },
+    { id: '2', name: 'Follow-Up 40 Min',   service: 'Physiotherapy', insurer: null,          patientType: 'follow_up', duration: 40 },
+    { id: '3', name: 'Follow-Up 60 Min',   service: 'Physiotherapy', insurer: null,          patientType: 'follow_up', duration: 60 },
+    { id: '4', name: 'Follow-Up 40 Min',   service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'follow_up', duration: 40 },
+    // Two entries for the same type across different practitioners (same name+attrs, different ID)
+    { id: '5', name: 'New Patient 60 Min', service: 'Physiotherapy', insurer: null,          patientType: 'new',       duration: 60 },
+  ];
+
+  test('exact match on all four dimensions → returns name, ids, norm_name', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Physiotherapy', patientType: 'new', insurer: null, duration: 60,
+    });
+    expect(result).toEqual({
+      name: 'New Patient 60 Min',
+      ids: ['1', '5'],
+      norm_name: 'new patient 60 min',
+    });
+  });
+
+  test('collects all IDs for matching entries (one per practitioner)', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Physiotherapy', patientType: 'new', insurer: null, duration: 60,
+    });
+    expect(result.ids).toEqual(['1', '5']);
+  });
+
+  test('deduplicates IDs that appear more than once', () => {
+    const dupe = [
+      { id: '99', name: 'Test', service: 'Physio', insurer: null, patientType: 'new', duration: 60 },
+      { id: '99', name: 'Test', service: 'Physio', insurer: null, patientType: 'new', duration: 60 },
+    ];
+    const result = resolveApptFromFunnel(dupe, { service: 'Physio', patientType: 'new', insurer: null, duration: 60 });
+    expect(result.ids).toEqual(['99']);
+  });
+
+  test('insured match only returns types with matching insurer', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Physiotherapy', patientType: 'follow_up', insurer: 'Bupa Global', duration: 40,
+    });
+    expect(result).not.toBeNull();
+    expect(result.ids).toEqual(['4']);
+  });
+
+  test('self-pay match does not bleed into insured types', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Physiotherapy', patientType: 'follow_up', insurer: null, duration: 40,
+    });
+    expect(result.ids).toEqual(['2']);
+  });
+
+  test('no match → null', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Physiotherapy', patientType: 'new', insurer: null, duration: 80,
+    });
+    expect(result).toBeNull();
+  });
+
+  test('wrong service → null', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Sports Massage Therapy', patientType: 'new', insurer: null, duration: 60,
+    });
+    expect(result).toBeNull();
+  });
+
+  test('norm_name is lowercase trimmed', () => {
+    const result = resolveApptFromFunnel(catalogue, {
+      service: 'Physiotherapy', patientType: 'new', insurer: null, duration: 60,
+    });
+    expect(result.norm_name).toBe('new patient 60 min');
+  });
+
+  test('empty catalogue → null', () => {
+    expect(resolveApptFromFunnel([], { service: 'X', patientType: 'new', insurer: null, duration: 60 })).toBeNull();
   });
 });

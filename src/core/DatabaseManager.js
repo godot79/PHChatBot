@@ -68,7 +68,14 @@ class DatabaseManager {
         this.db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`);
         this.db.run(`CREATE INDEX IF NOT EXISTS idx_chat_history_session ON chat_history(session_id)`);
 
-        this.db.run(`CREATE INDEX IF NOT EXISTS idx_verification_codes_phone ON verification_codes(phone_number)`, (err) => {
+        this.db.run(`CREATE INDEX IF NOT EXISTS idx_verification_codes_phone ON verification_codes(phone_number)`);
+
+        this.db.run(`CREATE TABLE IF NOT EXISTS patient_state (
+          phone_number TEXT PRIMARY KEY,
+          region TEXT,
+          appt_preference TEXT,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`, (err) => {
           if (err) {
             this.logger.error('❌ Failed to initialize schema:', err);
             reject(err);
@@ -299,6 +306,32 @@ class DatabaseManager {
           resolve(rows);
         }
       });
+    });
+  }
+
+  async getPatientState(phone) {
+    return new Promise((resolve, reject) => {
+      this.db.get(
+        `SELECT * FROM patient_state WHERE phone_number = ?`,
+        [phone],
+        (err, row) => err ? reject(err) : resolve(row || null)
+      );
+    });
+  }
+
+  async upsertPatientState(phone, updates) {
+    const { region, appt_preference } = updates;
+    return new Promise((resolve, reject) => {
+      this.db.run(
+        `INSERT INTO patient_state (phone_number, region, appt_preference, updated_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(phone_number) DO UPDATE SET
+           region = COALESCE(?, region),
+           appt_preference = COALESCE(?, appt_preference),
+           updated_at = CURRENT_TIMESTAMP`,
+        [phone, region ?? null, appt_preference ?? null, region ?? null, appt_preference ?? null],
+        (err) => err ? reject(err) : resolve()
+      );
     });
   }
 

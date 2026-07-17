@@ -73,8 +73,77 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   return result;
 }
 
+/**
+ * Parse a Cliniko category field into service and insurer parts.
+ * Format: "Insurer : Service" (insured) or "Service" (self-pay).
+ */
+function parseApptCategory(category) {
+  const s = (category || '').trim();
+  const i = s.indexOf(' : ');
+  if (i !== -1) return { insurer: s.slice(0, i).trim(), service: s.slice(i + 3).trim() };
+  return { insurer: null, service: s };
+}
+
+/**
+ * Parse patient type from a Cliniko appointment name.
+ * Returns 'new', 'follow_up', or null (e.g. for generic self-pay types).
+ */
+function parseApptPatientType(name) {
+  if (/new\s*patient/i.test(name)) return 'new';
+  if (/follow.?up/i.test(name)) return 'follow_up';
+  return null;
+}
+
+/**
+ * Build a flat catalogue from raw Cliniko appointment types, suitable for
+ * the 3-step funnel. Filters out UWC and Online Booking types.
+ *
+ * @param {Array<{id, name, category, duration_in_minutes}>} rawTypes
+ * @returns {Array<{id, name, service, insurer, patientType, duration}>}
+ */
+function buildFunnelCatalogue(rawTypes) {
+  return (rawTypes || [])
+    .filter(t => t && t.name && !/UWC/i.test(t.name) && !/online\s*booking/i.test(t.name))
+    .map(t => {
+      const { service, insurer } = parseApptCategory(t.category);
+      return {
+        id: String(t.id),
+        name: String(t.name).replace(/\s+/g, ' ').trim(),
+        service,
+        insurer,
+        patientType: parseApptPatientType(t.name),
+        duration: t.duration_in_minutes,
+      };
+    });
+}
+
+/**
+ * Resolve funnel selections to a selected_appt_type object.
+ * Collects all matching IDs (one per practitioner) under a single display name.
+ *
+ * @param {ReturnType<buildFunnelCatalogue>} catalogue
+ * @param {{ service: string, patientType: string, insurer: string|null, duration: number }} sel
+ * @returns {{ name: string, ids: string[], norm_name: string } | null}
+ */
+function resolveApptFromFunnel(catalogue, { service, patientType, insurer, duration }) {
+  const matches = catalogue.filter(t =>
+    t.service === service &&
+    t.patientType === patientType &&
+    (t.insurer || null) === (insurer || null) &&
+    t.duration === duration
+  );
+  if (!matches.length) return null;
+  const name = matches[0].name;
+  const ids  = [...new Set(matches.map(t => t.id))];
+  return { name, ids, norm_name: name.toLowerCase().replace(/\s+/g, ' ').trim() };
+}
+
 module.exports = {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
   getPractitionersForTypeName,
+  parseApptCategory,
+  parseApptPatientType,
+  buildFunnelCatalogue,
+  resolveApptFromFunnel,
 };

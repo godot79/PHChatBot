@@ -159,6 +159,29 @@ class SessionManager {
           this.logger.warn('Seeding new session from prior session failed (non-fatal):', seedErr?.message || seedErr);
         }
 
+        // Load persistent patient state (region + appt_preference) — overrides prior-session values
+        try {
+          const ps = await this.db.getPatientState(normalizedPhone);
+          if (ps) {
+            const psContext = {};
+            if (ps.region) psContext.region = ps.region;
+            if (ps.appt_preference) {
+              try { psContext.appt_preference = JSON.parse(ps.appt_preference); } catch {}
+            }
+            if (Object.keys(psContext).length > 0) {
+              let currentCtx = {};
+              try {
+                const raw = session && session.context;
+                currentCtx = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+              } catch {}
+              await this.updateSession(sessionId, { context: { ...currentCtx, ...psContext } });
+              session = await this.db.getSession(sessionId);
+            }
+          }
+        } catch (psErr) {
+          this.logger.warn('Loading patient_state failed (non-fatal):', psErr?.message || psErr);
+        }
+
         // Return parsed session
         return this.parseSession(session);
       } catch (error) {
