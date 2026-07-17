@@ -2569,14 +2569,16 @@ if (/^p(rev)?$/i.test(text)) {
         const physios = typeNorm ? await buildAvailablePhysiosForTypeName(typeNorm) : [];
         if (physios.length > 1) {
           data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
+          data.physio_funnel_step = 'done'; // skip funnel on back — pref already captured
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+          const effectiveList = this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories);
           const reply = buildInteractiveSelectionList({
-            items: physios,
+            items: effectiveList,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
             header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
-      });
+          });
           return reply;
         }
         // else back to types

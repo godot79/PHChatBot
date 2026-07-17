@@ -3176,7 +3176,7 @@ describe('Booking menu and flow coverage', () => {
       await handlerPromise;
     });
 
-    test('0/back with >1 available physios → returns to physio list', async () => {
+    test('0/back with >1 available physios → returns to physio list and marks funnel done', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
       ]);
@@ -3189,6 +3189,30 @@ describe('Booking menu and flow coverage', () => {
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
       expect(reply).toMatch(/practitioner|jolinna|wei/i);
+      // funnel must be marked done so next physio selection isn't interrupted by gender question
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+    });
+
+    test('0/back from clinic preserves gender filter: only matching physios shown', async () => {
+      const MALE_P   = { id: 'PRAC-M', first_name: 'Leo',  last_name: 'Chan', title: 'Mr' };
+      const FEMALE_P = { id: 'PRAC-F', first_name: 'Amy',  last_name: 'Lee',  title: 'Ms' };
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [MALE_P, FEMALE_P] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_2,
+        selected_appt_type: TYPE_1,
+        selected_physio: MALE_P,
+        clinic_list: [CLINIC_1],
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: 'female', category: null },
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      // Female filter: only Amy should appear
+      expect(reply).toMatch(/Amy/i);
+      expect(reply).not.toMatch(/Leo/i);
     });
   });
 

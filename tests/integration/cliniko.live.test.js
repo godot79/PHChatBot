@@ -30,6 +30,23 @@ const {
   resolveApptFromFunnel,
 } = require('../../src/core/_appointmentTypeHelpers');
 
+// Local copy of practitionerGender — must stay in sync with ChatbotEngine.js
+function practitionerGender(p) {
+  const t = (p && p.title) ? String(p.title).trim() : '';
+  if (t === 'Mr')  return 'male';
+  if (t === 'Ms' || t === 'Miss' || t === 'Mrs') return 'female';
+  return null;
+}
+
+function applyGenderFilter(list, gender) {
+  if (!gender) return list;
+  const filtered = list.filter(p => {
+    const g = practitionerGender(p);
+    return g === null || g === gender;
+  });
+  return filtered.length > 0 ? filtered : list; // fall back to full list if empty
+}
+
 // Silence logger
 jest.mock('../../src/core/Logger', () =>
   jest.fn().mockImplementation(() => ({
@@ -537,4 +554,100 @@ describe('getAvailableTimes() — 21-day window diagnostic (B1)', () => {
     // Diagnostic only — outcome is logged, not asserted
     expect(true).toBe(true);
   }, 30000);
+});
+
+// =============================================================================
+// 12. Gender preference funnel — live data validation
+// =============================================================================
+describe('physio gender preference funnel — live data', () => {
+  let allPractitioners = null; // flat list across all clinics
+
+  beforeAll(async () => {
+    if (!LIVE) return;
+    const groups = await hk(() => api.getPractitionersByClinic());
+    allPractitioners = groups.flatMap(g => g.practitioners);
+  }, 60000);
+
+  maybeIt('every practitioner title field is recognised or null (no unknown values)', async () => {
+    const KNOWN_TITLES = new Set(['Mr', 'Ms', 'Miss', 'Mrs', 'Dr', 'Prof', null, undefined, '']);
+    const unknown = allPractitioners.filter(p => !KNOWN_TITLES.has(p.title ?? null));
+    if (unknown.length) {
+      console.log('[live] unknown titles found:', [...new Set(unknown.map(p => p.title))]);
+    }
+    // Warn but don't fail — new titles should be surfaced, then the gender map updated
+    expect(unknown.length).toBe(0);
+  }, 60000);
+
+  maybeIt('at least one male and one female practitioner exist in the HK account', async () => {
+    const males   = allPractitioners.filter(p => practitionerGender(p) === 'male');
+    const females = allPractitioners.filter(p => practitionerGender(p) === 'female');
+    console.log(`[live] gender breakdown — male: ${males.length}, female: ${females.length}, unknown: ${allPractitioners.length - males.length - females.length}`);
+    console.log('[live] male practitioners:', males.map(p => `${p.first_name} ${p.last_name} (${p.title})`));
+    console.log('[live] female practitioners:', females.map(p => `${p.first_name} ${p.last_name} (${p.title})`));
+    expect(males.length).toBeGreaterThan(0);
+    expect(females.length).toBeGreaterThan(0);
+  }, 60000);
+
+  maybeIt('male filter excludes female practitioners and includes unknown-title ones', async () => {
+    const maleFiltered = applyGenderFilter(allPractitioners, 'male');
+    const leaked = maleFiltered.filter(p => practitionerGender(p) === 'female');
+    expect(leaked).toHaveLength(0);
+    // Unknown-title practitioners (g === null) must be included
+    const unknowns = allPractitioners.filter(p => practitionerGender(p) === null);
+    for (const u of unknowns) {
+      expect(maleFiltered.some(p => p.id === u.id)).toBe(true);
+    }
+    console.log(`[live] male filter: ${maleFiltered.length}/${allPractitioners.length} practitioners`);
+  }, 60000);
+
+  maybeIt('female filter excludes male practitioners and includes unknown-title ones', async () => {
+    const femaleFiltered = applyGenderFilter(allPractitioners, 'female');
+    const leaked = femaleFiltered.filter(p => practitionerGender(p) === 'male');
+    expect(leaked).toHaveLength(0);
+    const unknowns = allPractitioners.filter(p => practitionerGender(p) === null);
+    for (const u of unknowns) {
+      expect(femaleFiltered.some(p => p.id === u.id)).toBe(true);
+    }
+    console.log(`[live] female filter: ${femaleFiltered.length}/${allPractitioners.length} practitioners`);
+  }, 60000);
+
+  maybeIt('no-preference filter returns the full list unchanged', async () => {
+    const noFilter = applyGenderFilter(allPractitioners, null);
+    expect(noFilter).toHaveLength(allPractitioners.length);
+  }, 60000);
+
+  maybeIt('getAppointmentTypes returns category-parseable names for each practitioner', async () => {
+    const sample = allPractitioners.slice(0, 3); // limit API calls
+    for (const p of sample) {
+      const types = await hk(() => api.getAppointmentTypes({ practitioner_id: p.id }));
+      expect(Array.isArray(types)).toBe(true);
+      const categories = [...new Set(types.map(t => parseApptCategory(t.name)).filter(Boolean))];
+      console.log(`[live] ${p.first_name} ${p.last_name}: ${types.length} types, categories: ${categories.join(', ') || '(none parsed)'}`);
+      // Each type must have at least a name
+      for (const t of types) {
+        expect(typeof t.name).toBe('string');
+        expect(t.name.length).toBeGreaterThan(0);
+      }
+    }
+  }, 60000);
+
+  maybeIt('gender filter + appointment-type fetch produces non-empty results and logs category breakdown', async () => {
+    for (const gender of ['male', 'female']) {
+      const filtered = applyGenderFilter(allPractitioners, gender);
+      // applyGenderFilter falls back to full list when nothing matches — should always be non-empty
+      expect(filtered.length).toBeGreaterThan(0);
+
+      // Sample up to 3 practitioners to keep API calls manageable
+      const sample = filtered.slice(0, 3);
+      const typesByPractitioner = await Promise.all(
+        sample.map(p => hk(() => api.getAppointmentTypes({ practitioner_id: p.id })))
+      );
+      const categorySet = new Set(
+        typesByPractitioner.flat().map(t => parseApptCategory(t.name)).filter(Boolean)
+      );
+      console.log(`[live] ${gender} filter: ${filtered.length}/${allPractitioners.length} practitioners, sample categories: ${[...categorySet].join(', ') || '(none parsed)'}`);
+      // At least one type should exist across sampled practitioners
+      expect(typesByPractitioner.some(types => types.length > 0)).toBe(true);
+    }
+  }, 120000);
 });
