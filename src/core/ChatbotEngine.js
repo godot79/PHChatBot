@@ -2090,14 +2090,14 @@ if (/^p(rev)?$/i.test(text)) {
         if (services.length === 1 && text === '') {
           sel.service = services[0];
           data.funnel_sel = sel;
-          data.funnel_step = 'patient_type';
+          data.funnel_step = 'insurer';
           continue;
         }
         const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
         if (idx >= 0 && idx < services.length) {
           sel.service = services[idx];
           data.funnel_sel = sel;
-          data.funnel_step = 'patient_type';
+          data.funnel_step = 'insurer';
           text = '';
           continue;
         }
@@ -2109,45 +2109,14 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      // ── patient_type ──
-      if (step === 'patient_type') {
-        const filtered = catalogue.filter(t => t.service === sel.service);
-        const ptypes = [...new Set(filtered.map(t => t.patientType).filter(pt => pt !== null))];
-        if (!ptypes.length) {
-          sel.patientType = null;
-          data.funnel_sel = sel;
-          data.funnel_step = 'insurer';
-          continue;
-        }
-        if (ptypes.length === 1 && text === '') {
-          sel.patientType = ptypes[0];
-          data.funnel_sel = sel;
-          data.funnel_step = 'insurer';
-          continue;
-        }
-        const labels = { new: 'New Patient', follow_up: 'Follow-Up' };
-        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
-        if (idx >= 0 && idx < ptypes.length) {
-          sel.patientType = ptypes[idx];
-          data.funnel_sel = sel;
-          data.funnel_step = 'insurer';
-          text = '';
-          continue;
-        }
-        {
-          const menu = buttons('New or returning patient?', ptypes.map((t, i) => ({ id: String(i + 1), title: labels[t] || t })));
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
-        }
-      }
-
       // ── insurer ──
       if (step === 'insurer') {
-        const filtered = catalogue.filter(t => t.service === sel.service && t.patientType === sel.patientType);
+        const filtered = catalogue.filter(t => t.service === sel.service);
         const insurers = [...new Set(filtered.map(t => t.insurer).filter(i => i !== null))].sort();
         if (!insurers.length) {
           sel.insurer = null;
           data.funnel_sel = sel;
-          data.funnel_step = 'duration';
+          data.funnel_step = 'final_pick';
           continue;
         }
         const options = ['Self-pay', ...insurers];
@@ -2155,7 +2124,7 @@ if (/^p(rev)?$/i.test(text)) {
         if (idx >= 0 && idx < options.length) {
           sel.insurer = options[idx] === 'Self-pay' ? null : options[idx];
           data.funnel_sel = sel;
-          data.funnel_step = 'duration';
+          data.funnel_step = 'final_pick';
           text = '';
           continue;
         }
@@ -2167,32 +2136,58 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      // ── duration ──
-      if (step === 'duration') {
+      // ── final_pick: combined patientType + duration selection ──
+      if (step === 'final_pick') {
         const filtered = catalogue.filter(t =>
           t.service === sel.service &&
-          t.patientType === sel.patientType &&
           (t.insurer || null) === (sel.insurer || null)
         );
-        const durations = [...new Set(filtered.map(t => t.duration))].sort((a, b) => a - b);
-        if (!durations.length) return { resolved: null };
-        if (durations.length === 1 && text === '') {
-          sel.duration = durations[0];
+        const seen = new Set();
+        const combos = [];
+        for (const t of filtered) {
+          const key = `${t.patientType}|${t.duration}`;
+          if (!seen.has(key)) { seen.add(key); combos.push({ patientType: t.patientType, duration: t.duration }); }
+        }
+        combos.sort((a, b) => {
+          const order = { new: 0, follow_up: 1 };
+          const pa = order[a.patientType] ?? 2, pb = order[b.patientType] ?? 2;
+          return pa !== pb ? pa - pb : a.duration - b.duration;
+        });
+        if (!combos.length) return { resolved: null };
+        if (combos.length === 1 && text === '') {
+          sel.patientType = combos[0].patientType;
+          sel.duration = combos[0].duration;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
           return { resolved };
         }
+        const allSameDuration   = combos.every(c => c.duration    === combos[0].duration);
+        const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
+        const ptLabels = { new: 'New Patient', follow_up: 'Follow-Up' };
+        const comboLabels = combos.map(c => {
+          const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
+          const durPart = !allSameDuration ? `${c.duration} min` : null;
+          return [ptPart, durPart].filter(Boolean).join(' ') || `${c.duration} min`;
+        });
+        const bodyText = allSameDuration && !allSamePatientType
+          ? 'New or returning patient?'
+          : allSamePatientType && !allSameDuration
+            ? 'Select duration:'
+            : 'Select appointment type:';
         const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
-        if (idx >= 0 && idx < durations.length) {
-          sel.duration = durations[idx];
+        if (idx >= 0 && idx < combos.length) {
+          sel.patientType = combos[idx].patientType;
+          sel.duration    = combos[idx].duration;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
           return { resolved };
         }
         {
-          const menu = buttons('Select duration:', durations.slice(0, 3).map((d, i) => ({ id: String(i + 1), title: `${d} min` })));
+          const menu = combos.length <= 3
+            ? buttons(bodyText, comboLabels.map((l, i) => ({ id: String(i + 1), title: l.slice(0, 20) })))
+            : list(bodyText, 'Select', comboLabels.map((l, i) => ({ id: String(i + 1), title: l.slice(0, 24) })));
           return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
         }
       }
