@@ -13,6 +13,8 @@ const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
   getPractitionersForTypeName,
+  buildFunnelCatalogue,
+  resolveApptFromFunnel,
 } = require('./_appointmentTypeHelpers');
 
 
@@ -158,7 +160,7 @@ function planForward(data, selection_step, optionsCount, onAuto) {
  */
 const CLEAR_FIELDS_BY_STEP = {
   choose_date: ['selected_date', 'appointment_type_list', 'appt_type_page', 'selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
-  choose_type: ['selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
+  choose_type: ['selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
   choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_clinic: ['selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_appt_type: ['selected_appt_type']
@@ -198,6 +200,9 @@ function clearForwardStateForPopped(data, popped) {
       toClear.add('selected_physio');
       toClear.add('practitioner_list');
       toClear.add('practitioner_page');
+      // When returning to choose_type, restart the funnel
+      toClear.add('funnel_step');
+      toClear.add('funnel_sel');
     }
     if (fr.selection_step === 'choose_type') {
       toClear.add('selected_appt_type');
@@ -206,6 +211,9 @@ function clearForwardStateForPopped(data, popped) {
       toClear.add('clinic_list');
       toClear.add('clinic_page');
       toClear.add('selected_clinic');
+      toClear.add('funnel_catalogue');
+      toClear.add('funnel_step');
+      toClear.add('funnel_sel');
     }
   }
 
@@ -612,6 +620,17 @@ function getNextAvailableDates(startFrom = new Date(), count = MAX_DATE_ITEMS, m
 }
 
 /**
+ * Sort practitioners alphabetically by display name.
+ * @param {Array<Object>} practitioners
+ * @returns {Array<Object>}
+ */
+function sortPractitioners(practitioners) {
+  return [...practitioners].sort((a, b) =>
+    getPractitionerDisplayName(a).localeCompare(getPractitionerDisplayName(b))
+  );
+}
+
+/**
  * Sort appointment types: New/Initial first, Follow-Up second, everything else third.
  * Within each group, sort alphabetically.
  * @param {Array<{name: string}>} types
@@ -855,7 +874,8 @@ class ChatbotEngine {
       { id: '2', title: 'Soonest available' },
       { id: '3', title: 'Specific date' },
       { id: '4', title: 'Specific physio' },
-      { id: '5', title: 'Specific clinic' }
+      { id: '5', title: 'Specific clinic' },
+      { id: '0', title: '← Back' },
     ]);
   }
 
@@ -1052,6 +1072,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (info && info.region && regionLabels[info.region]) {
           context.region = info.region;
           await this.sessionManager.updateSession(session.id, { context });
+          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
         }
       }
     }
@@ -1065,6 +1086,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
           await this.sessionManager.updateSession(session.id, { context });
+          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
           return await renderMenuFresh();
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
@@ -1072,6 +1094,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         context.region = found;
         delete context.awaiting_region_selection;
         await this.sessionManager.updateSession(session.id, { context });
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
         return await renderMenuFresh();
       }
 
@@ -2004,6 +2027,197 @@ if (/^p(rev)?$/i.test(text)) {
   }
 
   /**
+   * Progressive funnel for selecting an appointment type.
+   * Guides the patient through: service → patient type → insurer → duration.
+   * Offers a "same as last time?" shortcut when a saved preference exists.
+   *
+   * data.funnel_catalogue must be set by the caller before the first call.
+   *
+   * Returns { reply: MessageEnvelope } while gathering input, or
+   *         { resolved: { name, ids, norm_name } | null } when done.
+   */
+  async _stepApptFunnel(session, data, text) {
+    const catalogue = data.funnel_catalogue || [];
+
+    // First entry: offer shortcut if preference exists, otherwise start at service
+    if (!data.funnel_step) {
+      const pref = session.context && session.context.appt_preference;
+      if (pref && text === '') {
+        const label = this._formatPrefLabel(pref);
+        if (label) {
+          data.funnel_step = 'shortcut';
+          return { reply: buttons(`Last time: ${label}\nBook the same again?`, [
+            { id: 'yes', title: 'Yes, same' },
+            { id: 'change', title: 'Change' },
+          ]) };
+        }
+      }
+      data.funnel_step = 'service';
+      data.funnel_sel = {};
+    }
+
+    // Shortcut handler
+    if (data.funnel_step === 'shortcut') {
+      if (text === 'yes') {
+        const pref = session.context && session.context.appt_preference;
+        if (pref) {
+          const resolved = resolveApptFromFunnel(catalogue, pref);
+          if (resolved) return { resolved };
+        }
+      }
+      // "change" or shortcut no longer available → restart funnel
+      data.funnel_step = 'service';
+      data.funnel_sel = {};
+      text = '';
+    }
+
+    // Auto-advance loop: skip steps with a single option
+    let guard = 0;
+    while (guard++ < 10) {
+      const step = data.funnel_step;
+      const sel = data.funnel_sel || {};
+
+      // ── service ──
+      if (step === 'service') {
+        const services = [...new Set(catalogue.map(t => t.service).filter(Boolean))].sort();
+        if (!services.length) return { resolved: null };
+        if (services.length === 1 && text === '') {
+          sel.service = services[0];
+          data.funnel_sel = sel;
+          data.funnel_step = 'patient_type';
+          continue;
+        }
+        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+        if (idx >= 0 && idx < services.length) {
+          sel.service = services[idx];
+          data.funnel_sel = sel;
+          data.funnel_step = 'patient_type';
+          text = '';
+          continue;
+        }
+        if (services.length <= 3) {
+          return { reply: buttons('What type of appointment?',
+            services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) }))
+          ) };
+        }
+        return { reply: list('What type of appointment?', 'Select type',
+          services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 24) }))
+        ) };
+      }
+
+      // ── patient_type ──
+      if (step === 'patient_type') {
+        const filtered = catalogue.filter(t => t.service === sel.service);
+        const ptypes = [...new Set(filtered.map(t => t.patientType).filter(pt => pt !== null))];
+        if (!ptypes.length) {
+          sel.patientType = null;
+          data.funnel_sel = sel;
+          data.funnel_step = 'insurer';
+          continue;
+        }
+        if (ptypes.length === 1 && text === '') {
+          sel.patientType = ptypes[0];
+          data.funnel_sel = sel;
+          data.funnel_step = 'insurer';
+          continue;
+        }
+        const labels = { new: 'New Patient', follow_up: 'Follow-Up' };
+        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+        if (idx >= 0 && idx < ptypes.length) {
+          sel.patientType = ptypes[idx];
+          data.funnel_sel = sel;
+          data.funnel_step = 'insurer';
+          text = '';
+          continue;
+        }
+        return { reply: buttons('New or returning patient?',
+          ptypes.map((t, i) => ({ id: String(i + 1), title: labels[t] || t }))
+        ) };
+      }
+
+      // ── insurer ──
+      if (step === 'insurer') {
+        const filtered = catalogue.filter(t => t.service === sel.service && t.patientType === sel.patientType);
+        const insurers = [...new Set(filtered.map(t => t.insurer).filter(i => i !== null))].sort();
+        if (!insurers.length) {
+          sel.insurer = null;
+          data.funnel_sel = sel;
+          data.funnel_step = 'duration';
+          continue;
+        }
+        const options = ['Self-pay', ...insurers];
+        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+        if (idx >= 0 && idx < options.length) {
+          sel.insurer = options[idx] === 'Self-pay' ? null : options[idx];
+          data.funnel_sel = sel;
+          data.funnel_step = 'duration';
+          text = '';
+          continue;
+        }
+        if (options.length <= 3) {
+          return { reply: buttons('How is this covered?',
+            options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) }))
+          ) };
+        }
+        return { reply: list('How is this covered?', 'Select coverage',
+          options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 24) }))
+        ) };
+      }
+
+      // ── duration ──
+      if (step === 'duration') {
+        const filtered = catalogue.filter(t =>
+          t.service === sel.service &&
+          t.patientType === sel.patientType &&
+          (t.insurer || null) === (sel.insurer || null)
+        );
+        const durations = [...new Set(filtered.map(t => t.duration))].sort((a, b) => a - b);
+        if (!durations.length) return { resolved: null };
+        if (durations.length === 1 && text === '') {
+          sel.duration = durations[0];
+          data.funnel_sel = sel;
+          const resolved = resolveApptFromFunnel(catalogue, sel);
+          this._saveFunnelPref(session, sel);
+          return { resolved };
+        }
+        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+        if (idx >= 0 && idx < durations.length) {
+          sel.duration = durations[idx];
+          data.funnel_sel = sel;
+          const resolved = resolveApptFromFunnel(catalogue, sel);
+          this._saveFunnelPref(session, sel);
+          return { resolved };
+        }
+        return { reply: buttons('Select duration:',
+          durations.slice(0, 3).map((d, i) => ({ id: String(i + 1), title: `${d} min` }))
+        ) };
+      }
+
+      break;
+    }
+    return { resolved: null };
+  }
+
+  _formatPrefLabel(pref) {
+    if (!pref) return null;
+    const parts = [pref.service];
+    if (pref.patientType === 'new') parts.push('New Patient');
+    else if (pref.patientType === 'follow_up') parts.push('Follow-Up');
+    if (pref.insurer) parts.push(pref.insurer);
+    if (pref.duration) parts.push(`${pref.duration} min`);
+    return parts.filter(Boolean).join(' · ');
+  }
+
+  _saveFunnelPref(session, sel) {
+    const phone = session.phone_number || session.phoneNumber;
+    const pref = { service: sel.service, patientType: sel.patientType, insurer: sel.insurer || null, duration: sel.duration };
+    let ctx = session.context;
+    if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
+    if (ctx && typeof ctx === 'object') { ctx.appt_preference = pref; session.context = ctx; }
+    this.sessionManager.db.upsertPatientState(phone, { appt_preference: JSON.stringify(pref) }).catch(() => {});
+  }
+
+  /**
    * Book soonest available appointment.
    * Navigation-only changes. Fixes multi-ID type handling and back-stack.
    *
@@ -2049,6 +2263,7 @@ if (/^p(rev)?$/i.test(text)) {
     const buildTypeCatalogue = async () => {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
       const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+      data.funnel_catalogue = buildFunnelCatalogue(allTypes);
       const buckets = new Map(); // norm -> { displayName, ids:Set }
       for (const t of allTypes || []) {
         if (!t || !t.name) continue;
@@ -2136,19 +2351,13 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (data.selection_step === 'choose_physio') {
-        // Go back to types
-        const { list, map } = await buildTypeCatalogue();
+        const { list, map } = await buildTypeCatalogue(); // also rebuilds data.funnel_catalogue
         data.appointment_type_list = list; data.appt_type_name_to_ids_norm = map; data.appt_type_page = 0;
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio;
+        delete data.funnel_step; delete data.funnel_sel;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        const reply = buildInteractiveSelectionList({
-          items: list,
-          rowFn: (a) => ({ title: String(a.name) }),
-          page: 0,
-          header: 'Choose appointment type:'
-      });
-        return reply;
+        return await this.handleBookSoonest(session, '');
       }
 
       if (data.selection_step === 'choose_clinic') {
@@ -2156,7 +2365,7 @@ if (/^p(rev)?$/i.test(text)) {
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const physios = typeNorm ? await buildAvailablePhysiosForTypeName(typeNorm) : [];
         if (physios.length > 1) {
-          data.practitioner_list = physios; data.practitioner_page = 0; delete data.selected_physio;
+          data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
           const reply = buildInteractiveSelectionList({
@@ -2168,18 +2377,13 @@ if (/^p(rev)?$/i.test(text)) {
           return reply;
         }
         // else back to types
-        const { list, map } = await buildTypeCatalogue();
+        const { list, map } = await buildTypeCatalogue(); // also rebuilds data.funnel_catalogue
         data.appointment_type_list = list; data.appt_type_name_to_ids_norm = map; data.appt_type_page = 0;
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio; delete data.clinic_list; delete data.selected_clinic;
+        delete data.funnel_step; delete data.funnel_sel;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        const reply2 = buildInteractiveSelectionList({
-          items: list,
-          rowFn: (a) => ({ title: String(a.name) }),
-          page: 0,
-          header: 'Choose appointment type:'
-      });
-        return reply2;
+        return await this.handleBookSoonest(session, '');
       }
 
       // Fallback to booking options
@@ -2209,38 +2413,42 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.handleBookSoonest(session, '');
     }
 
-    // ===== choose_type =====
+    // ===== choose_type — funnel =====
     if (data.selection_step === 'choose_type') {
-      const apptTypes = data.appointment_type_list || [];
-      const page = data.appt_type_page || 0;
+      if (!Array.isArray(data.funnel_catalogue)) {
+        const { list, map } = await buildTypeCatalogue();
+        data.appointment_type_list = list; data.appt_type_name_to_ids_norm = map; data.appt_type_page = 0;
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+      }
 
-      const { advanced } = planForward(data, 'choose_type', apptTypes.length, () => { data.selected_appt_type = apptTypes[0]; });
-
-      if (!advanced && /^\d+$/.test(text)) {
-        const pageStart = interactivePageStart(page);
-        const pageSize = interactivePageSize(page);
-        const localNum = parseInt(text, 10);
-        const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, apptTypes.length - pageStart) || !apptTypes[idx]) return 'Invalid appointment type selection. Reply with a number from the list.';
-        data.selected_appt_type = apptTypes[idx];
-        await sync();
+      if (!(data.funnel_catalogue || []).length) {
+        data.no_slots_prompt = { context: 'soonest' };
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+        return buttons('No appointment types are available right now.',
+          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
+        );
       }
 
       if (!data.selected_appt_type) {
-        const reply = buildInteractiveSelectionList({
-          items: apptTypes,
-          rowFn: (a) => ({ title: String(a.name) }),
-          page,
-          header: 'Choose appointment type:'
-      });
-        return reply;
+        const funnelResult = await this._stepApptFunnel(session, data, text);
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+        if (funnelResult.reply) return funnelResult.reply;
+        if (!funnelResult.resolved) {
+          data.no_slots_prompt = { context: 'soonest' };
+          await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+          return buttons('No appointment types are available right now.',
+            [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
+          );
+        }
+        data.selected_appt_type = funnelResult.resolved;
+        await sync();
       }
 
       // Build AVAILABLE practitioners for this type name
       const typeNorm = data.selected_appt_type.norm_name || normName(data.selected_appt_type.name);
       const practitioners = await buildAvailablePhysiosForTypeName(typeNorm);
 
-      data.practitioner_list = practitioners; data.practitioner_page = 0;
+      data.practitioner_list = sortPractitioners(practitioners); data.practitioner_page = 0;
       data.selection_step = 'choose_physio';
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
 
@@ -2353,7 +2561,7 @@ if (/^p(rev)?$/i.test(text)) {
           delete data.selected_physio; // force re-pick
           // Rebuild physio list to exclude zero-slot physio
           const rebuilt = await buildAvailablePhysiosForTypeName(typeNorm);
-          data.practitioner_list = rebuilt; data.practitioner_page = 0;
+          data.practitioner_list = sortPractitioners(rebuilt); data.practitioner_page = 0;
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
           if (rebuilt.length === 0) {
             // No available physios left → go back to type
@@ -2586,6 +2794,14 @@ if (/^p(rev)?$/i.test(text)) {
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           }
 
+          if ((data.appointment_type_list || []).length === 0) {
+            data.no_slots_prompt = { context: 'date' };
+            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+            return buttons('No appointment types available for that date.',
+              [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
+            );
+          }
+
           const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
           const reply = buildInteractiveSelectionList({
             items: data.appointment_type_list || [],
@@ -2650,6 +2866,14 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
+      if ((data.appointment_type_list || []).length === 0) {
+        data.no_slots_prompt = { context: 'date' };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        return buttons('No appointment types available for that date.',
+          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
+        );
+      }
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -2690,7 +2914,7 @@ if (/^p(rev)?$/i.test(text)) {
       if (!Array.isArray(data.practitioner_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const practitioners = await getPractitionersForTypeName(groups || [], this.clinikoAPI, data.selected_appt_type?.name || '');
-        data.practitioner_list = (practitioners || []).map(p => ({ id: String(p.id), ...p }));
+        data.practitioner_list = sortPractitioners((practitioners || []).map(p => ({ id: String(p.id), ...p })));
         data.practitioner_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
@@ -2956,7 +3180,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
         // unique by id
         const seen = new Set();
-        data.practitioner_list = allPhysios.filter(p => { if (seen.has(`${p.id}`)) return false; seen.add(`${p.id}`); return true; });
+        data.practitioner_list = sortPractitioners(allPhysios.filter(p => { if (seen.has(`${p.id}`)) return false; seen.add(`${p.id}`); return true; }));
         data.practitioner_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
@@ -3004,6 +3228,7 @@ if (/^p(rev)?$/i.test(text)) {
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
+          if (/UWC/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
@@ -3014,6 +3239,15 @@ if (/^p(rev)?$/i.test(text)) {
         );
         data.appt_type_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
+
+      if ((data.appointment_type_list || []).length === 0) {
+        data.no_slots_prompt = { context: 'physio' };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+        return buttons(
+          `No visit types found for ${getPractitionerDisplayName(data.selected_physio) || 'this practitioner'}.`,
+          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
+        );
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3356,6 +3590,15 @@ if (/^p(rev)?$/i.test(text)) {
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
       }
 
+      if ((data.appointment_type_list || []).length === 0) {
+        data.no_slots_prompt = { context: 'clinic' };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+        return buttons(
+          `No appointment types found at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
+        );
+      }
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.appt_type_page = (Number(data.appt_type_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
@@ -3408,7 +3651,7 @@ if (/^p(rev)?$/i.test(text)) {
           (physioTypeResults[i] || []).some(t => wanted.has(String(t.id)))
         );
 
-        data.practitioner_list = practitioners;
+        data.practitioner_list = sortPractitioners(practitioners);
         data.practitioner_page = 0;
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_physio', practitioners.length, () => {
