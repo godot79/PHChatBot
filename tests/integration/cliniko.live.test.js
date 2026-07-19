@@ -899,3 +899,111 @@ describe('getAvailableSlotsByBusinessAndDate() — real slots must survive concu
     expect(targetResult.map(s => s.slot).sort()).toEqual(baselineSlots.map(s => s.slot).sort());
   }, 60000);
 });
+
+// =============================================================================
+// 11. Caching — repeated calls for the same data must not re-hit Cliniko (live)
+//
+// buildAvailablePhysiosForTypeName's ~994-request fan-out (measured live against
+// this account: 34 practitioners, 4 clinics, 40 practitioner-clinic pairs, ~22
+// types/practitioner) is dominated by requests for data that doesn't change
+// second-to-second: appointment types, clinic->practitioner membership, and
+// business records. Caching those (30 s TTL, matching the existing
+// getPractitionersByClinic() cache) plus getAvailableTimes itself (configurable
+// TTL, default 5 min — safe because bookAppointment() always re-validates at
+// write time) should collapse repeat calls to zero real HTTP requests.
+// =============================================================================
+describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)', () => {
+  let getSpy;
+  let realGet;
+
+  beforeAll(() => {
+    if (!LIVE) return;
+    ClinikoAPI._clearGroupsCache();
+  });
+
+  beforeEach(() => {
+    if (!LIVE) return;
+    const SendMessageMod = require('../../src/api/SendMessage');
+    realGet = SendMessageMod.prototype.get;
+    let calls = 0;
+    getSpy = { count: () => calls };
+    SendMessageMod.prototype.get = function (...args) {
+      calls++;
+      return realGet.apply(this, args);
+    };
+  });
+
+  afterEach(() => {
+    if (!LIVE) return;
+    require('../../src/api/SendMessage').prototype.get = realGet;
+  });
+
+  maybeIt('getAppointmentTypes() — second call for the same practitioner makes zero HTTP requests', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const practitioner = groups.flatMap(g => g.practitioners)[0];
+    if (!practitioner) { console.warn('[live] no practitioners — skipping'); return; }
+
+    ClinikoAPI._clearGroupsCache();
+    await hk(() => api.getPractitionersByClinic()); // re-warm (cleared above)
+    const before = getSpy.count();
+    await hk(() => api.getAppointmentTypes({ practitioner_id: practitioner.id }));
+    const afterFirst = getSpy.count();
+    await hk(() => api.getAppointmentTypes({ practitioner_id: practitioner.id }));
+    const afterSecond = getSpy.count();
+
+    expect(afterFirst).toBeGreaterThan(before);       // first call was real
+    expect(afterSecond).toBe(afterFirst);             // second call was a cache hit
+  }, 30000);
+
+  maybeIt('getPractitionersForClinic() — second call for the same clinic makes zero HTTP requests', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const clinicId = groups[0]?.clinic_id;
+    if (!clinicId) { console.warn('[live] no clinics — skipping'); return; }
+
+    const before = getSpy.count();
+    await hk(() => api.getPractitionersForClinic(clinicId));
+    const afterFirst = getSpy.count();
+    await hk(() => api.getPractitionersForClinic(clinicId));
+    const afterSecond = getSpy.count();
+
+    expect(afterFirst).toBeGreaterThan(before);
+    expect(afterSecond).toBe(afterFirst);
+  }, 30000);
+
+  maybeIt('getBusinessById() — second call for the same business makes zero HTTP requests', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const clinicId = groups[0]?.clinic_id;
+    if (!clinicId) { console.warn('[live] no clinics — skipping'); return; }
+
+    const before = getSpy.count();
+    await hk(() => api.getBusinessById(clinicId));
+    const afterFirst = getSpy.count();
+    await hk(() => api.getBusinessById(clinicId));
+    const afterSecond = getSpy.count();
+
+    expect(afterFirst).toBeGreaterThan(before);
+    expect(afterSecond).toBe(afterFirst);
+  }, 30000);
+
+  maybeIt('getAvailableTimes() — second call for the same practitioner/type/window makes zero HTTP requests', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const group = groups.find(g => g.practitioners.length > 0);
+    if (!group) { console.warn('[live] no practitioners — skipping'); return; }
+    const practitioner = group.practitioners[0];
+    const types = await hk(() => api.getAppointmentTypes({ practitioner_id: practitioner.id }));
+    if (!types.length) { console.warn('[live] practitioner has no appointment types — skipping'); return; }
+
+    const from = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const to = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+    const args = { practitioner_id: practitioner.id, business_id: group.clinic_id, appt_type: types[0].id, from, to };
+
+    const before = getSpy.count();
+    await hk(() => api.getAvailableTimes(args));
+    const afterFirst = getSpy.count();
+    await hk(() => api.getAvailableTimes(args));
+    const afterSecond = getSpy.count();
+
+    expect(afterFirst).toBeGreaterThan(before);
+    expect(afterSecond).toBe(afterFirst);
+  }, 30000);
+});

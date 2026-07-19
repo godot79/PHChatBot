@@ -13,6 +13,30 @@ const EXCLUDED_CLINIC_PATTERN = /UWC|physio\s*focus/i;
 const _groupsCache = new Map();
 const GROUPS_CACHE_TTL_MS = 30_000;
 
+// Same 30 s pattern for the other rarely-changing lookups that a single
+// availability sweep (buildAvailablePhysiosForTypeName) re-fetches dozens of
+// times for data already implied by the cached groups above.
+const _apptTypesCache = new Map();          // key: `${region}:${practitioner_id}`
+const _practitionersForClinicCache = new Map(); // key: `${region}:${business_id}`
+const _businessByIdCache = new Map();        // key: `${region}:${business_id}`
+
+// getAvailableTimes reflects live availability, so it gets its own longer,
+// configurable TTL (config.availableTimesCacheTtlMs, default 5 min) rather
+// than the 30 s lookup TTL above. Safe because bookAppointment() always
+// re-validates against Cliniko at write time — a stale cached slot just
+// fails cleanly there instead of risking a double-booking.
+const _availableTimesCache = new Map();      // key: `${region}:${business_id}:${practitioner_id}:${appt_type}:${from}:${to}`
+
+function _cacheGet(map, key) {
+  const hit = map.get(key);
+  if (hit && Date.now() < hit.expiresAt) return hit.data;
+  return undefined;
+}
+
+function _cacheSet(map, key, data, ttlMs) {
+  map.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
 /**
  * Cliniko API wrapper for patient, appointment, and clinic actions.
  */
@@ -59,13 +83,19 @@ class ClinikoAPI {
    * @returns {Promise<Array>}
    */
   async getPractitionersForClinic(business_id) {
+    const cacheKey = `${RegionContext.get() || 'default'}:${business_id}`;
+    const cached = _cacheGet(_practitionersForClinicCache, cacheKey);
+    if (cached) return cached;
+
     const params = new URLSearchParams();
     params.append('q[]', 'show_in_online_bookings:=T');
     try {
       const url = `/businesses/${business_id}/practitioners?${params.toString()}`;
-      console.debug(`Fetching physios : ${url}`); 
+      console.debug(`Fetching physios : ${url}`);
       const practitioners = await new SendMessage(url, {}).get();
-      return practitioners.practitioners || [];
+      const result = practitioners.practitioners || [];
+      _cacheSet(_practitionersForClinicCache, cacheKey, result, GROUPS_CACHE_TTL_MS);
+      return result;
     } catch (error) {
       this.logger.error(`getPractitionersForClinic failed ${error}`);
       return [];
@@ -233,11 +263,17 @@ class ClinikoAPI {
     // Explicitly log the full URL so malformed params are obvious
     this.logger.debug(`GET ${url}`, { method: 'GET', endpoint: url });
 
+    const cacheKey = `${RegionContext.get() || 'default'}:${url}`;
+    const cached = _cacheGet(_availableTimesCache, cacheKey);
+    if (cached) return cached;
+
     try {
       const result = await new SendMessage(url, {}).get();
       console.info(`Total slots : ${result.total_entries}`);
       console.info(result.available_times?.[0]);
-      return result.available_times || [];
+      const output = result.available_times || [];
+      _cacheSet(_availableTimesCache, cacheKey, output, config.availableTimesCacheTtlMs);
+      return output;
     } catch (err) {
       // Safer, structured logging with full context
       const safeMsg = (err && (err.message || err.status || err.code)) || 'unknown_error';
@@ -264,6 +300,10 @@ class ClinikoAPI {
    * @returns {Promise<Array>}
    */
   async getAppointmentTypes({ practitioner_id }) {
+    const cacheKey = `${RegionContext.get() || 'default'}:${practitioner_id}`;
+    const cached = _cacheGet(_apptTypesCache, cacheKey);
+    if (cached) return cached;
+
     const params = new URLSearchParams();
     params.append('q[]', 'show_in_online_bookings:=T');
     const url = `/practitioners/${practitioner_id}/appointment_types?${params.toString()}`;
@@ -274,7 +314,9 @@ class ClinikoAPI {
       const allTypes = result.appointment_types;
       const onlineBookingTypes = allTypes.filter(type => type.show_in_online_bookings === true);
       console.log(`Filtered to ${onlineBookingTypes.length} types that show in online bookings`);
-      return onlineBookingTypes || [];
+      const output = onlineBookingTypes || [];
+      _cacheSet(_apptTypesCache, cacheKey, output, GROUPS_CACHE_TTL_MS);
+      return output;
     } catch (err) {
       this.logger.error(`getAppointmentTypes failed: ${err.message}`);
       throw err;
@@ -596,7 +638,13 @@ class ClinikoAPI {
   }
 
   // Test helper — clear the groups cache between test cases.
-  static _clearGroupsCache() { _groupsCache.clear(); }
+  static _clearGroupsCache() {
+    _groupsCache.clear();
+    _apptTypesCache.clear();
+    _practitionersForClinicCache.clear();
+    _businessByIdCache.clear();
+    _availableTimesCache.clear();
+  }
 
   /**
    * Get available slots for a business (and optionally a practitioner) within a date range.
@@ -767,12 +815,17 @@ class ClinikoAPI {
       this.logger.error("getBusinessById: businessId is required");
       return null;
     }
+    const cacheKey = `${RegionContext.get() || 'default'}:${businessId}`;
+    const cached = _cacheGet(_businessByIdCache, cacheKey);
+    if (cached) return cached;
+
     try {
       const url = `/businesses/${businessId}`;
       const result = await new SendMessage(url, {}).get();
       console.log('[DEBUG getBusinessById result]', result);
       // The response IS the business object, NOT { business: ... }
       if (result && result.id) {
+        _cacheSet(_businessByIdCache, cacheKey, result, GROUPS_CACHE_TTL_MS);
         return result;
       }
       this.logger.warn(`No business found for businessId=${businessId}`);
