@@ -168,13 +168,30 @@ class SessionManager {
             if (ps.appt_preference) {
               try { psContext.appt_preference = JSON.parse(ps.appt_preference); } catch {}
             }
+
+            const psUpdates = {};
             if (Object.keys(psContext).length > 0) {
               let currentCtx = {};
               try {
                 const raw = session && session.context;
                 currentCtx = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
               } catch {}
-              await this.updateSession(sessionId, { context: { ...currentCtx, ...psContext } });
+              psUpdates.context = { ...currentCtx, ...psContext };
+            }
+
+            // patient_state survives the session's TTL and the periodic expired-session
+            // cleanup (which hard-deletes rows the prior-session seed above depends on).
+            // Restoring verified/patient_id from here is what actually prevents a
+            // returning verified user from landing in INTRO after a >30-40 min idle gap.
+            if (ps.verified) {
+              psUpdates.verified = 1;
+              psUpdates.verification_status = 'verified';
+              psUpdates.conversation_state = 'BOOK_MANAGE_OPTIONS';
+              if (ps.patient_id) psUpdates.patient_id = ps.patient_id;
+            }
+
+            if (Object.keys(psUpdates).length > 0) {
+              await this.updateSession(sessionId, psUpdates);
               session = await this.db.getSession(sessionId);
             }
           }
@@ -1021,13 +1038,16 @@ class SessionManager {
             this.logger.debug(`[deleteSessionAndData] Deleted verification codes for phone: ${phoneNumber}`);
         }
 
-        // Clear appt_preference but keep region so the user skips region-select on next login
+        // Clear appt_preference, verified, and patient_id but keep region so the
+        // user skips region-select on next login. Verified/patient_id must be
+        // cleared here — otherwise the returning-verified-user carryover in
+        // getOrCreateSession() would silently undo this logout on the next message.
         if (phoneNumber) {
             await this.db.query(
-                `UPDATE patient_state SET appt_preference = NULL WHERE phone_number = ?`,
+                `UPDATE patient_state SET appt_preference = NULL, verified = 0, patient_id = NULL WHERE phone_number = ?`,
                 [phoneNumber]
             );
-            this.logger.debug(`[deleteSessionAndData] Cleared appt_preference for phone: ${phoneNumber}`);
+            this.logger.debug(`[deleteSessionAndData] Cleared appt_preference/verified/patient_id for phone: ${phoneNumber}`);
         }
 
         // Delete the session itself (use DatabaseManager.deleteSession)

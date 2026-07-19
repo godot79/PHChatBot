@@ -75,15 +75,22 @@ class DatabaseManager {
           region TEXT,
           appt_preference TEXT,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`, (err) => {
-          if (err) {
-            this.logger.error('❌ Failed to initialize schema:', err);
-            reject(err);
-          } else {
-            this.isInitialized = true;
-            this.logger.info('Database manager initialized successfully');
-            resolve();
+        )`);
+
+        // Migration: patient_id/verified were added after patient_state already
+        // existed in production. ALTER TABLE has no "IF NOT EXISTS" in SQLite,
+        // so ignore the "duplicate column" error on repeat runs.
+        const ignoreDuplicateColumn = (err) => {
+          if (err && !/duplicate column/i.test(err.message || '')) {
+            this.logger.error('Failed to add patient_state column:', err);
           }
+        };
+        this.db.run(`ALTER TABLE patient_state ADD COLUMN patient_id TEXT`, ignoreDuplicateColumn);
+        this.db.run(`ALTER TABLE patient_state ADD COLUMN verified BOOLEAN DEFAULT 0`, (err) => {
+          ignoreDuplicateColumn(err);
+          this.isInitialized = true;
+          this.logger.info('Database manager initialized successfully');
+          resolve();
         });
       });
     });
@@ -320,16 +327,22 @@ class DatabaseManager {
   }
 
   async upsertPatientState(phone, updates) {
-    const { region, appt_preference } = updates;
+    const { region, appt_preference, patient_id, verified } = updates;
+    const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
     return new Promise((resolve, reject) => {
       this.db.run(
-        `INSERT INTO patient_state (phone_number, region, appt_preference, updated_at)
-         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, updated_at)
+         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(phone_number) DO UPDATE SET
            region = COALESCE(?, region),
            appt_preference = COALESCE(?, appt_preference),
+           patient_id = COALESCE(?, patient_id),
+           verified = COALESCE(?, verified),
            updated_at = CURRENT_TIMESTAMP`,
-        [phone, region ?? null, appt_preference ?? null, region ?? null, appt_preference ?? null],
+        [
+          phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
+          region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
+        ],
         (err) => err ? reject(err) : resolve()
       );
     });

@@ -1327,6 +1327,13 @@ async handleMessageEnvelope(message, phoneNumber) {
           context: JSON.stringify({ ...existingCtx, email: patient.email || existingCtx.email || '' }),
           data: JSON.stringify(cleared)
         });
+        // Persist verified status outside the session's TTL — the periodic
+        // expired-session cleanup deletes session rows, which otherwise silently
+        // drops the "returning verified user" carryover after ~30-40 min idle.
+        const phoneForState = session.phone_number || session.phoneNumber;
+        if (phoneForState) {
+          this.sessionManager.db.upsertPatientState(phoneForState, { patient_id: patient.id, verified: true }).catch(() => {});
+        }
         const updated = await this.sessionManager.getSession(session.id);
         return prependTextToEnvelope('Verification successful!', await this.goToInteractiveMenu(updated));
       }
@@ -4236,6 +4243,12 @@ if (/^p(rev)?$/i.test(text)) {
           context: JSON.stringify({ ...existingCtx, email: patient.email || '' }),
           data: JSON.stringify({})
         });
+        // Persist verified status outside the session's TTL — see comment in
+        // handleVerifyState's success path for why this is necessary.
+        const phoneForState = session.phone_number || session.phoneNumber;
+        if (phoneForState && newPatientId) {
+          this.sessionManager.db.upsertPatientState(phoneForState, { patient_id: String(newPatientId), verified: true }).catch(() => {});
+        }
         const updated = await this.sessionManager.getSession(session.id);
         log.info('Registration success', { email: patient.email, patient_id: newPatientId });
         return prependTextToEnvelope(`✅ You've been registered!`, await this.renderMainMenu(updated));
