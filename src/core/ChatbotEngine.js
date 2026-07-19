@@ -1558,6 +1558,65 @@ async handleMessageEnvelope(message, phoneNumber) {
     return info.phone;
   }
 
+  /**
+   * Central "no results" surface for booking flows (Layer 2 of the 2026-07-19
+   * incident fix — see _noSlotsRetry/ClinikoAPI._partial marker/d99d90d).
+   *
+   * Replaces the old ad hoc pattern (each call site hand-writing
+   * `data.no_slots_prompt = {...}; sync(); return buttons(...)`, with
+   * retry_step optional and easy to forget) with one path that:
+   *  - always sets retry_step, defaulting to the CURRENT selection_step, so
+   *    Try Again re-enters this exact step in place instead of falling back
+   *    to _handleNoSlotsDecision's generic navBack() and discarding whatever
+   *    the user already selected;
+   *  - checks the triggering Cliniko result's _partial marker (set by
+   *    getAvailableSlotsByBusinessAndDate when an inner fetch failed, e.g. a
+   *    429 under concurrent load) to show honest wording — "having trouble
+   *    checking availability" instead of asserting confirmed unavailability
+   *    when we can't actually be sure.
+   *
+   * @param {object} session
+   * @param {object} data - mutable session.data object (already parsed)
+   * @param {string} stateConst - this.STATES.* value for the current handler
+   * @param {object} opts
+   * @param {string} opts.context - no_slots_prompt.context (drives support email routing)
+   * @param {string} opts.confirmedMessage - shown when the result is not marked _partial
+   * @param {string} [opts.retryStep] - defaults to data.selection_step
+   * @param {Array|Array[]} [opts.result] - the Cliniko result(s) that triggered this;
+   *   an array (checked for ._partial) or an array of arrays (checked with .some())
+   * @param {string} [opts.retryLabel] - button title for option 1, default 'Try Again'.
+   *   Use an honest alternative (e.g. 'Try another physio') when retryStep
+   *   actually changes what gets picked, not just re-runs the same fetch.
+   * @returns {Promise<object>} buttons() envelope
+   */
+  async _noSlotsRetry(session, data, stateConst, { context, confirmedMessage, retryStep, result, retryLabel = 'Try Again' } = {}) {
+    const step = retryStep || data.selection_step;
+    data.no_slots_prompt = { context, retry_step: step };
+    session.conversation_state = stateConst;
+    session.data = JSON.stringify(data);
+    await this.sessionManager.updateSession(session.id, { conversation_state: stateConst, data: session.data });
+
+    // result may be a single Cliniko result array (check result._partial) or
+    // an array of them, e.g. one per clinic in a Promise.all fan-out (check
+    // whether any element is _partial) — handle both without the caller
+    // needing to tell us which shape it passed.
+    const partial = !!(result && (result._partial || (Array.isArray(result) && result.some(r => Array.isArray(r) && r._partial))));
+    const body = partial
+      ? "We're having trouble checking availability right now — this may be temporary. Please try again in a moment."
+      : confirmedMessage;
+    // If this might just be a transient fetch failure, "Try Again" is the
+    // honest label regardless of what a confirmed-empty retryLabel would say
+    // (e.g. 'Try another physio' implies this physio is confirmed unavailable,
+    // which we can't actually assert here).
+    const label = partial ? 'Try Again' : retryLabel;
+
+    return buttons(body, [
+      { id: '1', title: label },
+      { id: '2', title: 'Email us' },
+      { id: '3', title: 'Message on WhatsApp' },
+    ]);
+  }
+
   async _handleNoSlotsDecision(session, data, stateConst, backHandler, incomingText) {
     const text = (incomingText || '').trim().toLowerCase();
     if (!data.no_slots_prompt) return null;
@@ -2020,13 +2079,15 @@ if (/^p(rev)?$/i.test(text)) {
       const filtered = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
 
       if (!filtered.length) {
-        data.no_slots_prompt = { context: 'history' };
-        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
-        return buttons(`No available slots for that combination.`, [
-          { id: '1', title: 'Try Again' },
-          { id: '2', title: 'Email us' },
-          { id: '3', title: 'Message on WhatsApp' },
-        ]);
+        // retry_step defaults to 'view_slots' (the current step) — Try Again
+        // re-runs this exact fetch with selected_physio/selected_clinic/
+        // selected_appt_type untouched. Pass raw (unfiltered) so the _partial
+        // marker survives — filtered is a new array from .filter().
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_HISTORY, {
+          context: 'history',
+          result: raw,
+          confirmedMessage: 'No available slots for that combination.',
+        });
       }
 
       const slotData = {
@@ -2463,11 +2524,10 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (!(data.funnel_catalogue || []).length) {
-        data.no_slots_prompt = { context: 'soonest' };
-        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return buttons('No appointment types are available right now.',
-          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
-        );
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
+          context: 'soonest',
+          confirmedMessage: 'No appointment types are available right now.',
+        });
       }
 
       if (!data.selected_appt_type) {
@@ -2475,11 +2535,10 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         if (funnelResult.reply) return funnelResult.reply;
         if (!funnelResult.resolved) {
-          data.no_slots_prompt = { context: 'soonest' };
-          await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-          return buttons('No appointment types are available right now.',
-            [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
-          );
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
+            context: 'soonest',
+            confirmedMessage: 'No appointment types are available right now.',
+          });
         }
         data.selected_appt_type = funnelResult.resolved;
         await sync();
@@ -2494,19 +2553,15 @@ if (/^p(rev)?$/i.test(text)) {
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
 
       if (practitioners.length === 0) {
-        // No physios have slots for this type — show standard no-slots prompt (no navPush so back goes to booking menu)
-        // retry_step: Try Again re-enters choose_type with selected_appt_type intact,
+        // No physios have slots for this type (no navPush so back goes to booking menu).
+        // retry_step: 'choose_type' — selection_step was already advanced to 'choose_physio'
+        // above, but Try Again should re-enter choose_type with selected_appt_type intact,
         // re-running the physio search instead of restarting the funnel.
-        data.no_slots_prompt = { context: 'soonest', retry_step: 'choose_type' };
-        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return buttons(
-          `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
-          [
-            { id: '1', title: 'Try Again' },
-            { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message on WhatsApp' },
-          ]
-        );
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
+          context: 'soonest',
+          retryStep: 'choose_type',
+          confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
+        });
       }
 
       navPush(data, 'choose_physio', { had_multiple_options: practitioners.length > 1, auto: practitioners.length === 1 });
@@ -2599,27 +2654,24 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
 
         if (withSlots.length === 0) {
-          // This physio actually has no slots for this type → go back to physio selection
-          data.selection_step = 'choose_physio';
-          delete data.selected_physio; // force re-pick
-          // Rebuild physio list to exclude zero-slot physio
-          const rebuilt = await buildAvailablePhysiosForTypeName(typeNorm);
-          data.practitioner_list = sortPractitioners(rebuilt); data.practitioner_page = 0;
-          await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-          if (rebuilt.length === 0) {
-            // No available physios left → go back to type
-            data.selection_step = 'choose_type';
-            delete data.selected_appt_type; delete data.practitioner_list;
-            await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-            return await this.handleBookSoonest(session, '');
-          }
-          const reply = buildInteractiveSelectionList({
-            items: data.practitioner_list,
-            rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
-            page: 0,
-            header: `No slots found. Select another practitioner for ${data.selected_appt_type.name}:`
-      });
-          return reply;
+          // Do NOT silently rebuild the physio list / reset the funnel here —
+          // a zero-clinic result from this prefilter can come from a genuinely
+          // fully-booked physio OR from a transient Cliniko fetch failure
+          // (e.g. a 429 under concurrent load) that getAvailableSlotsByBusinessAndDate
+          // swallows into an empty array indistinguishable from "confirmed
+          // zero" (flagged via slotResults0[i]._partial when that happened).
+          // Treating it as confirmed and cascading through a physio rebuild
+          // and funnel reset discards the user's already-resolved selections
+          // with no explanation. retry_step re-runs this exact prefilter —
+          // with selected_physio/selected_appt_type/funnel state untouched —
+          // instead of restarting the funnel.
+          delete data.clinic_list; delete data.clinic_page;
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
+            context: 'soonest',
+            retryStep: 'choose_clinic',
+            result: slotResults0,
+            confirmedMessage: `No slots found for ${data.selected_appt_type.name} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+          });
         }
 
         if (withSlots.length === 1) {
@@ -2670,14 +2722,15 @@ if (/^p(rev)?$/i.test(text)) {
       if (!filtered.length) {
         // Extremely unlikely since clinics are prefiltered, but handle defensively.
         // retry_step: Try Again re-enters choose_clinic with selected_clinic intact,
-        // re-running the slot fetch instead of restarting the funnel.
-        data.no_slots_prompt = { context: 'soonest', retry_step: 'choose_clinic' };
-        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-        return buttons(`No slots found for ${data.selected_appt_type?.name}.`, [
-          { id: '1', title: 'Try Again' },
-          { id: '2', title: 'Email us' },
-          { id: '3', title: 'Message on WhatsApp' },
-        ]);
+        // re-running the slot fetch instead of restarting the funnel. Pass the raw
+        // (unfiltered) result — filtered is a new array from .filter() and doesn't
+        // carry the _partial marker through.
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
+          context: 'soonest',
+          retryStep: 'choose_clinic',
+          result: raw,
+          confirmedMessage: `No slots found for ${data.selected_appt_type?.name}.`,
+        });
       }
 
       const slotData = {
@@ -2840,11 +2893,10 @@ if (/^p(rev)?$/i.test(text)) {
           }
 
           if ((data.appointment_type_list || []).length === 0) {
-            data.no_slots_prompt = { context: 'date' };
-            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-            return buttons('No appointment types available for that date.',
-              [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
-            );
+            return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
+              context: 'date',
+              confirmedMessage: 'No appointment types available for that date.',
+            });
           }
 
           const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
@@ -2912,11 +2964,10 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if ((data.appointment_type_list || []).length === 0) {
-        data.no_slots_prompt = { context: 'date' };
-        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        return buttons('No appointment types available for that date.',
-          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
-        );
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
+          context: 'date',
+          confirmedMessage: 'No appointment types available for that date.',
+        });
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3031,16 +3082,17 @@ if (/^p(rev)?$/i.test(text)) {
 
         if (withSlots.length === 0) {
           const noSlotsDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-          data.no_slots_prompt = { context: 'date_inner' };
-          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-          return buttons(
-            `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`,
-            [
-              { id: '1', title: 'Try another physio' },
-              { id: '2', title: 'Email us' },
-              { id: '3', title: 'Message on WhatsApp' },
-            ]
-          );
+          // context 'date_inner' is intercepted by the special-case handler at
+          // the top of this function (before _handleNoSlotsDecision even runs),
+          // which navigates to choose_physio and clears the stale selection —
+          // retry_step is set for consistency but not read on that path.
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
+            context: 'date_inner',
+            retryStep: 'choose_physio',
+            retryLabel: 'Try another physio',
+            result: slotResults1,
+            confirmedMessage: `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+          });
         }
 
         if (withSlots.length === 1) {
@@ -3098,19 +3150,15 @@ if (/^p(rev)?$/i.test(text)) {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
-        if (typeof navBack === 'function') navBack(data);
-        data.selection_step = 'choose_clinic';
-        delete data.clinic_list;
-        data.no_slots_prompt = { context: 'date' };
-        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
-        return buttons(
-          `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
-          [
-            { id: '1', title: 'Try Again' },
-            { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message on WhatsApp' },
-          ]
-        );
+        // retry_step defaults to 'view_slots' (the current step) — Try Again
+        // re-runs this exact fetch with selected_clinic/selected_physio intact,
+        // instead of the old behavior of silently bouncing back to choose_clinic
+        // and discarding clinic_list before the user even presses anything.
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
+          context: 'date',
+          result: raw,
+          confirmedMessage: `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
+        });
       }
 
       const slotData = {
@@ -3290,12 +3338,10 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if ((data.appointment_type_list || []).length === 0) {
-        data.no_slots_prompt = { context: 'physio' };
-        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-        return buttons(
-          `No visit types found for ${getPractitionerDisplayName(data.selected_physio) || 'this practitioner'}.`,
-          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
-        );
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
+          context: 'physio',
+          confirmedMessage: `No visit types found for ${getPractitionerDisplayName(data.selected_physio) || 'this practitioner'}.`,
+        });
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3360,16 +3406,17 @@ if (/^p(rev)?$/i.test(text)) {
         data.clinic_page = 0;
 
         if (withSlots.length === 0) {
-          data.no_slots_prompt = { context: 'physio_inner' };
-          await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-          return buttons(
-            `No slots available for ${getPractitionerDisplayName(data.selected_physio)} with ${data.selected_appt_type?.name || 'that visit type'}.`,
-            [
-              { id: '1', title: 'Try another type' },
-              { id: '2', title: 'Email us' },
-              { id: '3', title: 'Message on WhatsApp' },
-            ]
-          );
+          // context 'physio_inner' is intercepted by the special-case handler at
+          // the top of this function (before _handleNoSlotsDecision runs), which
+          // navigates to choose_type and clears the stale selection — retry_step
+          // is set for consistency but not read on that path.
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
+            context: 'physio_inner',
+            retryStep: 'choose_type',
+            retryLabel: 'Try another type',
+            result: slotResults2,
+            confirmedMessage: `No slots available for ${getPractitionerDisplayName(data.selected_physio)} with ${data.selected_appt_type?.name || 'that visit type'}.`,
+          });
         }
 
         if (withSlots.length === 1) {
@@ -3431,21 +3478,13 @@ if (/^p(rev)?$/i.test(text)) {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
-        data.no_slots_prompt = { context: 'physio' };
-        await this.sessionManager.updateSession(session.id, {
-          conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO,
-          data: JSON.stringify(data)
+        // retry_step defaults to 'view_slots' — Try Again re-runs this exact
+        // fetch with selected_clinic/selected_physio intact.
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
+          context: 'physio',
+          result: raw,
+          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
         });
-        session.conversation_state = this.STATES.BOOK_SPECIFIC_PHYSIO;
-        session.data = JSON.stringify(data);
-        return buttons(
-          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
-          [
-            { id: '1', title: 'Try Again' },
-            { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message on WhatsApp' },
-          ]
-        );
       }
 
       const slotData = {
@@ -3639,12 +3678,10 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if ((data.appointment_type_list || []).length === 0) {
-        data.no_slots_prompt = { context: 'clinic' };
-        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
-        return buttons(
-          `No appointment types found at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
-          [{ id: '1', title: 'Try Again' }, { id: '2', title: 'Email us' }, { id: '3', title: 'Message on WhatsApp' }]
-        );
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
+          context: 'clinic',
+          confirmedMessage: `No appointment types found at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+        });
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3769,18 +3806,13 @@ if (/^p(rev)?$/i.test(text)) {
       const typeNorm = normName(data.selected_appt_type?.name || '');
       const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
       if (!slots.length) {
-        data.no_slots_prompt = { context: 'clinic' };
-        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: JSON.stringify(data) });
-        session.conversation_state = this.STATES.BOOK_SPECIFIC_CLINIC;
-        session.data = JSON.stringify(data);
-        return buttons(
-          `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
-          [
-            { id: '1', title: 'Try Again' },
-            { id: '2', title: 'Email us' },
-            { id: '3', title: 'Message on WhatsApp' },
-          ]
-        );
+        // retry_step defaults to 'view_slots' — Try Again re-runs this exact
+        // fetch with selected_clinic/selected_physio intact.
+        return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
+          context: 'clinic',
+          result: raw,
+          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+        });
       }
 
       const slotData = {
@@ -3915,19 +3947,16 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // When no slots are present in this state (edge case), offer standard 3-button prompt
+    // When no slots are present in this state (edge case), offer standard 3-button prompt.
+    // This state doesn't own a fetch to retry — data.slot_list was populated by
+    // whichever prior handler transitioned here — and has no selection_step, so
+    // there's no sensible in-place retry step. No retryStep override: this falls
+    // through to _handleNoSlotsDecision's generic navBack, same as before.
     if (!slots.length) {
-      data.no_slots_prompt = { context: 'slot' };
-      session.data = JSON.stringify(data);
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.SELECT_SLOT,
-        data: session.data
+      return await this._noSlotsRetry(session, data, this.STATES.SELECT_SLOT, {
+        context: 'slot',
+        confirmedMessage: 'No available slots to show.',
       });
-      return buttons(`No available slots to show.`, [
-        { id: '1', title: 'Try Again' },
-        { id: '2', title: 'Email us' },
-        { id: '3', title: 'Message on WhatsApp' },
-      ]);
     }
 
     const page = data.slot_page || 0;
@@ -4655,28 +4684,40 @@ if (/^p(rev)?$/i.test(text)) {
       );
     }
     const { from, to } = normalizeDateWindow();
-    const availableTimes = await this.clinikoAPI.getAvailableTimes({
-      practitioner_id,
-      business_id,
-      appt_type: appointment_type_id,
-      from,
-      to,
-    });
+    let availableTimes;
+    let fetchFailed = false;
+    try {
+      availableTimes = await this.clinikoAPI.getAvailableTimes({
+        practitioner_id,
+        business_id,
+        appt_type: appointment_type_id,
+        from,
+        to,
+      });
+    } catch (err) {
+      // getAvailableTimes rethrows on failure (unlike getAvailableSlotsByBusinessAndDate,
+      // which swallows to []) — previously this propagated uncaught to handleMessage's
+      // top-level catch, surfacing a generic "something went wrong" error instead of
+      // the no-slots retry prompt below. Treat it the same as a confirmed-empty result
+      // but flagged as a possible transient failure.
+      this.logger.error('_rescheduleFetchAndShowSlots: getAvailableTimes failed', { error: err?.message || err?.status || err });
+      availableTimes = [];
+      fetchFailed = true;
+    }
     if (!availableTimes.length) {
-      delete data.reschedule_appt_list;
+      // Retry always routes back through handleSelectAppointmentToRescheduleState
+      // (this flow isn't selection_step-driven like the other booking handlers —
+      // _rescheduleFetchAndShowSlots is only reachable via an explicit 'yes' in
+      // RESCHEDULE_CONFIRM_INTENT, not a retry_step). Preserve reschedule_appt_list
+      // so Try Again shows the same appointment list instead of an empty one; the
+      // user re-picks rather than the exact fetch silently re-running.
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
-      data.no_slots_prompt = { context: 'reschedule' };
-      session.data = JSON.stringify(data);
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE,
-        data: session.data
+      return await this._noSlotsRetry(session, data, this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE, {
+        context: 'reschedule',
+        result: fetchFailed ? Object.assign([], { _partial: true }) : availableTimes,
+        confirmedMessage: 'Sorry, no available slots for rescheduling this appointment.',
       });
-      return buttons(`Sorry, no available slots for rescheduling this appointment.`, [
-        { id: '1', title: 'Try Again' },
-        { id: '2', title: 'Email us' },
-        { id: '3', title: 'Message on WhatsApp' },
-      ]);
     }
     data.available_times = availableTimes;
     data.slot_page = 0;

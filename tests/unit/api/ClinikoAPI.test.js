@@ -294,6 +294,27 @@ describe('ClinikoAPI', () => {
       expect(result).toEqual([]);
     });
 
+    // Regression: a transient getClinics() failure (e.g. a 429 during a burst
+    // of concurrent availability lookups) must not be cached as a confirmed
+    // "zero clinics" result — that poisons every clinic/practitioner lookup
+    // for the full GROUPS_CACHE_TTL_MS window, silently masking real
+    // availability from callers like handleBookSoonest. See 2026-07-19
+    // chatbot-webhook incident: a single rate-limited moment turned into a
+    // ~30s outage window where real slots were reported as unavailable.
+    test('a failed fetch is not cached — the very next call retries against Cliniko', async () => {
+      mockGet.mockRejectedValueOnce(new Error('429 Too Many Requests'));
+      const failed = await api.getPractitionersByClinic();
+      expect(failed).toEqual([]);
+
+      mockGet
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
+      const retried = await api.getPractitionersByClinic();
+
+      expect(retried).toHaveLength(1);
+      expect(retried[0]).toEqual({ clinic_id: 'c1', clinic_name: 'Clinic A', practitioners: [{ id: 'p1' }] });
+    });
+
     test('returns [] when a clinic practitioner fetch throws', async () => {
       mockGet
         .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
@@ -354,6 +375,73 @@ describe('ClinikoAPI', () => {
       expect(sgResult[0].clinic_id).toBe('sg1');
       expect(hkResult[0].clinic_id).toBe('hk1');
       expect(mockGet).toHaveBeenCalledTimes(4);  // each region fetched independently
+    });
+  });
+
+  // ─── getAvailableSlotsByBusinessAndDate — _partial marker ─────────────────
+  //
+  // Regression: this method silently skips any practitioner/appointment-type
+  // combo whose getAvailableTimes() call fails (e.g. a 429 under concurrent
+  // load) — that combo just contributes zero slots, indistinguishable from a
+  // genuine zero. Callers that treat a short/empty result as confirmed
+  // unavailability (as handleBookSoonest's choose_clinic step used to) can
+  // then discard valid user state. The array is tagged with a non-enumerable
+  // _partial marker whenever this happened, so callers that care can tell
+  // "confirmed zero" apart from "some inner fetches failed, so this count may
+  // be short" without changing the array's shape for existing consumers.
+  describe('getAvailableSlotsByBusinessAndDate() — _partial marker', () => {
+    let api;
+    let mockGet;
+
+    beforeEach(() => {
+      ClinikoAPI._clearGroupsCache();
+      mockGet = jest.fn();
+      SendMessage.mockImplementation(() => ({ get: mockGet }));
+      api = new ClinikoAPI();
+      api.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Clinic A' });
+      api.getPractitionersForClinic = jest.fn().mockResolvedValue([{ id: 'P1', first_name: 'A', last_name: 'B' }]);
+      api.getAppointmentTypes = jest.fn().mockResolvedValue([
+        { id: 'AT-1', name: 'Type One' },
+        { id: 'AT-2', name: 'Type Two' },
+      ]);
+    });
+
+    test('all inner fetches succeed → no _partial marker, all slots present', async () => {
+      api.getAvailableTimes = jest.fn()
+        .mockResolvedValueOnce([{ appointment_start: '2026-08-01T10:00:00Z' }])
+        .mockResolvedValueOnce([{ appointment_start: '2026-08-01T11:00:00Z' }]);
+
+      const result = await api.getAvailableSlotsByBusinessAndDate({
+        business_id: 'BIZ-1', practitioner_id: 'P1', from: '2026-08-01', to: '2026-08-02',
+      });
+
+      expect(result).toHaveLength(2);
+      expect(result._partial).toBeUndefined();
+    });
+
+    test('one inner fetch fails (e.g. a 429) → _partial marker set, other slots still returned', async () => {
+      api.getAvailableTimes = jest.fn()
+        .mockResolvedValueOnce([{ appointment_start: '2026-08-01T10:00:00Z' }])
+        .mockRejectedValueOnce({ status: 429, message: 'Request failed with status code 429' });
+
+      const result = await api.getAvailableSlotsByBusinessAndDate({
+        business_id: 'BIZ-1', practitioner_id: 'P1', from: '2026-08-01', to: '2026-08-02',
+      });
+
+      expect(result).toHaveLength(1);          // the successful combo's slot survives
+      expect(result._partial).toBe(true);      // but the count may be short — not confirmed zero
+    });
+
+    test('_partial is non-enumerable — does not change JSON.stringify or spread behavior', async () => {
+      api.getAvailableTimes = jest.fn().mockRejectedValue({ status: 429 });
+
+      const result = await api.getAvailableSlotsByBusinessAndDate({
+        business_id: 'BIZ-1', practitioner_id: 'P1', from: '2026-08-01', to: '2026-08-02',
+      });
+
+      expect(result._partial).toBe(true);
+      expect(JSON.stringify(result)).toBe('[]');   // doesn't leak into serialized session data
+      expect([...result]).toEqual([]);             // spread/iteration unaffected
     });
   });
 });

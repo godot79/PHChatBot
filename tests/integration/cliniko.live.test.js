@@ -948,6 +948,56 @@ describe('getAvailableSlotsByBusinessAndDate() — real slots must survive concu
     expect(targetResult.length).toBeGreaterThan(0);
     expect(targetResult.map(s => s.slot).sort()).toEqual(baselineSlots.map(s => s.slot).sort());
   }, 60000);
+
+  // Layer 1 of the central architecture: getAvailableSlotsByBusinessAndDate()
+  // now tags its result with a non-enumerable _partial marker whenever an
+  // inner combo's fetch failed and was silently skipped, so callers can tell
+  // "confirmed zero" apart from "some inner fetches failed, this count may be
+  // short". Mocked coverage (ClinikoAPI.test.js) proves the mechanics; this
+  // confirms the marker actually fires under the real 429 volume this fix
+  // exists for, not just a synthetic mock.
+  maybeIt('_partial marker is set on results affected by a real concurrent-load 429', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    if (!groups.length) { console.warn('[live] no clinics — skipping'); return; }
+
+    const allPractitioners = [...new Map(
+      groups.flatMap(g => (g.practitioners || []).map(p => [p.id, { ...p, clinic_id: g.clinic_id }]))
+    ).values()];
+    if (allPractitioners.length < 8) {
+      console.warn('[live] too few practitioners to reproduce production burst volume — skipping');
+      return;
+    }
+
+    const from = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const to = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+
+    const SendMessageMod = require('../../src/api/SendMessage');
+    const realGet = SendMessageMod.prototype.get;
+    let saw429 = false;
+    SendMessageMod.prototype.get = function (...args) {
+      return realGet.apply(this, args).catch(err => {
+        if (err && err.status === 429) saw429 = true;
+        throw err;
+      });
+    };
+
+    let results;
+    try {
+      const burst = allPractitioners.slice(0, 16);
+      results = await hk(() => Promise.all(
+        burst.map(p => api.getAvailableSlotsByBusinessAndDate({ business_id: p.clinic_id, practitioner_id: p.id, from, to }))
+      ));
+    } finally {
+      SendMessageMod.prototype.get = realGet;
+    }
+
+    if (!saw429) {
+      console.warn('[live] burst did not trigger a real Cliniko 429 this run — cannot confirm the marker live, skipping assertion');
+      return;
+    }
+
+    expect(results.some(r => r._partial === true)).toBe(true);
+  }, 60000);
 });
 
 // =============================================================================

@@ -60,17 +60,28 @@ class ClinikoAPI {
   }
 
   /**
+   * Fetch clinics without swallowing errors. Internal use only — callers that
+   * need to distinguish "confirmed zero clinics" from "fetch failed" (e.g.
+   * getPractitionersByClinic(), so it doesn't cache a transient failure as a
+   * real empty result) should call this instead of getClinics().
+   * @returns {Promise<Array>}
+   */
+  async _getClinicsRaw() {
+    const params = new URLSearchParams();
+    params.append('q[]', 'show_in_online_bookings:=T');
+    const data = await new SendMessage(`/businesses?${params.toString()}`, {}).get();
+    const clinics = data.businesses;
+    const main_clinics = clinics.filter(item => !EXCLUDED_CLINIC_PATTERN.test(item.business_name));
+    return main_clinics || [];
+  }
+
+  /**
    * Get all clinics shown in online bookings, excluding UWC clinics.
    * @returns {Promise<Array>}
    */
   async getClinics() {
-    const params = new URLSearchParams();
-    params.append('q[]', 'show_in_online_bookings:=T');
     try {
-      const data = await new SendMessage(`/businesses?${params.toString()}`, {}).get();
-      const clinics = data.businesses;
-      const main_clinics = clinics.filter(item => !EXCLUDED_CLINIC_PATTERN.test(item.business_name));
-      return main_clinics || [];
+      return await this._getClinicsRaw();
     } catch (error) {
       this.logger.error("getClinics failed");
       return [];
@@ -616,7 +627,10 @@ class ClinikoAPI {
     const params = new URLSearchParams();
     params.append('q[]', 'show_in_online_bookings:=T');
     try {
-      const clinics = await this.getClinics();
+      // Use the throwing variant so a failed clinics fetch (e.g. a 429 under
+      // load) skips the cache-set below instead of caching an empty result
+      // for GROUPS_CACHE_TTL_MS and masking real availability underneath it.
+      const clinics = await this._getClinicsRaw();
       const results = await Promise.all(
         clinics.map(async (clinic) => {
           const url = `/businesses/${clinic.id}/practitioners?${params.toString()}`;
@@ -695,6 +709,7 @@ class ClinikoAPI {
       }
 
       let allSlots = [];
+      let hadFetchFailure = false;
       for (const practitioner of practitioners) {
         const apptTypes = await this.getAppointmentTypes({ practitioner_id: practitioner.id });
         for (const apptType of apptTypes) {
@@ -733,6 +748,10 @@ class ClinikoAPI {
               from: fromDateOnly,
               to: toDateOnly
             });
+            // This combo silently contributes zero slots below — indistinguishable
+            // from a genuine zero unless a caller checks the _partial marker set
+            // on the returned array (see bottom of this method).
+            hadFetchFailure = true;
           }
 
           if (slots.length) {
@@ -752,6 +771,11 @@ class ClinikoAPI {
         }
       }
 
+      // Non-enumerable so it doesn't leak into JSON.stringify(session.data) or
+      // change the array's shape for existing .map()/.filter()/length callers —
+      // it's an opt-in signal for callers that need to distinguish "confirmed
+      // zero" from "some inner fetches failed, so this count may be short."
+      if (hadFetchFailure) Object.defineProperty(allSlots, '_partial', { value: true, enumerable: false, configurable: true });
       return allSlots;
     } catch (error) {
       this.logger && this.logger.error && this.logger.error(`getAvailableSlotsByBusinessAndDate failed`, {
@@ -761,7 +785,9 @@ class ClinikoAPI {
         practitioner_id: practitioner_id || null,
         error: error?.message || error?.status || error?.code || 'unknown_error'
       });
-      return [];
+      const empty = [];
+      Object.defineProperty(empty, '_partial', { value: true, enumerable: false, configurable: true });
+      return empty;
     }
   }
 

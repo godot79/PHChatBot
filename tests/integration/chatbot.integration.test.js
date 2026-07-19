@@ -2819,42 +2819,74 @@ describe('Booking menu and flow coverage', () => {
       expect(selectedName).toBe(row1Name);
     });
 
-    // Same divergence again, but for the path where the originally-selected
-    // physio turns out to have zero slots and the list is rebuilt excluding them.
-    test('after zero-slot physio is excluded, numeric reply selects the physio shown at that row', async () => {
-      const AMY = { id: 'PRAC-003', first_name: 'Amy', last_name: 'Lee' };
-      // Raw order: Wei, Jolinna (no slots), Amy. Alphabetical: Amy, Jolinna, Wei.
-      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
-        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_2, PHYSIO_1, AMY] },
-      ]);
-      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-001', name: TYPE_1.name },
-      ]);
-      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ practitioner_id }) => {
-        if (practitioner_id === PHYSIO_1.id) return Promise.resolve([]); // originally-selected physio has no slots after all
-        return Promise.resolve([
-          { slot: futureISO(2), appointment_type_name: TYPE_1.name, practitioner_id, business_id: 'BIZ-001' },
-        ]);
-      });
+    // Regression (2026-07-19 chatbot-webhook incident): a zero-slot result at
+    // this prefilter can come from a genuinely fully-booked physio OR from a
+    // transient Cliniko fetch failure (e.g. a 429 under concurrent load)
+    // that getAvailableSlotsByBusinessAndDate swallows into an empty array
+    // indistinguishable from "confirmed zero". The old behavior silently
+    // rebuilt the physio list (or, if that was also empty, reset the whole
+    // funnel) — discarding the user's already-resolved appointment-type and
+    // funnel selections with no explanation, and in the single-service/
+    // single-insurer case, silently re-asking "New or returning patient?"
+    // as if the user had never answered it. Must instead preserve the
+    // selection and offer an explicit, retry-preserving prompt.
+    test('originally-selected physio has zero slots after all → no_slots_prompt preserves selection for retry (not silently rebuilt)', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SOONEST', {
         selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        funnel_step: 'final_pick',
+        funnel_sel: { service: 'Physiotherapy', insurer: null, patientType: 'new', duration: 60 },
+      });
+
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/no slots found/i);
+      expect(reply).toMatch(/try again/i);
+
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.no_slots_prompt).toEqual({ context: 'soonest', retry_step: 'choose_clinic' });
+      // The user's prior answers must survive so Try Again doesn't re-ask them.
+      expect(d.selected_physio?.id).toBe(PHYSIO_1.id);
+      expect(d.selected_appt_type?.id).toBe(TYPE_1.id);
+      expect(d.funnel_step).toBe('final_pick');
+      expect(d.funnel_sel).toEqual({ service: 'Physiotherapy', insurer: null, patientType: 'new', duration: 60 });
+
+      // Try Again re-runs the same prefilter in place — if slots are found
+      // this time, the user goes straight to a slot list, never back through
+      // the funnel's "New or returning patient?" question.
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([
+        { slot: futureISO(2), appointment_type_name: TYPE_1.name, practitioner_id: PHYSIO_1.id, business_id: CLINIC_1.id },
+      ]);
+      const retryReply = String(await callHandler(engine, ['handleBookSoonest'], session, '1'));
+      expect(retryReply).not.toMatch(/new or returning patient/i);
+    });
+
+    // Layer 2 of the central no-slots architecture: when the empty result is
+    // tagged _partial (an inner Cliniko fetch failed, e.g. a 429 — see
+    // ClinikoAPI.getAvailableSlotsByBusinessAndDate), the user must be told
+    // this may be transient rather than told slots are confirmed unavailable.
+    test('zero-slot result flagged _partial (a 429 occurred) → honest "trouble checking availability" wording, not "no slots found"', async () => {
+      const partialResult = [];
+      Object.defineProperty(partialResult, '_partial', { value: true, enumerable: false });
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue(partialResult);
+
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_1,
         selected_appt_type: TYPE_1,
         selected_physio: PHYSIO_1,
       });
-      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
-      const row1Name = reply.match(/^1\.\s+(.+)$/m)[1].trim();
 
-      await callHandler(engine, ['handleBookSoonest'], session, '1');
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/trouble checking availability/i);
+      expect(reply).not.toMatch(/no slots found/i);
+      expect(reply).toMatch(/try again/i); // still offers the same retry-preserving options
+
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
-      const selected = d.selected_physio || d.prev_state_data?.selected_physio;
-      const selectedName = `${selected.first_name} ${selected.last_name}`;
-      expect(selectedName).toBe(row1Name);
-
-      // getAppointmentTypes is an instance own property — restore it since beforeEach doesn't reset it
-      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
-        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
-      ]);
+      expect(d.no_slots_prompt).toEqual({ context: 'soonest', retry_step: 'choose_clinic' });
+      expect(d.selected_physio?.id).toBe(PHYSIO_1.id); // still preserved for retry
     });
   });
 
@@ -3004,9 +3036,11 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/message on whatsapp/i);
     });
 
-    test('inner fallback (withSlots=0): no_slots_prompt NOT set — shows rebuilt physio list', async () => {
-      // Clinic filter call returns [] (no slots at clinic level); subsequent calls use default [SOONEST_SLOT]
-      // so buildAvailablePhysiosForTypeName finds PHYSIO_1 → shows physio list without no_slots_prompt
+    test('inner fallback (withSlots=0): no_slots_prompt IS set with retry_step, selection preserved', async () => {
+      // Clinic filter call returns [] (no slots at clinic level) — must be
+      // treated as a possibly-transient failure, not confirmed zero. See the
+      // 'originally-selected physio has zero slots after all' test above for
+      // the full retry-preserves-selection regression coverage.
       engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValueOnce([]);
       const session = await seedAt('BOOK_SOONEST', {
         selection_step: 'choose_clinic',
@@ -3017,9 +3051,9 @@ describe('Booking menu and flow coverage', () => {
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data || '{}');
-      // physio list shown, no 3-button dead-end prompt
-      expect(d.no_slots_prompt).toBeFalsy();
-      expect(String(reply)).not.toMatch(/try again.*email us/i);
+      expect(d.no_slots_prompt).toEqual({ context: 'soonest', retry_step: 'choose_clinic' });
+      expect(d.selected_physio?.id).toBe(PHYSIO_1.id); // preserved, not force-cleared for re-pick
+      expect(String(reply)).toMatch(/try again/i);
     });
 
     test('no_slots_prompt option 1 (go back and try again): falls to booking menu when no nav chain', async () => {
@@ -4626,6 +4660,48 @@ describe('Slot list interactive', () => {
     expect(rows.map(r => r.id)).toContain('next');
   });
 
+  test('_rescheduleFetchAndShowSlots — zero slots gives the standard 3-option prompt, preserves reschedule_appt_list for retry', async () => {
+    engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue([]);
+    const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
+      selected_reschedule_appt: RESCHEDULE_APPT,
+      reschedule_appt_list: [RESCHEDULE_APPT],
+    });
+    const data = { selected_reschedule_appt: RESCHEDULE_APPT, reschedule_appt_list: [RESCHEDULE_APPT] };
+    const reply = String(await engine._rescheduleFetchAndShowSlots(session, data));
+    expect(reply).toMatch(/no available slots for rescheduling/i);
+    expect(reply).toMatch(/try again/i);
+
+    const updated = await db.getSession(session.id);
+    const d = JSON.parse(updated.data || '{}');
+    expect(d.no_slots_prompt.context).toBe('reschedule');
+    // reschedule_appt_list survives so "Try Again" shows the same list to
+    // re-pick from, instead of an empty list (the pre-fix behavior deleted it).
+    expect(d.reschedule_appt_list).toEqual([RESCHEDULE_APPT]);
+  });
+
+  // Regression: getAvailableTimes rethrows on failure (unlike
+  // getAvailableSlotsByBusinessAndDate, which swallows to []) — a 429 here
+  // previously propagated uncaught to handleMessage's top-level catch,
+  // producing a generic error instead of the no-slots retry prompt.
+  test('_rescheduleFetchAndShowSlots — getAvailableTimes throwing (e.g. a 429) is caught, not left uncaught', async () => {
+    engine.clinikoAPI.getAvailableTimes = jest.fn().mockRejectedValue({ status: 429, message: 'Request failed with status code 429' });
+    const session = await seedAt('RESCHEDULE_CONFIRM_INTENT', {
+      selected_reschedule_appt: RESCHEDULE_APPT,
+      reschedule_appt_list: [RESCHEDULE_APPT],
+    });
+    const data = { selected_reschedule_appt: RESCHEDULE_APPT, reschedule_appt_list: [RESCHEDULE_APPT] };
+
+    // Must not throw — the caller has no try/catch around this in the real
+    // handler chain below RESCHEDULE_CONFIRM_INTENT's 'yes' branch.
+    const reply = String(await engine._rescheduleFetchAndShowSlots(session, data));
+    expect(reply).toMatch(/trouble checking availability/i);
+    expect(reply).toMatch(/try again/i);
+
+    const updated = await db.getSession(session.id);
+    const d = JSON.parse(updated.data || '{}');
+    expect(d.reschedule_appt_list).toEqual([RESCHEDULE_APPT]);
+  });
+
   // ─── No gaps between pages ───────────────────────────────────────────────────
 
   // ─── _buildSlotList internal contract (unchanged) ────────────────────────────
@@ -5129,12 +5205,27 @@ describe('H3 regression — BOOK_SPECIFIC_CLINIC view_slots no-slots gives 3-opt
     expect(JSON.parse(updated.data || '{}').no_slots_prompt).toBeTruthy();
   });
 
-  test("reply '1' (go back and try again) navigates back one step", async () => {
+  // Was: "reply '1' (go back and try again) navigates back one step" — encoded
+  // the pre-Layer-2 behavior of Try Again silently discarding the selected
+  // clinic/physio/type and navigating elsewhere. Layer 2's _noSlotsRetry
+  // retries the exact same step in place instead.
+  test("reply '1' (Try Again) retries in place — clinic/physio/type preserved, not a navBack", async () => {
     const session = await seedViewSlotsSession('+6582200003');
     await engine.handleBookSpecificClinic(session, '');
     const updated = await db.getSession(session.id);
+    const d = JSON.parse(updated.data || '{}');
+    expect(d.no_slots_prompt).toEqual({ context: 'clinic', retry_step: 'view_slots' });
+    expect(d.selected_clinic?.id).toBe('BIZ-001');
+    expect(d.selected_physio?.id).toBe('PRAC-001');
+    expect(d.selected_appt_type?.id).toBe('AT-001');
+
+    // Retry succeeds this time — goes straight to a slot list, not back
+    // through physio/clinic/type selection.
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate = jest.fn().mockResolvedValue([
+      { slot: futureISO(2), appointment_type_name: 'Initial Consultation', practitioner_id: 'PRAC-001', business_id: 'BIZ-001' },
+    ]);
     const reply2 = await engine.handleBookSpecificClinic(updated, '1');
-    expect(String(reply2)).toMatch(/book|appointment|physio|type|clinic/i);
+    expect(String(reply2)).not.toMatch(/select a clinic|choose a physio|select visit type/i);
   });
 });
 
