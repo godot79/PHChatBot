@@ -1578,9 +1578,27 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.goToInteractiveMenu(session);
     }
 
-    // 1 — go back one step and try again
+    // 1 — try again
     if (text === '1') {
+      const retryStep = data.no_slots_prompt.retry_step;
       delete data.no_slots_prompt;
+
+      // Caller opted in with a retry_step: the user already made a complete,
+      // valid selection and only the final fetch failed (e.g. a transient
+      // Cliniko error). Re-run that step in place instead of walking back
+      // through navBack, which would discard the selection and force the
+      // user to re-answer the whole funnel.
+      if (retryStep) {
+        data.selection_step = retryStep;
+        session.data = JSON.stringify(data);
+        if (stateConst) session.conversation_state = stateConst;
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: stateConst,
+          data: session.data
+        });
+        return await backHandler.call(this, session, '');
+      }
+
       const { step, popped } = navBack(data);
       if (step) {
         clearForwardStateForPopped(data, popped);
@@ -2453,7 +2471,9 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (practitioners.length === 0) {
         // No physios have slots for this type — show standard no-slots prompt (no navPush so back goes to booking menu)
-        data.no_slots_prompt = { context: 'soonest' };
+        // retry_step: Try Again re-enters choose_type with selected_appt_type intact,
+        // re-running the physio search instead of restarting the funnel.
+        data.no_slots_prompt = { context: 'soonest', retry_step: 'choose_type' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return buttons(
           `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
@@ -2625,7 +2645,9 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (!filtered.length) {
         // Extremely unlikely since clinics are prefiltered, but handle defensively.
-        data.no_slots_prompt = { context: 'soonest' };
+        // retry_step: Try Again re-enters choose_clinic with selected_clinic intact,
+        // re-running the slot fetch instead of restarting the funnel.
+        data.no_slots_prompt = { context: 'soonest', retry_step: 'choose_clinic' };
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return buttons(`No slots found for ${data.selected_appt_type?.name}.`, [
           { id: '1', title: 'Try Again' },

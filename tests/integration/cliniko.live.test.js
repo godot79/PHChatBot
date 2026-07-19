@@ -105,6 +105,11 @@ jest.mock('../../src/core/DatabaseManager', () => {
       if (!this.db) return Promise.resolve();
       return new Promise((res, rej) => this.db.close(err => err ? rej(err) : res()));
     }
+
+    // No-op — this test's sessions table has no patient_state; _saveFunnelPref
+    // calls this defensively (.catch(() => {})) to persist the "book same again"
+    // shortcut preference, which is out of scope for these tests.
+    async upsertPatientState () { return null; }
   }
 
   return DatabaseManager;
@@ -739,4 +744,158 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
 
     expect(displayedNames).toEqual(storedNames);
   }, 90000);
+
+  // Reproduces the 2026-07-19 13:35 production incident: after choose_physio
+  // finds 0 available practitioners for the selected type (real "no slots" or
+  // a swallowed Cliniko error — indistinguishable to this code), the user hits
+  // "Try Again" (no_slots_prompt reply "1"). navBack() only has one checkpoint
+  // to return to — the initial 'choose_type' branch — and clearForwardStateForPopped
+  // wipes funnel_step/funnel_sel/selected_appt_type for that step. So "Try Again"
+  // doesn't retry the failed step; it restarts the ENTIRE appointment funnel,
+  // forcing the user to re-answer service / insurer / "new or returning patient?"
+  // from scratch. Uses this account's REAL funnel catalogue so the repro reflects
+  // the actual multi-step questions this account asks, not a synthetic fixture.
+  maybeIt('"Try Again" after 0-practitioner result discards the already-answered funnel selections instead of retrying', async () => {
+    const groups = cachedPractitioners || await tryLive(() => hk(() => api.getPractitionersByClinic()));
+    if (!groups?.length) { console.warn('[live] no clinics (or rate-limited) — skipping'); return; }
+    const allRawTypes = cachedRawTypes || await tryLive(() => hk(() => getAllAppointmentTypesForAllPractitioners(api, groups)));
+    if (!allRawTypes) { console.warn('[live] rate-limited fetching appointment types — skipping'); return; }
+
+    const catalogue = buildFunnelCatalogue(allRawTypes);
+    const services = [...new Set(catalogue.map(t => t.service).filter(Boolean))];
+    if (services.length < 2) {
+      console.warn('[live] this account only has one service category — funnel has no branch point to lose, skipping');
+      return;
+    }
+
+    const phone = `+8529${Math.floor(1000000 + Math.random() * 8999999)}`;
+    const id = await db.createSession(phone, null, 30);
+    await db.updateSession(id, {
+      verification_status: 'verified',
+      verified: 1,
+      conversation_state: 'BOOK_SOONEST',
+      data: JSON.stringify({
+        email: 'live-test@example.com',
+        selection_step: 'choose_type',
+        funnel_catalogue: catalogue, // real live catalogue — real service/insurer/patientType combos
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: true, auto: false }],
+      }),
+    });
+    let session = await db.getSession(id);
+
+    // Force the "0 available practitioners" branch deterministically — the failure
+    // mode itself (real zero-slots vs. a swallowed 429) is irrelevant to this bug;
+    // both land in the exact same no_slots_prompt / navBack path.
+    const realGetPractitionersByClinic = engine.clinikoAPI.getPractitionersByClinic;
+    engine.clinikoAPI.getPractitionersByClinic = async () => [];
+
+    try {
+      // Walk the REAL funnel (service → insurer → new/follow-up + duration, as
+      // applicable for this account) answering "1" at each prompt.
+      let reply = await engine.handleBookSoonest(session, '');
+      let data;
+      let guard = 0;
+      while (guard++ < 6) {
+        session = await db.getSession(id);
+        data = JSON.parse(session.data || '{}');
+        if (data.no_slots_prompt) break;
+        reply = await engine.handleBookSoonest(session, '1');
+      }
+
+      expect(data.no_slots_prompt).toBeTruthy(); // confirms we actually reached the bug's trigger condition
+      expect(data.selected_appt_type).toBeTruthy(); // the funnel WAS fully answered before failing
+      const preRetryFunnelSel = data.funnel_sel;
+      expect(preRetryFunnelSel && preRetryFunnelSel.patientType).toBeTruthy(); // proves a real new/follow-up (or equivalent) answer was captured
+
+      // User taps "Try Again".
+      session = await db.getSession(id);
+      await engine.handleBookSoonest(session, '1');
+      session = await db.getSession(id);
+      const afterRetry = JSON.parse(session.data || '{}');
+
+      // Ideal behavior: retrying should re-check availability for the SAME
+      // already-chosen appointment type, not force the user through the funnel
+      // again. Documents the live-reproduced regression.
+      expect(afterRetry.selected_appt_type).toEqual(data.selected_appt_type);
+    } finally {
+      engine.clinikoAPI.getPractitionersByClinic = realGetPractitionersByClinic;
+    }
+  }, 60000);
+});
+
+// =============================================================================
+// 10. getAvailableSlotsByBusinessAndDate — 429 must not silently present as
+//     "no slots" under the concurrent-load volume seen in production
+//     (2026-07-19 13:09 chatbot-webhook incident: BOOK_SOONEST choose_clinic
+//     fell back to buildAvailablePhysiosForTypeName's full practitioner sweep,
+//     which fired dozens of concurrent Cliniko GETs and got mass-429'd; every
+//     429 was swallowed into an empty slot array, so real availability was
+//     reported to the user as "no slots found").
+// =============================================================================
+describe('getAvailableSlotsByBusinessAndDate() — real slots must survive concurrent-load 429s (live regression)', () => {
+  maybeIt('a practitioner with known live slots must not silently lose them under production-scale concurrent load', async () => {
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    if (!groups.length) { console.warn('[live] no clinics — skipping'); return; }
+
+    const allPractitioners = [...new Map(
+      groups.flatMap(g => (g.practitioners || []).map(p => [p.id, { ...p, clinic_id: g.clinic_id }]))
+    ).values()];
+    if (allPractitioners.length < 8) {
+      console.warn('[live] too few practitioners to reproduce production burst volume — skipping');
+      return;
+    }
+
+    const from = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const to = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+
+    // Step 1 — clean baseline, no concurrent load: find a practitioner with real slots.
+    let target = null;
+    let baselineSlots = null;
+    for (const p of allPractitioners.slice(0, 6)) {
+      const slots = await hk(() => api.getAvailableSlotsByBusinessAndDate({
+        business_id: p.clinic_id, practitioner_id: p.id, from, to,
+      }));
+      if (slots.length) { target = p; baselineSlots = slots; break; }
+    }
+    if (!target) {
+      console.warn('[live] no practitioner in the sample has slots in the next 6 days — skipping');
+      return;
+    }
+
+    // Step 2 — detect real 429s without changing behavior (pass-through spy).
+    const SendMessageMod = require('../../src/api/SendMessage');
+    const realGet = SendMessageMod.prototype.get;
+    let saw429 = false;
+    SendMessageMod.prototype.get = function (...args) {
+      return realGet.apply(this, args).catch(err => {
+        if (err && err.status === 429) saw429 = true;
+        throw err;
+      });
+    };
+
+    // Step 3 — reproduce production's fan-out: re-request the same known-good
+    // practitioner concurrently alongside ~15 peers, matching the burst volume
+    // observed in the incident logs.
+    let targetResult;
+    try {
+      const burstPeers = allPractitioners.filter(p => p.id !== target.id).slice(0, 15);
+      [targetResult] = await hk(() => Promise.all([
+        api.getAvailableSlotsByBusinessAndDate({ business_id: target.clinic_id, practitioner_id: target.id, from, to }),
+        ...burstPeers.map(p => api.getAvailableSlotsByBusinessAndDate({ business_id: p.clinic_id, practitioner_id: p.id, from, to })),
+      ]));
+    } finally {
+      SendMessageMod.prototype.get = realGet;
+    }
+
+    if (!saw429) {
+      console.warn('[live] burst did not trigger a real Cliniko 429 this run — cannot confirm the regression live, skipping assertion');
+      return;
+    }
+
+    // A real 429 occurred inside this burst. Ideal behavior: the practitioner
+    // we just confirmed has slots must still show them — a transient rate
+    // limit must not silently present as "no availability".
+    expect(targetResult.length).toBeGreaterThan(0);
+    expect(targetResult.map(s => s.slot).sort()).toEqual(baselineSlots.map(s => s.slot).sort());
+  }, 60000);
 });
