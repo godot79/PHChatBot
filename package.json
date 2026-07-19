@@ -46,16 +46,15 @@
   },
   "jest": {
     "testMatch": [
-      "<rootDir>/tests/chatbotEngine.umbrella.test.js",
       "<rootDir>/tests/unit/**/*.test.js",
       "<rootDir>/tests/integration/**/*.test.js"
     ],
-    "testPathIgnorePatterns": [
-      "<rootDir>/tests/unit/services/AppointmentService.test.js",
-      "<rootDir>/tests/unit/core/DatabaseManager.test.js",
-      "<rootDir>/tests/unit/services/NotificationService.test.js",
-      "<rootDir>/tests/chatbotEngine.umbrella.test.js"
-    ],
     "forceExit": true
+  },
+  "allowScripts": {
+    "sqlite3@5.1.7": true,
+    "bcrypt@5.1.1": true,
+    "fsevents@2.3.3": true,
+    "unrs-resolver@1.11.1": true
   }
 }

@@ -1,0 +1,11 @@
+.gcloudignore
+.git
+.gitignore
+node_modules/
+.env
+.env.*
+!.env.example
+coverage
+*.log
+*.tgz
+.DS_Store

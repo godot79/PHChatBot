@@ -38,9 +38,86 @@ jest.mock('../../src/core/Logger', () =>
   }))
 );
 
+// In-memory DatabaseManager — keeps ChatbotEngine session state isolated from
+// the real on-disk database.sqlite while ClinikoAPI itself stays real (live HTTP).
+jest.mock('../../src/core/DatabaseManager', () => {
+  const sqlite3 = require('sqlite3').verbose();
+  const crypto  = require('crypto');
+
+  class DatabaseManager {
+    constructor () { this.db = null; this.isInitialized = false; }
+    generateSessionId () { return crypto.randomBytes(16).toString('hex'); }
+
+    async initialize () {
+      this.db = new sqlite3.Database(':memory:');
+      return new Promise((res, rej) => {
+        this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          phone_number TEXT NOT NULL,
+          patient_id TEXT,
+          verification_status TEXT DEFAULT 'pending',
+          conversation_state TEXT DEFAULT 'INTRO',
+          context TEXT DEFAULT '{}',
+          data TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+          expires_at DATETIME,
+          verified BOOLEAN DEFAULT 0
+        )`, (err) => { if (err) return rej(err); this.isInitialized = true; res(); });
+      });
+    }
+
+    async createSession (phoneNumber, patientId = null, durationMinutes = 30) {
+      const id = this.generateSessionId();
+      const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+      return new Promise((res, rej) =>
+        this.db.run(
+          'INSERT INTO sessions (id, phone_number, patient_id, expires_at) VALUES (?, ?, ?, ?)',
+          [id, phoneNumber, patientId, expiresAt],
+          (err) => (err ? rej(err) : res(id))
+        )
+      );
+    }
+
+    async getSession (id) {
+      return new Promise((res, rej) =>
+        this.db.get('SELECT * FROM sessions WHERE id = ?', [id],
+          (err, row) => (err ? rej(err) : res(row || null)))
+      );
+    }
+
+    async updateSession (id, updates) {
+      const allowed = ['patient_id','verification_status','conversation_state','context','last_activity','expires_at','verified','data'];
+      const fields = [], values = [];
+      for (const [k, v] of Object.entries(updates)) {
+        if (allowed.includes(k)) { fields.push(`${k} = ?`); values.push(v); }
+      }
+      if (!fields.length) return 0;
+      fields.push('last_activity = ?');
+      values.push(new Date().toISOString(), id);
+      return new Promise((res, rej) =>
+        this.db.run(`UPDATE sessions SET ${fields.join(', ')} WHERE id = ?`, values,
+          function (err) { err ? rej(err) : res(this.changes); })
+      );
+    }
+
+    close () {
+      if (!this.db) return Promise.resolve();
+      return new Promise((res, rej) => this.db.close(err => err ? rej(err) : res()));
+    }
+  }
+
+  return DatabaseManager;
+});
+
+const DatabaseManager = require('../../src/core/DatabaseManager');
+const SessionManager  = require('../../src/core/SessionManager');
+const ChatbotEngine   = require('../../src/core/ChatbotEngine');
+
 let api;
 let cachedClinics = null;
 let cachedPractitioners = null;
+let cachedRawTypes = null; // getAllAppointmentTypesForAllPractitioners() result — ~30 live GETs, reused across describe blocks to avoid Cliniko rate limiting
 
 beforeAll(() => {
   api = new ClinikoAPI();
@@ -367,6 +444,7 @@ describe('getAllAppointmentTypesForAllPractitioners() + buildFunnelCatalogue() �
   maybeIt('returns an array where every entry has id, name, and duration_in_minutes', async () => {
     const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
     allRawTypes = await hk(() => getAllAppointmentTypesForAllPractitioners(api, groups));
+    cachedRawTypes = allRawTypes;
     expect(Array.isArray(allRawTypes)).toBe(true);
     expect(allRawTypes.length).toBeGreaterThan(0);
 
@@ -537,4 +615,128 @@ describe('getAvailableTimes() — 21-day window diagnostic (B1)', () => {
     // Diagnostic only — outcome is logged, not asserted
     expect(true).toBe(true);
   }, 30000);
+});
+
+// =============================================================================
+// 12. handleBookSoonest choose_physio — row/selection consistency (live)  (L-F)
+// =============================================================================
+// Regression coverage for the "picked Yashmita, booked Brian" production bug:
+// the physio list shown to the user was built from raw Cliniko practitioner
+// order, but the numeric reply was resolved against a separately-sorted list
+// (data.practitioner_list). This drives the real ChatbotEngine.handleBookSoonest
+// against the live HK account's actual practitioner order to prove the
+// rendered row order and the stored index-lookup order are identical.
+//
+// Deliberately a single call, not a "pick row 1, reply '1', check who got
+// selected" round trip: a second call re-triggers a full clinic+slot live
+// sweep, which is slow, doubles Cliniko rate-limit exposure, and is
+// susceptible to slot availability changing between calls. Comparing the
+// rendered list against the stored list within one response proves the same
+// invariant (row N == practitioner_list[N-1]) without that fragility — this
+// is exactly what would have caught the original bug (see the equivalent
+// mocked round-trip tests in chatbot.integration.test.js for the full
+// select-then-verify behavioral proof).
+describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', () => {
+  let engine, db, sm;
+
+  beforeAll(async () => {
+    if (!LIVE) return;
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm; // real ClinikoAPI stays on engine — live HTTP calls
+  });
+
+  afterAll(() => {
+    if (!LIVE) return;
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  async function seedSoonestAtType(apptTypeName) {
+    const phone = `+8529${Math.floor(1000000 + Math.random() * 8999999)}`;
+    const id = await db.createSession(phone, null, 30);
+    await db.updateSession(id, {
+      verification_status: 'verified',
+      verified: 1,
+      conversation_state: 'BOOK_SOONEST',
+      data: JSON.stringify({
+        email: 'live-test@example.com',
+        selection_step: 'choose_type',
+        selected_appt_type: { name: apptTypeName },
+        // Pre-seeded non-empty so handleBookSoonest skips its own buildTypeCatalogue()
+        // rebuild (another full practitioner sweep) — we already have the raw types.
+        funnel_catalogue: [{}],
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
+      }),
+    });
+    return db.getSession(id);
+  }
+
+  // buildAvailablePhysiosForTypeName fires ~N concurrent requests (one per
+  // practitioner). A transient Cliniko 429 here is not a product defect —
+  // treat it the same as "no slots found" elsewhere in this file: retry once,
+  // then degrade to an inconclusive skip rather than fail the suite.
+  async function tryLive(fn) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e?.status !== 429) throw e;
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        return await fn();
+      } catch (e2) {
+        if (e2?.status !== 429) throw e2;
+        return undefined; // signal caller to skip
+      }
+    }
+  }
+
+  maybeIt('the rendered choose_physio list order matches the stored practitioner_list order used for numeric lookup', async () => {
+    const groups = cachedPractitioners || await tryLive(() => hk(() => api.getPractitionersByClinic()));
+    if (!groups?.length) { console.warn('[live] no clinics (or rate-limited) — skipping'); return; }
+    // Reuse the ~30-request sweep from an earlier describe block if it already ran
+    // this session — issuing it twice back-to-back can trip Cliniko's rate limiter.
+    const allRawTypes = cachedRawTypes || await tryLive(() => hk(() => getAllAppointmentTypesForAllPractitioners(api, groups)));
+    if (!allRawTypes) { console.warn('[live] rate-limited fetching appointment types — skipping'); return; }
+
+    // Try the appointment type names backed by the most distinct type IDs first —
+    // best chance of landing on a live multi-physio choose_physio list. Capped
+    // at 3 — each attempt is a full practitioner sweep.
+    const nameCounts = new Map();
+    for (const t of allRawTypes) {
+      if (!t?.name || /UWC/i.test(t.name)) continue;
+      nameCounts.set(t.name, (nameCounts.get(t.name) || 0) + 1);
+    }
+    const candidateNames = [...nameCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name)
+      .slice(0, 3);
+    if (!candidateNames.length) { console.warn('[live] no appointment types found — skipping'); return; }
+
+    let displayedNames = [];
+    let session = null;
+    let triedName = null;
+    for (const name of candidateNames) {
+      session = await seedSoonestAtType(name);
+      const reply = await tryLive(() => hk(() => engine.handleBookSoonest(session, '')));
+      if (reply === undefined) { console.warn('[live] rate-limited during physio sweep — skipping'); return; }
+      displayedNames = [...String(reply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+      triedName = name;
+      if (displayedNames.length > 1) break; // found a live multi-physio list
+    }
+
+    if (displayedNames.length < 2) {
+      console.warn(`[live] none of the top ${candidateNames.length} appointment types currently have >1 available physio with slots (last tried "${triedName}") — skipping row-order check`);
+      return;
+    }
+
+    const updated = await db.getSession(session.id);
+    const d = JSON.parse(updated.data || '{}');
+    const storedNames = (d.practitioner_list || []).map(p =>
+      p.display_name || [p.first_name, p.last_name].filter(Boolean).join(' ')
+    );
+
+    expect(displayedNames).toEqual(storedNames);
+  }, 90000);
 });

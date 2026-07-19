@@ -2368,7 +2368,7 @@ if (/^p(rev)?$/i.test(text)) {
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
           const reply = buildInteractiveSelectionList({
-            items: physios,
+            items: data.practitioner_list,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
             header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
@@ -2470,7 +2470,7 @@ if (/^p(rev)?$/i.test(text)) {
 
       if (practitioners.length > 1) {
         const reply = buildInteractiveSelectionList({
-          items: practitioners,
+          items: data.practitioner_list,
           rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
           page: 0,
           header: `Select a practitioner for ${data.selected_appt_type.name}:`
@@ -2570,7 +2570,7 @@ if (/^p(rev)?$/i.test(text)) {
             return await this.handleBookSoonest(session, '');
           }
           const reply = buildInteractiveSelectionList({
-            items: rebuilt,
+            items: data.practitioner_list,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
             header: `No slots found. Select another practitioner for ${data.selected_appt_type.name}:`

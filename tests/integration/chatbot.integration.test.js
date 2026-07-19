@@ -2138,12 +2138,18 @@ describe('Booking menu and flow coverage', () => {
         navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
       };
       const session = await seedAt('BOOK_SOONEST', data);
-      await callHandler(engine, ['handleBookSoonest'], session, '');
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       const names = (d.practitioner_list || []).map(p => p.first_name || p.display_name?.split(' ')[0]);
       // Amy < Marcus < Zara
       expect(names[0]).toMatch(/Amy/i);
       expect(names[names.length - 1]).toMatch(/Zara/i);
+
+      // The rendered list (what the user actually taps) must be in the SAME
+      // order as the stored practitioner_list (what numeric replies index
+      // into) — otherwise row N on screen resolves to the wrong practitioner.
+      const displayedNames = [...reply.matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+      expect(displayedNames).toEqual(d.practitioner_list.map(p => p.display_name));
     });
   });
 
@@ -2593,6 +2599,33 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/practitioner|jolinna|wei/i);
     });
 
+    // Regression: choose_physio list rendered from an alphabetically-sorted
+    // practitioner_list (for index lookup), but the reply was built from the
+    // raw, un-sorted API order — so the row a user tapped and the practitioner
+    // that got selected could diverge whenever API order != alphabetical order.
+    // Cliniko's practitioner order is not alphabetical, so this fired in prod.
+    test('numeric reply selects the physio actually shown at that row, regardless of sort order', async () => {
+      // API returns physios in non-alphabetical order (Wei before Jolinna).
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_2, PHYSIO_1] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1,
+        funnel_catalogue: [FUNNEL_CAT_1],
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      const row1Name = reply.match(/^1\.\s+(.+)$/m)[1].trim();
+
+      await callHandler(engine, ['handleBookSoonest'], session, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      // A single-clinic result auto-advances all the way to SELECT_SLOT, which
+      // moves selected_physio into prev_state_data — check both locations.
+      const selected = d.selected_physio || d.prev_state_data?.selected_physio;
+      const selectedName = `${selected.first_name} ${selected.last_name}`;
+      expect(selectedName).toBe(row1Name);
+    });
+
     test('valid numeric selection → advances to clinic or slot list', async () => {
       const session = await seedAt('BOOK_SOONEST', {
         selection_step: 'choose_physio',
@@ -2668,6 +2701,67 @@ describe('Booking menu and flow coverage', () => {
 
       typeResolvers.forEach(r => r());
       await handlerPromise;
+
+      // getAppointmentTypes is an instance own property — restore it since beforeEach doesn't reset it
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
+
+    // Same sort/render divergence as above, but for the back-nav path
+    // (choose_clinic → back → choose_physio), which rebuilds the physio list
+    // independently.
+    test('back from choose_clinic then numeric reply selects the physio shown at that row', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_2, PHYSIO_1] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+        clinic_list: [CLINIC_1],
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      const row1Name = reply.match(/^1\.\s+(.+)$/m)[1].trim();
+
+      await callHandler(engine, ['handleBookSoonest'], session, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      const selected = d.selected_physio || d.prev_state_data?.selected_physio;
+      const selectedName = `${selected.first_name} ${selected.last_name}`;
+      expect(selectedName).toBe(row1Name);
+    });
+
+    // Same divergence again, but for the path where the originally-selected
+    // physio turns out to have zero slots and the list is rebuilt excluding them.
+    test('after zero-slot physio is excluded, numeric reply selects the physio shown at that row', async () => {
+      const AMY = { id: 'PRAC-003', first_name: 'Amy', last_name: 'Lee' };
+      // Raw order: Wei, Jolinna (no slots), Amy. Alphabetical: Amy, Jolinna, Wei.
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_2, PHYSIO_1, AMY] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: TYPE_1.name },
+      ]);
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ practitioner_id }) => {
+        if (practitioner_id === PHYSIO_1.id) return Promise.resolve([]); // originally-selected physio has no slots after all
+        return Promise.resolve([
+          { slot: futureISO(2), appointment_type_name: TYPE_1.name, practitioner_id, business_id: 'BIZ-001' },
+        ]);
+      });
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        selected_appt_type: TYPE_1,
+        selected_physio: PHYSIO_1,
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      const row1Name = reply.match(/^1\.\s+(.+)$/m)[1].trim();
+
+      await callHandler(engine, ['handleBookSoonest'], session, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      const selected = d.selected_physio || d.prev_state_data?.selected_physio;
+      const selectedName = `${selected.first_name} ${selected.last_name}`;
+      expect(selectedName).toBe(row1Name);
 
       // getAppointmentTypes is an instance own property — restore it since beforeEach doesn't reset it
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
