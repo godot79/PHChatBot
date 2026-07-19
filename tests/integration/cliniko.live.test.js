@@ -821,6 +821,56 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
       engine.clinikoAPI.getPractitionersByClinic = realGetPractitionersByClinic;
     }
   }, 60000);
+
+  // Reproduces the 2026-07-19 "no send button" incident directly against this
+  // account's real catalogue: Physiotherapy self-pay has 5 real insurers, so
+  // the insurer prompt (Self-pay + 5) is a real 6-row list — the exact
+  // production case that overflowed the unpaginated list() call.
+  maybeIt('any funnel list step with >5 real options pages at 5, never dumps everything in one WhatsApp list', async () => {
+    const groups = cachedPractitioners || await tryLive(() => hk(() => api.getPractitionersByClinic()));
+    if (!groups?.length) { console.warn('[live] no clinics (or rate-limited) — skipping'); return; }
+    const allRawTypes = cachedRawTypes || await tryLive(() => hk(() => getAllAppointmentTypesForAllPractitioners(api, groups)));
+    if (!allRawTypes) { console.warn('[live] rate-limited fetching appointment types — skipping'); return; }
+
+    const catalogue = buildFunnelCatalogue(allRawTypes);
+    const services = [...new Set(catalogue.map(t => t.service).filter(Boolean))];
+
+    // Find a service whose insurer list (Self-pay + real insurers) exceeds 5 —
+    // this account's real Physiotherapy category does.
+    let overflowService = null;
+    for (const s of services) {
+      const insurers = [...new Set(catalogue.filter(t => t.service === s).map(t => t.insurer).filter(i => i !== null))];
+      if (insurers.length + 1 > 5) { overflowService = s; break; }
+    }
+    if (!overflowService) {
+      console.warn('[live] no service currently has >5 insurer options — skipping (nothing to overflow)');
+      return;
+    }
+
+    const phone = `+8529${Math.floor(1000000 + Math.random() * 8999999)}`;
+    const id = await db.createSession(phone, null, 30);
+    await db.updateSession(id, {
+      verification_status: 'verified',
+      verified: 1,
+      conversation_state: 'BOOK_SOONEST',
+      data: JSON.stringify({
+        email: 'live-test@example.com',
+        selection_step: 'choose_type',
+        funnel_catalogue: catalogue,
+        funnel_step: 'insurer',
+        funnel_sel: { service: overflowService },
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: true, auto: false }],
+      }),
+    });
+    const session = await db.getSession(id);
+
+    const reply = await tryLive(() => engine.handleBookSoonest(session, ''));
+    if (reply === undefined) { console.warn('[live] rate-limited — skipping'); return; }
+
+    const numberedLines = [...String(reply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+    expect(numberedLines.length).toBeLessThanOrEqual(5);
+    expect(String(reply)).toMatch(/more/i);
+  }, 60000);
 });
 
 // =============================================================================

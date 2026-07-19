@@ -2562,6 +2562,85 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_SOONEST — funnel step pagination ───────────────────────────────────
+  // Reproduces the 2026-07-19 production incident: the funnel's service/insurer/
+  // final_pick prompts rendered every option in one unpaginated WhatsApp list
+  // (unlike choose_physio/choose_clinic, which page at 5/4). A 6-row list pushed
+  // the Send button off-screen — the user could see the list but never reply.
+  describe('BOOK_SOONEST — funnel step pagination', () => {
+    const SERVICES = ['Clinical Pilates', 'Osteopathy', 'Paediatrics', 'Physiotherapy', 'Sports Massage', 'Womens Health'];
+
+    test('service step with 6 services pages at 5, not all 6 at once', async () => {
+      const catalogue = SERVICES.map((s, i) => ({
+        id: `AT-${i}`, name: `${s} Visit`, service: s, insurer: null, patientType: null, duration: 30,
+      }));
+      const session = await seedAt('BOOK_SOONEST', { selection_step: 'choose_type', funnel_catalogue: catalogue });
+
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      const numberedLines = [...reply.matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+
+      expect(numberedLines.length).toBeLessThanOrEqual(5);
+      expect(reply).toMatch(/more/i);
+    });
+
+    test('the 6th service (page 2 via "next") resolves correctly, not services[0]', async () => {
+      const catalogue = SERVICES.map((s, i) => ({
+        id: `AT-${i}`, name: `${s} Visit`, service: s, insurer: null, patientType: null, duration: 30,
+      }));
+      const session = await seedAt('BOOK_SOONEST', { selection_step: 'choose_type', funnel_catalogue: catalogue });
+
+      await callHandler(engine, ['handleBookSoonest'], session, ''); // page 0 (services 1-5)
+      const page2 = await callHandler(engine, ['handleBookSoonest'], session, 'next');
+      const page2Lines = [...page2.matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+
+      expect(page2Lines).toHaveLength(1); // only the 6th service remains
+      expect(page2Lines[0]).toMatch(/Womens Health/i); // last alphabetically
+
+      // Reply "1" on page 2 must resolve to the 6th service, not the page-0 first item
+      await callHandler(engine, ['handleBookSoonest'], session, '1');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const resolvedName = d.selected_appt_type?.name || d.funnel_sel?.service || '';
+      expect(resolvedName).toMatch(/Womens Health/i);
+    });
+
+    test('insurer step with 6 options (Self-pay + 5 insurers) pages at 5 — the exact reported scenario', async () => {
+      const insurers = ['AXA PPP', 'April International', 'Bupa Global', 'Bupa HealthNet', 'Cigna International'];
+      const catalogue = [
+        { id: 'AT-SELF', name: 'Physio Self-pay', service: 'Physiotherapy', insurer: null, patientType: null, duration: 30 },
+        ...insurers.map((ins, i) => ({ id: `AT-INS-${i}`, name: `Physio ${ins}`, service: 'Physiotherapy', insurer: ins, patientType: null, duration: 30 })),
+      ];
+      const session = await seedAt('BOOK_SOONEST', { selection_step: 'choose_type', funnel_catalogue: catalogue });
+
+      // Single service auto-advances straight to the insurer prompt.
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      expect(reply).toMatch(/covered/i);
+      const numberedLines = [...reply.matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+
+      expect(numberedLines.length).toBeLessThanOrEqual(5);
+      expect(reply).toMatch(/more/i);
+    });
+
+    test('final_pick step with 6 duration/type combos pages at 5', async () => {
+      const catalogue = [
+        { id: 'AT-0', name: 'New 30', service: 'Physiotherapy', insurer: null, patientType: 'new', duration: 30 },
+        { id: 'AT-1', name: 'New 40', service: 'Physiotherapy', insurer: null, patientType: 'new', duration: 40 },
+        { id: 'AT-2', name: 'New 60', service: 'Physiotherapy', insurer: null, patientType: 'new', duration: 60 },
+        { id: 'AT-3', name: 'Follow 30', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 30 },
+        { id: 'AT-4', name: 'Follow 40', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 40 },
+        { id: 'AT-5', name: 'Follow 60', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 60 },
+      ];
+      const session = await seedAt('BOOK_SOONEST', { selection_step: 'choose_type', funnel_catalogue: catalogue });
+
+      // Single service, no insurers → auto-advances straight to final_pick.
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      const numberedLines = [...reply.matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+
+      expect(numberedLines.length).toBeLessThanOrEqual(5);
+      expect(reply).toMatch(/more/i);
+    });
+  });
+
   // ─── BOOK_SOONEST — choose_physio ────────────────────────────────────────────
   describe('BOOK_SOONEST — choose_physio', () => {
     test('0 practitioners → standard 3-button no-slots prompt', async () => {

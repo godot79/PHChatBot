@@ -2085,6 +2085,7 @@ if (/^p(rev)?$/i.test(text)) {
       }
       data.funnel_step = 'service';
       data.funnel_sel = {};
+      data.appt_type_page = 0;
     }
 
     // Shortcut handler
@@ -2099,6 +2100,7 @@ if (/^p(rev)?$/i.test(text)) {
       // "change" or shortcut no longer available → restart funnel
       data.funnel_step = 'service';
       data.funnel_sel = {};
+      data.appt_type_page = 0;
       text = '';
     }
 
@@ -2116,20 +2118,25 @@ if (/^p(rev)?$/i.test(text)) {
           sel.service = services[0];
           data.funnel_sel = sel;
           data.funnel_step = 'insurer';
+          data.appt_type_page = 0;
           continue;
         }
-        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
-        if (idx >= 0 && idx < services.length) {
-          sel.service = services[idx];
+        const page = data.appt_type_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, services.length - pageStart)) {
+          sel.service = services[pageStart + localNum - 1];
           data.funnel_sel = sel;
           data.funnel_step = 'insurer';
+          data.appt_type_page = 0;
           text = '';
           continue;
         }
         {
           const menu = services.length <= 3
             ? buttons('What type of appointment?', services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
-            : list('What type of appointment?', 'Select type', services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 24) })));
+            : buildInteractiveSelectionList({ header: 'What type of appointment?', items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
           return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
         }
       }
@@ -2142,21 +2149,27 @@ if (/^p(rev)?$/i.test(text)) {
           sel.insurer = null;
           data.funnel_sel = sel;
           data.funnel_step = 'final_pick';
+          data.appt_type_page = 0;
           continue;
         }
         const options = ['Self-pay', ...insurers];
-        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
-        if (idx >= 0 && idx < options.length) {
-          sel.insurer = options[idx] === 'Self-pay' ? null : options[idx];
+        const page = data.appt_type_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, options.length - pageStart)) {
+          const picked = options[pageStart + localNum - 1];
+          sel.insurer = picked === 'Self-pay' ? null : picked;
           data.funnel_sel = sel;
           data.funnel_step = 'final_pick';
+          data.appt_type_page = 0;
           text = '';
           continue;
         }
         {
           const menu = options.length <= 3
             ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-            : list('How is this covered?', 'Select coverage', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 24) })));
+            : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
           return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
         }
       }
@@ -2190,20 +2203,24 @@ if (/^p(rev)?$/i.test(text)) {
         const allSameDuration   = combos.every(c => c.duration    === combos[0].duration);
         const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
         const ptLabels = { new: 'New Patient', follow_up: 'Follow-Up' };
-        const comboLabels = combos.map(c => {
+        const comboLabel = (c) => {
           const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
           const durPart = !allSameDuration ? `${c.duration} min` : null;
           return [ptPart, durPart].filter(Boolean).join(' ') || `${c.duration} min`;
-        });
+        };
         const bodyText = allSameDuration && !allSamePatientType
           ? 'New or returning patient?'
           : allSamePatientType && !allSameDuration
             ? 'Select duration:'
             : 'Select appointment type:';
-        const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
-        if (idx >= 0 && idx < combos.length) {
-          sel.patientType = combos[idx].patientType;
-          sel.duration    = combos[idx].duration;
+        const page = data.appt_type_page || 0;
+        const pageStart = interactivePageStart(page);
+        const pageSize = interactivePageSize(page);
+        const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
+        if (localNum >= 1 && localNum <= Math.min(pageSize, combos.length - pageStart)) {
+          const picked = combos[pageStart + localNum - 1];
+          sel.patientType = picked.patientType;
+          sel.duration    = picked.duration;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
@@ -2211,8 +2228,8 @@ if (/^p(rev)?$/i.test(text)) {
         }
         {
           const menu = combos.length <= 3
-            ? buttons(bodyText, comboLabels.map((l, i) => ({ id: String(i + 1), title: l.slice(0, 20) })))
-            : list(bodyText, 'Select', comboLabels.map((l, i) => ({ id: String(i + 1), title: l.slice(0, 24) })));
+            ? buttons(bodyText, combos.map((c, i) => ({ id: String(i + 1), title: comboLabel(c).slice(0, 20) })))
+            : buildInteractiveSelectionList({ header: bodyText, items: combos, rowFn: (c) => ({ title: comboLabel(c).slice(0, 24) }), page });
           return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
         }
       }
