@@ -647,7 +647,12 @@ class ClinikoAPI {
       return results;
     } catch (error) {
       this.logger.error(`getPractitionersByClinic failed: ${error}`);
-      return [];
+      // Same _partial convention as getAvailableSlotsByBusinessAndDate — a
+      // failed fetch (e.g. a 429) is not a confirmed "zero clinics" result.
+      // Not cached (see comment above): the next call retries for real.
+      const empty = [];
+      Object.defineProperty(empty, '_partial', { value: true, enumerable: false, configurable: true });
+      return empty;
     }
   }
 
@@ -848,7 +853,6 @@ class ClinikoAPI {
     try {
       const url = `/businesses/${businessId}`;
       const result = await new SendMessage(url, {}).get();
-      console.log('[DEBUG getBusinessById result]', result);
       // The response IS the business object, NOT { business: ... }
       if (result && result.id) {
         _cacheSet(_businessByIdCache, cacheKey, result, GROUPS_CACHE_TTL_MS);

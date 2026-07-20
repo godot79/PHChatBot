@@ -3016,6 +3016,19 @@ if (/^p(rev)?$/i.test(text)) {
         data.practitioner_list = sortPractitioners((practitioners || []).map(p => ({ id: String(p.id), ...p })));
         data.practitioner_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+
+        if (data.practitioner_list.length === 0) {
+          // groups came back empty — could be a genuine "no practitioners
+          // offer this type" or a degraded getPractitionersByClinic() fetch
+          // (e.g. a 429). Delete practitioner_list so retry re-fetches
+          // instead of finding the same empty array.
+          delete data.practitioner_list;
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
+            context: 'date_physio_list',
+            result: groups,
+            confirmedMessage: `No practitioners offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
+          });
+        }
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3279,6 +3292,21 @@ if (/^p(rev)?$/i.test(text)) {
         data.practitioner_list = sortPractitioners(allPhysios.filter(p => { if (seen.has(`${p.id}`)) return false; seen.add(`${p.id}`); return true; }));
         data.practitioner_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+
+        if (data.practitioner_list.length === 0) {
+          // groups came back empty — could be a genuine "no practitioners
+          // configured" or a degraded getPractitionersByClinic() fetch (e.g.
+          // a 429). Without this check the list below silently renders with
+          // only a "0. Back" row and no explanation. Delete practitioner_list
+          // so retry re-fetches instead of finding the same empty array and
+          // skipping straight back to this same dead end.
+          delete data.practitioner_list;
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
+            context: 'physio_list',
+            result: groups,
+            confirmedMessage: 'No practitioners are available right now.',
+          });
+        }
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3603,6 +3631,19 @@ if (/^p(rev)?$/i.test(text)) {
         }) : { advanced: false };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
+
+        if (clinics.length === 0) {
+          // groups came back empty — could be a genuine "no clinics
+          // configured" or a degraded getPractitionersByClinic() fetch (e.g.
+          // a 429). Delete clinic_list so retry re-fetches instead of
+          // finding the same empty array and skipping straight back here.
+          delete data.clinic_list;
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
+            context: 'clinic_list',
+            result: groups,
+            confirmedMessage: 'No clinics are available right now.',
+          });
+        }
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
@@ -3745,6 +3786,19 @@ if (/^p(rev)?$/i.test(text)) {
         }) : { advanced: false };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
+
+        if (practitioners.length === 0) {
+          // groups came back empty — could be a genuine "no practitioners at
+          // this clinic offer this type" or a degraded getPractitionersByClinic()
+          // fetch (e.g. a 429). Delete practitioner_list so retry re-fetches
+          // instead of finding the same empty array.
+          delete data.practitioner_list;
+          return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
+            context: 'clinic_physio_list',
+            result: groups,
+            confirmedMessage: `No practitioners at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'} offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
+          });
+        }
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {

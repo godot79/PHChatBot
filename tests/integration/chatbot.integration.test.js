@@ -1787,6 +1787,41 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       expect(String(d.selected_physio?.id)).toBe('PRAC-006');
     });
+
+    // Regression: 0 practitioners offering this type used to render an empty
+    // buildInteractiveSelectionList with only "0. Back" and no explanation.
+    test('0 practitioners for this type → no_slots_prompt shown instead of a bare "0. Back" dead end', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_physio',
+        selected_date: '2026-08-01',
+        selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+        navigation_chain: [
+          { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+          { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+        ],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/no practitioners offer/i);
+      expect(reply).toMatch(/try again/i);
+
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.no_slots_prompt).toEqual({ context: 'date_physio_list', retry_step: 'choose_physio' });
+      expect(d.practitioner_list).toBeUndefined();
+
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([{ id: 'AT-001', name: 'Return Visit' }]);
+      const retryReply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '1'));
+      expect(retryReply).toMatch(/jolinna/i);
+
+      // getAppointmentTypes is an instance own property — restore it since beforeEach doesn't reset it
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
   });
 
   // ─── BOOK_SPECIFIC_DATE — choose_clinic ──────────────────────────────────────
@@ -2016,6 +2051,29 @@ describe('Booking menu and flow coverage', () => {
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
       const reply   = await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
       expect(reply).toMatch(/Jolinna|Wei|physio|practitioner/i);
+    });
+
+    // Regression: getPractitionersByClinic() returning [] (genuinely zero
+    // practitioners, or a degraded fetch — e.g. a 429) used to fall straight
+    // through to buildInteractiveSelectionList with an empty items array,
+    // rendering only a "0. Back" row with no explanation and no way to retry.
+    test('0 practitioners → no_slots_prompt shown instead of a bare "0. Back" dead end', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/no practitioners/i);
+      expect(reply).toMatch(/try again/i);
+
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.no_slots_prompt).toEqual({ context: 'physio_list', retry_step: 'choose_physio' });
+      expect(d.practitioner_list).toBeUndefined(); // cleared so retry re-fetches, not stuck on []
+
+      // Retry succeeds this time — shows the real physio list, not the same dead end.
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+      ]);
+      const retryReply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, '1'));
+      expect(retryReply).toMatch(/jolinna/i);
     });
 
     test("interactive 'back' id from choose_type → returns to physio list (same as typing '0')", async () => {
@@ -2363,6 +2421,27 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/Prohealth|clinic/i);
     });
 
+    // Regression: 0 clinics used to render an empty buildInteractiveSelectionList
+    // with only "0. Back" and no explanation.
+    test('0 clinics → no_slots_prompt shown instead of a bare "0. Back" dead end', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toMatch(/no clinics/i);
+      expect(reply).toMatch(/try again/i);
+
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.no_slots_prompt).toEqual({ context: 'clinic_list', retry_step: 'choose_clinic' });
+      expect(d.clinic_list).toBeUndefined();
+
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+        { clinic_id: 'BIZ-002', clinic_name: 'Prohealth City',     practitioners: [{ id: 'PRAC-002', first_name: 'Wei',     last_name: 'Tan'  }] },
+      ]);
+      const retryReply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, '1'));
+      expect(retryReply).toMatch(/prohealth/i);
+    });
+
     test("interactive 'back' id from choose_type → returns to clinic list (same as typing '0')", async () => {
       const typeStepData = {
         selection_step: 'choose_type',
@@ -2470,6 +2549,38 @@ describe('Booking menu and flow coverage', () => {
       resolvers.forEach(r => r());
       await handlerPromise;
 
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
+
+    // Regression: 0 practitioners at this clinic offering this type used to
+    // render an empty buildInteractiveSelectionList with only "0. Back".
+    test('0 practitioners at this clinic for this type → no_slots_prompt shown instead of a bare "0. Back" dead end', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_physio',
+        selected_clinic: { id: 'BIZ-001', business_name: 'Prohealth In Touch' },
+        selected_appt_type: { name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'] },
+        appt_type_name_to_ids_norm: { 'initial 60 min visit (new clients)': ['AT-001'] },
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toMatch(/no practitioners/i);
+      expect(reply).toMatch(/try again/i);
+
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.no_slots_prompt).toEqual({ context: 'clinic_physio_list', retry_step: 'choose_physio' });
+      expect(d.practitioner_list).toBeUndefined();
+
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' }]);
+      const retryReply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, '1'));
+      expect(retryReply).toMatch(new RegExp(PHYSIO_1.first_name, 'i'));
+
+      // getAppointmentTypes is an instance own property — restore it since beforeEach doesn't reset it
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
         { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
         { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
