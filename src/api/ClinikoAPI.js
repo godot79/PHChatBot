@@ -8,12 +8,17 @@ const RegionContext = require('../core/RegionContext');
 const EXCLUDED_CLINIC_PATTERN = /UWC|physio\s*focus/i;
 
 // Short-lived cache for getPractitionersByClinic(), keyed by region.
-// Practitioners change rarely; 30 s collapses the 14 call sites in the engine
-// to at most one real Cliniko fetch per region per request window.
+// Practitioners change rarely; 120 s collapses the 14 call sites in the engine
+// to at most one real Cliniko fetch per region per request window. Was 30 s,
+// but a single BOOK_SOONEST catalogue-build fanout across ~34-40 practitioners
+// regularly takes 70-90 s on its own, so the old TTL had already expired by
+// the time buildAvailablePhysiosForTypeName re-scanned the same practitioners
+// moments later — forcing a full second live fanout that collided with
+// Cliniko and caused mass 15s timeouts. 120 s comfortably covers that window.
 const _groupsCache = new Map();
-const GROUPS_CACHE_TTL_MS = 30_000;
+const GROUPS_CACHE_TTL_MS = 120_000;
 
-// Same 30 s pattern for the other rarely-changing lookups that a single
+// Same pattern for the other rarely-changing lookups that a single
 // availability sweep (buildAvailablePhysiosForTypeName) re-fetches dozens of
 // times for data already implied by the cached groups above.
 const _apptTypesCache = new Map();          // key: `${region}:${practitioner_id}`

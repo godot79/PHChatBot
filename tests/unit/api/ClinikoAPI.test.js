@@ -459,7 +459,7 @@ describe('ClinikoAPI', () => {
         .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
 
       await api.getPractitionersByClinic();
-      jest.advanceTimersByTime(31_000);           // expire the cache entry
+      jest.advanceTimersByTime(121_000);          // expire the cache entry
       await api.getPractitionersByClinic();
 
       expect(mockGet).toHaveBeenCalledTimes(4);  // 2 fetches × (getClinics + 1 clinic)
