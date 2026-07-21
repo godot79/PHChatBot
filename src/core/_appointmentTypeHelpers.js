@@ -161,7 +161,19 @@ function resolveApptFromFunnel(catalogue, { service, patientType, insurer, durat
   if (!matches.length) return null;
   const name = matches[0].name;
   const ids  = [...new Set(matches.map(t => t.id))];
-  return { name, ids, norm_name: name.toLowerCase().replace(/\s+/g, ' ').trim() };
+  // Must match normalizeTypeName's hyphen-stripping (ChatbotEngine.js) — this
+  // norm_name becomes handleBookSoonest's typeNorm, compared against slot
+  // type names normalized the same way. Without stripping hyphens here, any
+  // hyphenated Cliniko type name (e.g. "Follow-Up Appointment-Physiotherapy")
+  // never matches, silently zeroing out real availability (confirmed live
+  // 2026-07-21/22 — hundreds of real slots existed, app reported none).
+  const norm_name = name
+    .toLowerCase()
+    .replace(/[‐-―]/g, '-')
+    .replace(/-/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { name, ids, norm_name };
 }
 
 module.exports = {

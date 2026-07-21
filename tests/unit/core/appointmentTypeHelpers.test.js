@@ -515,6 +515,23 @@ describe('resolveApptFromFunnel()', () => {
     expect(result.norm_name).toBe('new patient 60 min');
   });
 
+  // Regression: norm_name used to keep hyphens while every other normalizer
+  // in the codebase (normalizeTypeName, this file's getPractitionersForTypeName)
+  // strips them to spaces. handleBookSoonest compares this norm_name directly
+  // against slot type names run through the hyphen-stripping normalizer, so a
+  // hyphenated raw Cliniko name (e.g. "Follow-Up Appointment-Physiotherapy")
+  // never matched — silently reporting "no slots" despite real availability
+  // (confirmed live 2026-07-21/22).
+  test('norm_name strips hyphens the same way normalizeTypeName does', () => {
+    const hyphenated = [
+      { id: '9', name: 'Follow-Up Appointment-Physiotherapy', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 40 },
+    ];
+    const result = resolveApptFromFunnel(hyphenated, {
+      service: 'Physiotherapy', patientType: 'follow_up', insurer: null, duration: 40,
+    });
+    expect(result.norm_name).toBe('follow up appointment physiotherapy');
+  });
+
   test('empty catalogue → null', () => {
     expect(resolveApptFromFunnel([], { service: 'X', patientType: 'new', insurer: null, duration: 60 })).toBeNull();
   });
