@@ -6,17 +6,23 @@
  */
 const REGION_SUPPORT_INFO = {
   SG: {
-    phone: '+65 6533 0968',
+    phone: '+65 9111 5623',
     email: 'admin@intouchphysio.com',
   },
   HK: {
     phone: '+852 5542 0407',  // WS (default)
-    email: 'appt@physiohk.com',
+    email: 'appt@physiohk.com',  // WS (default)
     clinicPhones: {
       WS:  '+852 5542 0407',
       WWH: '+852 5422 3760',
       TST: '+852 6946 3575',
       QB:  '+852 8400 1760',
+    },
+    clinicEmails: {
+      WS:  'appt@physiohk.com',
+      WWH: 'wwhappt@physiohk.com',
+      TST: 'tstappt@physiohk.com',
+      QB:  'qbappt@physiohk.com',
     },
   },
   IN: {
@@ -24,7 +30,7 @@ const REGION_SUPPORT_INFO = {
     email: 'appt@prohealthasia.in',
   },
   PH: {
-    phone: '+63 2 8633 6410',
+    phone: '+63 956 914 8260',
     email: 'appt@sportsandspinal.ph',
   },
 };

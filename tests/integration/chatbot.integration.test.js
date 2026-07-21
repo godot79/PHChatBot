@@ -5159,6 +5159,38 @@ describe('Cancellation blocked within 24 hours', () => {
     });
   });
 
+  // ─── _resolveSupportEmail() — per-clinic HK email resolution ──────────────
+  // Mirrors _getNoSlotsPhone's per-clinic phone resolution, but for email.
+
+  describe('_resolveSupportEmail()', () => {
+    test('HK clinic name containing "(WWH)" resolves to the WWH email', () => {
+      expect(engine._resolveSupportEmail('HK', 'Prohealth (WWH)')).toBe('wwhappt@physiohk.com');
+    });
+    test('HK clinic name containing "(TST)" resolves to the TST email', () => {
+      expect(engine._resolveSupportEmail('HK', 'Prohealth (TST)')).toBe('tstappt@physiohk.com');
+    });
+    test('HK clinic name containing "(QB)" resolves to the QB email', () => {
+      expect(engine._resolveSupportEmail('HK', 'Prohealth (QB)')).toBe('qbappt@physiohk.com');
+    });
+    test('HK clinic name containing "(WS)" resolves to the default HK email', () => {
+      expect(engine._resolveSupportEmail('HK', 'Prohealth (WS)')).toBe('appt@physiohk.com');
+    });
+    test('HK with no clinic name falls back to the default HK email', () => {
+      expect(engine._resolveSupportEmail('HK', '')).toBe('appt@physiohk.com');
+      expect(engine._resolveSupportEmail('HK', undefined)).toBe('appt@physiohk.com');
+    });
+    test('HK clinic name with no recognised code falls back to the default HK email', () => {
+      expect(engine._resolveSupportEmail('HK', 'Prohealth Central')).toBe('appt@physiohk.com');
+    });
+    test('SG (no clinicEmails map) always returns the flat SG email, regardless of clinicName', () => {
+      expect(engine._resolveSupportEmail('SG', 'Anything (WWH)')).toBe('admin@intouchphysio.com');
+      expect(engine._resolveSupportEmail('SG', '')).toBe('admin@intouchphysio.com');
+    });
+    test('unknown region falls back to SG default', () => {
+      expect(engine._resolveSupportEmail('ZZ', '')).toBe('admin@intouchphysio.com');
+    });
+  });
+
   // ─── Selection list — near-term appointment still shown, not filtered ─────
 
   test('a near-term appointment still appears in the "select which to cancel" list', async () => {
@@ -5270,7 +5302,7 @@ describe('Cancellation blocked within 24 hours', () => {
     test('"3" returns a wa.me link to the region\'s front-desk number', async () => {
       const session = await blockedSession('+6570000040');
       const reply = await engine.handleConfirmCancelState(session, '3');
-      expect(String(reply)).toMatch(/wa\.me\/6565330968/); // SG support phone, digits only
+      expect(String(reply)).toMatch(/wa\.me\/6591115623/); // SG support phone, digits only
     });
 
     test('"3" resolves the HK per-clinic phone from the appointment\'s clinic name', async () => {
@@ -5283,6 +5315,26 @@ describe('Cancellation blocked within 24 hours', () => {
       const fresh = await db.getSessionByPhone('+6570000041');
       const reply = await engine.handleConfirmCancelState(fresh, '3');
       expect(String(reply)).toMatch(/wa\.me\/85254223760/); // WWH-specific number
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
+    });
+
+    test('"2" resolves the HK per-clinic email from the appointment\'s clinic name', async () => {
+      engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([
+        apptAt(6, { business: { id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' } }),
+      ]);
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' });
+      const session = await verifiedSession('+6570000042', 'HK');
+      await engine.handleCancelAppointmentState(session, '');
+      const fresh = await db.getSessionByPhone('+6570000042');
+      const postEmailSpy = jest.spyOn(engine, '_postEmail').mockResolvedValue();
+
+      await engine.handleConfirmCancelState(fresh, '2');
+
+      const payload = postEmailSpy.mock.calls[0][0];
+      expect(payload.to).toContain('wwhappt@physiohk.com');
+      expect(payload.to).not.toContain('appt@physiohk.com'); // not the WS default
+
+      postEmailSpy.mockRestore();
       engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
     });
 
@@ -5478,7 +5530,7 @@ describe('Reschedule blocked within 24 hours', () => {
     test('"3" returns a wa.me link to the region\'s front-desk number', async () => {
       const session = await blockedSession('+6571000040');
       const reply = await engine.handleRescheduleIntentConfirmState(session, '3');
-      expect(String(reply)).toMatch(/wa\.me\/6565330968/); // SG support phone, digits only
+      expect(String(reply)).toMatch(/wa\.me\/6591115623/); // SG support phone, digits only
     });
 
     test('"3" resolves the HK per-clinic phone from the appointment\'s clinic name', async () => {
@@ -5491,6 +5543,26 @@ describe('Reschedule blocked within 24 hours', () => {
       const fresh = await db.getSessionByPhone('+6571000041');
       const reply = await engine.handleRescheduleIntentConfirmState(fresh, '3');
       expect(String(reply)).toMatch(/wa\.me\/85254223760/); // WWH-specific number
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
+    });
+
+    test('"2" resolves the HK per-clinic email from the appointment\'s clinic name', async () => {
+      engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([
+        apptAt(6, { business: { id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' } }),
+      ]);
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' });
+      const session = await verifiedSession('+6571000042', 'HK');
+      await engine.handleRescheduleAppointmentState(session, '');
+      const fresh = await db.getSessionByPhone('+6571000042');
+      const postEmailSpy = jest.spyOn(engine, '_postEmail').mockResolvedValue();
+
+      await engine.handleRescheduleIntentConfirmState(fresh, '2');
+
+      const payload = postEmailSpy.mock.calls[0][0];
+      expect(payload.to).toContain('wwhappt@physiohk.com');
+      expect(payload.to).not.toContain('appt@physiohk.com'); // not the WS default
+
+      postEmailSpy.mockRestore();
       engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
     });
 

@@ -1572,6 +1572,23 @@ async handleMessageEnvelope(message, phoneNumber) {
   }
 
   /**
+   * Resolves the support email for a region, using per-clinic email
+   * (currently HK's WS/WWH/TST/QB) when clinicName matches one of the
+   * clinic codes, else the region's default email. Mirrors
+   * _getNoSlotsPhone's per-clinic phone resolution.
+   * @param {string} region
+   * @param {string} [clinicName] - business/clinic display name, may contain "(WS)" etc.
+   */
+  _resolveSupportEmail(region, clinicName) {
+    const info = REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG;
+    if (info.clinicEmails && clinicName) {
+      const match = String(clinicName).match(/\((WS|WWH|TST|QB)\)/i);
+      if (match) return info.clinicEmails[match[1].toUpperCase()] || info.email;
+    }
+    return info.email;
+  }
+
+  /**
    * Central "no results" surface for booking flows (Layer 2 of the 2026-07-19
    * incident fix — see _noSlotsRetry/ClinikoAPI._partial marker/d99d90d).
    *
@@ -4205,7 +4222,7 @@ if (/^p(rev)?$/i.test(text)) {
           });
           const ctx = (() => { try { return typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {}); } catch { return {}; } })();
           const region = String(ctx.region || 'SG').trim();
-          const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+          const supportEmail = this._resolveSupportEmail(region, enrichedSlot._business_display);
           const userEmail = String(ctx.email || session.email || '').trim();
           const to = [];
           if (supportEmail) to.push(supportEmail);
@@ -5160,8 +5177,10 @@ if (/^p(rev)?$/i.test(text)) {
     const region = String(ctx.region || d.region || 'SG').trim();
     const phone  = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
     const userEmail = String(ctx.email || s.email || d.email || '').trim();
+    const clinicObj = d.selected_clinic || d.prev_state_data?.selected_clinic;
+    const clinicName = clinicObj?.business_name || (typeof clinicObj === 'string' ? clinicObj : '');
     const regionDesk = (typeof REGION_SUPPORT_INFO === 'object' && REGION_SUPPORT_INFO && REGION_SUPPORT_INFO[region] && REGION_SUPPORT_INFO[region].email)
-      ? REGION_SUPPORT_INFO[region].email : null;
+      ? this._resolveSupportEmail(region, clinicName) : null;
     const supportEmail = regionDesk || process.env.SUPPORT_EMAIL || process.env.DEFAULT_SUPPORT_EMAIL || '';
 
     const to = [];
@@ -5316,7 +5335,7 @@ if (/^p(rev)?$/i.test(text)) {
 
     const region     = String(ctx.region || d.region || 'SG').trim();
     const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+    const supportEmail = this._resolveSupportEmail(region, appt?._business_display || appt?.clinic);
 
     // Resolve user email from session data
     const userEmail = String(ctx.email || s.email || d.email || appt?.patient_email || '').trim();
@@ -5358,7 +5377,7 @@ if (/^p(rev)?$/i.test(text)) {
 
     const region     = String(ctx.region || d.region || 'SG').trim();
     const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+    const supportEmail = this._resolveSupportEmail(region, appt?._business_display || appt?.clinic);
 
     const userEmail = String(ctx.email || s.email || d.email || appt?.patient_email || '').trim();
 
@@ -5396,7 +5415,7 @@ if (/^p(rev)?$/i.test(text)) {
 
     const region     = String(ctx.region || d.region || 'SG').trim();
     const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+    const supportEmail = this._resolveSupportEmail(region, appt?._business_display || appt?.clinic);
 
     const userEmail = String(ctx.email || s.email || d.email || appt?.patient_email || '').trim();
 
@@ -5457,7 +5476,7 @@ if (/^p(rev)?$/i.test(text)) {
 
     const region     = String(ctx.region || d.region || 'SG').trim();
     const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
-    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+    const supportEmail = this._resolveSupportEmail(region, oldAppt?._business_display || oldAppt?.clinic);
 
     // Resolve user email from context (survives data resets) or session data
     const userEmail = String(ctx.email || s.email || d.email || '').trim();
