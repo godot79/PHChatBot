@@ -15,6 +15,7 @@ Production repo: Cloud Run WhatsApp booking bot with Meta webhooks and Cliniko i
 - Never rename, move, delete, or rewrite files without approval.
 - Never make unrelated improvements.
 - When the user has already answered prior uncertainty questions, do not re-ask them. Convert confirmed answers into the smallest concrete next action.
+- At the start of each session working in this repo, check the `project-deferred-items` memory for open/known-but-deferred issues before starting new work — surface anything relevant rather than waiting to be asked.
 
 ## Change protocol
 For any non-trivial task:
