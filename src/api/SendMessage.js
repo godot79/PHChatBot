@@ -25,7 +25,6 @@ class SendMessage {
   async patch(data = {}) {
     try {
       console.log('PATCHing to Cliniko:', `${this.baseURL}${this.endpoint}`);
-      console.log('With headers:', ClinikoHeaders.build());
       console.log('With payload:', JSON.stringify(data));
       const response = await axios.patch(`${this.baseURL}${this.endpoint}`, data, {
         headers: ClinikoHeaders.build(),
@@ -69,7 +68,6 @@ class SendMessage {
   async post(data = {}) {
     try {
       console.log('POSTing to Cliniko:', `${this.baseURL}${this.endpoint}`);
-      console.log('With headers:', ClinikoHeaders.build());
       console.log('With payload:', JSON.stringify(data));
       const response = await axios.post(`${this.baseURL}${this.endpoint}`, data, {
         headers: ClinikoHeaders.build(),
