@@ -6,6 +6,8 @@
  * required directly by tests without going through ChatbotEngine.
  */
 
+const { bulkAll } = require('./BulkContext');
+
 // Same non-enumerable _partial convention as ClinikoAPI.js — a caller-supplied
 // clinikoAPI is not guaranteed to be the real resilient class (tests inject
 // plain mocks), so these fan-outs defend their own per-call failures rather
@@ -27,13 +29,11 @@ async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
   const result = [];
   const allPractitioners = (groups || []).flatMap(g => g.practitioners || []);
   let hadFailure = false;
-  const allTypes = await Promise.all(
-    allPractitioners.map(p =>
-      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
-        hadFailure = true;
-        return [];
-      })
-    )
+  const allTypes = await bulkAll(allPractitioners, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
   );
   for (const types of allTypes) {
     for (const t of (types || [])) {
@@ -57,13 +57,11 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
   let hadFailure = false;
-  const allTypes = await Promise.all(
-    practitioners.map(p =>
-      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
-        hadFailure = true;
-        return [];
-      })
-    )
+  const allTypes = await bulkAll(practitioners, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
   );
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => String(t.id) === targetId)) result.push(p);
@@ -89,13 +87,11 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
   let hadFailure = false;
-  const allTypes = await Promise.all(
-    practitioners.map(p =>
-      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
-        hadFailure = true;
-        return [];
-      })
-    )
+  const allTypes = await bulkAll(practitioners, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
   );
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => normalize(t.name) === target)) result.push(p);

@@ -83,6 +83,30 @@ describe('getAllAppointmentTypesForAllPractitioners()', () => {
     await resultPromise;
   });
 
+  // Regression: firing every practitioner's fetch at once used to overwhelm
+  // Cliniko's gateway and cascade into mass 15s timeouts (confirmed live
+  // 2026-07-21). Concurrency is now throttled centrally in SendMessage's
+  // bulk queue (see tests/unit/api/SendMessage.test.js) rather than by
+  // batching the caller's array — this just confirms the fan-out actually
+  // flags itself as bulk so that throttling engages, using a fake clinikoAPI
+  // that reports whether BulkContext saw it as bulk while running.
+  test('flags the fanout as bulk so SendMessage throttles it, regardless of clinikoAPI implementation', async () => {
+    const BulkContext = require('../../../src/core/BulkContext');
+    const sawBulk = [];
+    const api = {
+      getAppointmentTypes: jest.fn(({ practitioner_id }) => {
+        sawBulk.push(BulkContext.isBulk());
+        return Promise.resolve([{ id: `t-${practitioner_id}`, name: 'X' }]);
+      }),
+    };
+
+    expect(BulkContext.isBulk()).toBe(false); // sanity: not bulk outside the call
+    await getAllAppointmentTypesForAllPractitioners(api, GROUP_AB);
+
+    expect(sawBulk).toEqual([true, true, true]); // one per practitioner in GROUP_AB
+    expect(BulkContext.isBulk()).toBe(false); // flag doesn't leak outside the call
+  });
+
   test('returns [] for empty groups', async () => {
     const api = makeAPI({});
     const result = await getAllAppointmentTypesForAllPractitioners(api, []);
