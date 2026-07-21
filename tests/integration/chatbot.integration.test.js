@@ -5061,6 +5061,446 @@ describe('Interactive envelope integrity — fees, locations, and string+menu re
 });
 
 // =============================================================================
+// SUITE — 24-hour cancellation block: an appointment starting within the next
+// 24 hours cannot be cancelled via WhatsApp. The client sees a front-desk
+// contact prompt (Main menu / Email us / Message on WhatsApp) instead of the
+// normal Yes/No confirmation. Near-term appointments still appear in the
+// "select which to cancel" list — only confirming the cancel is blocked.
+// =============================================================================
+describe('Cancellation blocked within 24 hours', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    engine.clinikoAPI.getPractitionerById = jest.fn().mockResolvedValue({ id: 'PRAC-1', first_name: 'Jane', last_name: 'Tan', display_name: 'Dr. Jane Tan' });
+    engine.clinikoAPI.getAppointmentTypeById = jest.fn().mockResolvedValue({ id: 'AT-1', name: 'Follow-up Physio' });
+    engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  function apptAt(hoursFromNow, overrides = {}) {
+    return {
+      id: 'APPT-1',
+      starts_at: new Date(Date.now() + hoursFromNow * 3600 * 1000).toISOString(),
+      cancelled_at: null,
+      practitioner: { id: 'PRAC-1', first_name: 'Jane', last_name: 'Tan', display_name: 'Dr. Jane Tan' },
+      appointment_type: { id: 'AT-1', name: 'Follow-up Physio' },
+      business: { id: 'BIZ-1', business_name: 'Prohealth Novena' },
+      ...overrides,
+    };
+  }
+
+  async function verifiedSession(phone, region = 'SG', email = '') {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verification_status: 'verified', verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'CANCEL_APPOINTMENT',
+      context: JSON.stringify({ region, email }),
+    });
+    return db.getSession(id);
+  }
+
+  // Seeds a session already inside the blocked prompt via the real
+  // single-appointment auto-jump path (handleCancelAppointmentState).
+  async function blockedSession(phone, region = 'SG', email = 'patient@example.com') {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(6)]);
+    const session = await verifiedSession(phone, region, email);
+    await engine.handleCancelAppointmentState(session, '');
+    return db.getSessionByPhone(phone);
+  }
+
+  // ─── _isAppointmentChangeBlockedByPolicy — pure boundary checks ───────────
+  // Shared by both cancel and reschedule blocking.
+
+  describe('_isAppointmentChangeBlockedByPolicy()', () => {
+    test('12 hours away is blocked', () => {
+      expect(engine._isAppointmentChangeBlockedByPolicy(apptAt(12))).toBe(true);
+    });
+    test('3 days away is not blocked', () => {
+      expect(engine._isAppointmentChangeBlockedByPolicy(apptAt(72))).toBe(false);
+    });
+    test('boundary: 23h59m away is blocked', () => {
+      expect(engine._isAppointmentChangeBlockedByPolicy(apptAt(23 + 59 / 60))).toBe(true);
+    });
+    test('boundary: 24h01m away is not blocked', () => {
+      expect(engine._isAppointmentChangeBlockedByPolicy(apptAt(24 + 1 / 60))).toBe(false);
+    });
+    test('missing starts_at is not blocked (defensive)', () => {
+      expect(engine._isAppointmentChangeBlockedByPolicy({})).toBe(false);
+      expect(engine._isAppointmentChangeBlockedByPolicy(null)).toBe(false);
+    });
+  });
+
+  // ─── Selection list — near-term appointment still shown, not filtered ─────
+
+  test('a near-term appointment still appears in the "select which to cancel" list', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(12), apptAt(72, { id: 'APPT-2' })]);
+    const session = await verifiedSession('+6570000001');
+    const reply = await engine.handleCancelAppointmentState(session, '');
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('list');
+    const rows = reply.interactive.action.sections[0].rows;
+    const apptRows = rows.filter(r => r.id !== 'back'); // exclude the nav "← Back" row
+    expect(apptRows).toHaveLength(2);
+  });
+
+  // ─── Single-appointment auto-jump path also blocks ─────────────────────────
+
+  test('single upcoming appointment within 24h auto-jumps straight to the blocked prompt (not Yes/No)', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(6)]);
+    const session = await verifiedSession('+6570000002');
+    const reply = await engine.handleCancelAppointmentState(session, '');
+    expect(reply).toHaveProperty('interactive');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Main menu', 'Email us', 'Message on WhatsApp']);
+    expect(String(reply)).toMatch(/within 24 hours/i);
+    expect(String(reply)).not.toMatch(/yes, cancel/i);
+  });
+
+  test('single upcoming appointment beyond 24h auto-jumps to normal Yes/No confirm (regression)', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(72)]);
+    const session = await verifiedSession('+6570000003');
+    const reply = await engine.handleCancelAppointmentState(session, '');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Yes, cancel', 'Go back']);
+  });
+
+  // ─── Selecting a near-term appointment from a multi-appointment list ──────
+
+  test('selecting a near-term appointment from the list shows the blocked prompt, not Yes/No', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(12), apptAt(72, { id: 'APPT-2' })]);
+    const session = await verifiedSession('+6570000004');
+    await engine.handleCancelAppointmentState(session, ''); // populates cancel_appt_list
+    const listed = await db.getSessionByPhone('+6570000004');
+    const reply = await engine.handleSelectAppointmentToCancelState(listed, '1');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Main menu', 'Email us', 'Message on WhatsApp']);
+  });
+
+  test('selecting the far-out appointment from the same list still shows Yes/No confirm', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(12), apptAt(72, { id: 'APPT-2' })]);
+    const session = await verifiedSession('+6570000005');
+    await engine.handleCancelAppointmentState(session, '');
+    const listed = await db.getSessionByPhone('+6570000005');
+    const reply = await engine.handleSelectAppointmentToCancelState(listed, '2');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Yes, cancel', 'Go back']);
+  });
+
+  // ─── Blocked-prompt decisions ───────────────────────────────────────────────
+
+  describe('blocked-prompt decision handling', () => {
+    test('"1" goes to main menu and clears cancel-related session state', async () => {
+      const session = await blockedSession('+6570000010');
+      const reply = await engine.handleConfirmCancelState(session, '1');
+      expect(reply).toHaveProperty('interactive');
+      const updated = await db.getSessionByPhone('+6570000010');
+      const data = JSON.parse(updated.data || '{}');
+      expect(data.cancel_blocked_prompt).toBeUndefined();
+      expect(data.selected_cancel_appt).toBeUndefined();
+    });
+
+    test('"0"/"back"/"menu" behave the same as "1"', async () => {
+      for (const [i, cmd] of ['0', 'back', 'menu'].entries()) {
+        const phone = `+657000002${i}`;
+        const session = await blockedSession(phone);
+        const reply = await engine.handleConfirmCancelState(session, cmd);
+        expect(reply).toHaveProperty('interactive');
+        const updated = await db.getSessionByPhone(phone);
+        const data = JSON.parse(updated.data || '{}');
+        expect(data.cancel_blocked_prompt).toBeUndefined();
+      }
+    });
+
+    test('"2" sends a support email to front desk + patient and confirms via chat', async () => {
+      const session = await blockedSession('+6570000030', 'SG', 'patient@example.com');
+      const postEmailSpy = jest.spyOn(engine, '_postEmail').mockResolvedValue();
+
+      const reply = await engine.handleConfirmCancelState(session, '2');
+
+      expect(postEmailSpy).toHaveBeenCalledTimes(1);
+      const payload = postEmailSpy.mock.calls[0][0];
+      expect(payload.to).toContain('admin@intouchphysio.com'); // SG support email
+      expect(payload.to).toContain('patient@example.com');
+      expect(payload.subject).toMatch(/cancel blocked/i);
+      expect(payload.text).not.toMatch(/successfully cancelled/i);
+      expect(payload.text).toContain('Dr. Jane Tan');
+      expect(payload.text).toContain('Prohealth Novena');
+      expect(String(reply)).toMatch(/front desk will be in touch/i);
+
+      postEmailSpy.mockRestore();
+    });
+
+    test('"2" still confirms via chat even if the email send fails', async () => {
+      const session = await blockedSession('+6570000031');
+      const postEmailSpy = jest.spyOn(engine, '_postEmail').mockRejectedValue(new Error('mailer down'));
+      const reply = await engine.handleConfirmCancelState(session, '2');
+      expect(String(reply)).toMatch(/front desk will be in touch/i);
+      postEmailSpy.mockRestore();
+    });
+
+    test('"3" returns a wa.me link to the region\'s front-desk number', async () => {
+      const session = await blockedSession('+6570000040');
+      const reply = await engine.handleConfirmCancelState(session, '3');
+      expect(String(reply)).toMatch(/wa\.me\/6565330968/); // SG support phone, digits only
+    });
+
+    test('"3" resolves the HK per-clinic phone from the appointment\'s clinic name', async () => {
+      engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([
+        apptAt(6, { business: { id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' } }),
+      ]);
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' });
+      const session = await verifiedSession('+6570000041', 'HK');
+      await engine.handleCancelAppointmentState(session, '');
+      const fresh = await db.getSessionByPhone('+6570000041');
+      const reply = await engine.handleConfirmCancelState(fresh, '3');
+      expect(String(reply)).toMatch(/wa\.me\/85254223760/); // WWH-specific number
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
+    });
+
+    test('unrecognised input re-renders the same blocked prompt with an error prefix, and does not clear the prompt flag', async () => {
+      const session = await blockedSession('+6570000050');
+      const reply = await engine.handleConfirmCancelState(session, 'banana');
+      expect(String(reply)).toMatch(/please reply with 1, 2, or 3/i);
+      const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+      expect(titles).toEqual(['Main menu', 'Email us', 'Message on WhatsApp']);
+      const updated = await db.getSessionByPhone('+6570000050');
+      const data = JSON.parse(updated.data || '{}');
+      expect(data.cancel_blocked_prompt).toBe(true);
+    });
+  });
+
+  // ─── Regression: normal (non-blocked) cancel flow unaffected ──────────────
+
+  test('a far-out appointment still cancels normally end-to-end on "yes"', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(72)]);
+    engine.clinikoAPI.cancelSpecificAppointment = jest.fn().mockResolvedValue({ success: true });
+    const session = await verifiedSession('+6570000060');
+    await engine.handleCancelAppointmentState(session, ''); // auto-jump, single appt
+    const fresh = await db.getSessionByPhone('+6570000060');
+    const reply = await engine.handleConfirmCancelState(fresh, 'yes');
+    expect(String(reply)).toMatch(/your appointment has been cancelled/i);
+    expect(engine.clinikoAPI.cancelSpecificAppointment).toHaveBeenCalledTimes(1);
+  });
+});
+
+// =============================================================================
+// SUITE — 24-hour reschedule block: an appointment starting within the next
+// 24 hours cannot be rescheduled via WhatsApp either — mirrors the cancel
+// block above (same _isAppointmentChangeBlockedByPolicy /
+// _renderAppointmentChangeBlockedPrompt shared helpers). The client sees the
+// same front-desk contact prompt instead of "Yes, reschedule / Go back".
+// =============================================================================
+describe('Reschedule blocked within 24 hours', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+    engine.clinikoAPI.getPractitionerById = jest.fn().mockResolvedValue({ id: 'PRAC-1', first_name: 'Jane', last_name: 'Tan', display_name: 'Dr. Jane Tan' });
+    engine.clinikoAPI.getAppointmentTypeById = jest.fn().mockResolvedValue({ id: 'AT-1', name: 'Follow-up Physio' });
+    engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  function apptAt(hoursFromNow, overrides = {}) {
+    return {
+      id: 'APPT-1',
+      starts_at: new Date(Date.now() + hoursFromNow * 3600 * 1000).toISOString(),
+      cancelled_at: null,
+      practitioner: { id: 'PRAC-1', first_name: 'Jane', last_name: 'Tan', display_name: 'Dr. Jane Tan' },
+      appointment_type: { id: 'AT-1', name: 'Follow-up Physio' },
+      business: { id: 'BIZ-1', business_name: 'Prohealth Novena' },
+      ...overrides,
+    };
+  }
+
+  async function verifiedSession(phone, region = 'SG', email = '') {
+    const id = await db.createSession(phone, PATIENT_ID, 60);
+    await db.updateSession(id, {
+      verification_status: 'verified', verified: 1, patient_id: PATIENT_ID,
+      conversation_state: 'RESCHEDULE_APPOINTMENT',
+      context: JSON.stringify({ region, email }),
+    });
+    return db.getSession(id);
+  }
+
+  // Seeds a session already inside the blocked prompt via the real
+  // single-appointment auto-jump path (handleRescheduleAppointmentState).
+  async function blockedSession(phone, region = 'SG', email = 'patient@example.com') {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(6)]);
+    const session = await verifiedSession(phone, region, email);
+    await engine.handleRescheduleAppointmentState(session, '');
+    return db.getSessionByPhone(phone);
+  }
+
+  // ─── Selection list — near-term appointment still shown, not filtered ─────
+
+  test('a near-term appointment still appears in the "select which to reschedule" list', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(12), apptAt(72, { id: 'APPT-2' })]);
+    const session = await verifiedSession('+6571000001');
+    const reply = await engine.handleRescheduleAppointmentState(session, '');
+    expect(reply).toHaveProperty('interactive');
+    expect(reply.interactive.type).toBe('list');
+    const rows = reply.interactive.action.sections[0].rows;
+    const apptRows = rows.filter(r => r.id !== 'back');
+    expect(apptRows).toHaveLength(2);
+  });
+
+  // ─── Single-appointment auto-jump path also blocks ─────────────────────────
+
+  test('single upcoming appointment within 24h auto-jumps straight to the blocked prompt (not Yes/No)', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(6)]);
+    const session = await verifiedSession('+6571000002');
+    const reply = await engine.handleRescheduleAppointmentState(session, '');
+    expect(reply).toHaveProperty('interactive');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Main menu', 'Email us', 'Message on WhatsApp']);
+    expect(String(reply)).toMatch(/within 24 hours/i);
+    expect(String(reply)).not.toMatch(/yes, reschedule/i);
+  });
+
+  test('single upcoming appointment beyond 24h auto-jumps to normal Yes/No confirm (regression)', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(72)]);
+    const session = await verifiedSession('+6571000003');
+    const reply = await engine.handleRescheduleAppointmentState(session, '');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Yes, reschedule', 'Go back']);
+  });
+
+  // ─── Selecting a near-term appointment from a multi-appointment list ──────
+
+  test('selecting a near-term appointment from the list shows the blocked prompt, not Yes/No', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(12), apptAt(72, { id: 'APPT-2' })]);
+    const session = await verifiedSession('+6571000004');
+    await engine.handleRescheduleAppointmentState(session, ''); // populates reschedule_appt_list
+    const listed = await db.getSessionByPhone('+6571000004');
+    const reply = await engine.handleSelectAppointmentToRescheduleState(listed, '1');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Main menu', 'Email us', 'Message on WhatsApp']);
+  });
+
+  test('selecting the far-out appointment from the same list still shows Yes/No confirm', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(12), apptAt(72, { id: 'APPT-2' })]);
+    const session = await verifiedSession('+6571000005');
+    await engine.handleRescheduleAppointmentState(session, '');
+    const listed = await db.getSessionByPhone('+6571000005');
+    const reply = await engine.handleSelectAppointmentToRescheduleState(listed, '2');
+    const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+    expect(titles).toEqual(['Yes, reschedule', 'Go back']);
+  });
+
+  // ─── Blocked-prompt decisions ───────────────────────────────────────────────
+
+  describe('blocked-prompt decision handling', () => {
+    test('"1" goes to main menu and clears reschedule-related session state', async () => {
+      const session = await blockedSession('+6571000010');
+      const reply = await engine.handleRescheduleIntentConfirmState(session, '1');
+      expect(reply).toHaveProperty('interactive');
+      const updated = await db.getSessionByPhone('+6571000010');
+      const data = JSON.parse(updated.data || '{}');
+      expect(data.reschedule_blocked_prompt).toBeUndefined();
+      expect(data.selected_reschedule_appt).toBeUndefined();
+    });
+
+    test('"0"/"back"/"menu" behave the same as "1"', async () => {
+      for (const [i, cmd] of ['0', 'back', 'menu'].entries()) {
+        const phone = `+657100002${i}`;
+        const session = await blockedSession(phone);
+        const reply = await engine.handleRescheduleIntentConfirmState(session, cmd);
+        expect(reply).toHaveProperty('interactive');
+        const updated = await db.getSessionByPhone(phone);
+        const data = JSON.parse(updated.data || '{}');
+        expect(data.reschedule_blocked_prompt).toBeUndefined();
+      }
+    });
+
+    test('"2" sends a support email to front desk + patient and confirms via chat', async () => {
+      const session = await blockedSession('+6571000030', 'SG', 'patient@example.com');
+      const postEmailSpy = jest.spyOn(engine, '_postEmail').mockResolvedValue();
+
+      const reply = await engine.handleRescheduleIntentConfirmState(session, '2');
+
+      expect(postEmailSpy).toHaveBeenCalledTimes(1);
+      const payload = postEmailSpy.mock.calls[0][0];
+      expect(payload.to).toContain('admin@intouchphysio.com'); // SG support email
+      expect(payload.to).toContain('patient@example.com');
+      expect(payload.subject).toMatch(/reschedule blocked/i);
+      expect(payload.text).not.toMatch(/has been rescheduled|successfully rescheduled/i); // never claims it was actually rescheduled
+      expect(payload.text).toContain('Dr. Jane Tan');
+      expect(payload.text).toContain('Prohealth Novena');
+      expect(String(reply)).toMatch(/front desk will be in touch/i);
+
+      postEmailSpy.mockRestore();
+    });
+
+    test('"2" still confirms via chat even if the email send fails', async () => {
+      const session = await blockedSession('+6571000031');
+      const postEmailSpy = jest.spyOn(engine, '_postEmail').mockRejectedValue(new Error('mailer down'));
+      const reply = await engine.handleRescheduleIntentConfirmState(session, '2');
+      expect(String(reply)).toMatch(/front desk will be in touch/i);
+      postEmailSpy.mockRestore();
+    });
+
+    test('"3" returns a wa.me link to the region\'s front-desk number', async () => {
+      const session = await blockedSession('+6571000040');
+      const reply = await engine.handleRescheduleIntentConfirmState(session, '3');
+      expect(String(reply)).toMatch(/wa\.me\/6565330968/); // SG support phone, digits only
+    });
+
+    test('"3" resolves the HK per-clinic phone from the appointment\'s clinic name', async () => {
+      engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([
+        apptAt(6, { business: { id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' } }),
+      ]);
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-WWH', business_name: 'Prohealth (WWH)' });
+      const session = await verifiedSession('+6571000041', 'HK');
+      await engine.handleRescheduleAppointmentState(session, '');
+      const fresh = await db.getSessionByPhone('+6571000041');
+      const reply = await engine.handleRescheduleIntentConfirmState(fresh, '3');
+      expect(String(reply)).toMatch(/wa\.me\/85254223760/); // WWH-specific number
+      engine.clinikoAPI.getBusinessById = jest.fn().mockResolvedValue({ id: 'BIZ-1', business_name: 'Prohealth Novena' });
+    });
+
+    test('unrecognised input re-renders the same blocked prompt with an error prefix, and does not clear the prompt flag', async () => {
+      const session = await blockedSession('+6571000050');
+      const reply = await engine.handleRescheduleIntentConfirmState(session, 'banana');
+      expect(String(reply)).toMatch(/please reply with 1, 2, or 3/i);
+      const titles = reply.interactive.action.buttons.map(b => b.reply.title);
+      expect(titles).toEqual(['Main menu', 'Email us', 'Message on WhatsApp']);
+      const updated = await db.getSessionByPhone('+6571000050');
+      const data = JSON.parse(updated.data || '{}');
+      expect(data.reschedule_blocked_prompt).toBe(true);
+    });
+  });
+
+  // ─── Regression: normal (non-blocked) reschedule flow unaffected ──────────
+
+  test('a far-out appointment still proceeds to slot selection on "yes" (not blocked)', async () => {
+    engine.clinikoAPI.getBookingsByPatientId = jest.fn().mockResolvedValue([apptAt(72)]);
+    engine.clinikoAPI.getAvailableTimes = jest.fn().mockResolvedValue([
+      { appointment_start: new Date(Date.now() + 96 * 3600 * 1000).toISOString() },
+    ]);
+    const session = await verifiedSession('+6571000060');
+    await engine.handleRescheduleAppointmentState(session, ''); // auto-jump, single appt
+    const fresh = await db.getSessionByPhone('+6571000060');
+    const reply = await engine.handleRescheduleIntentConfirmState(fresh, 'yes');
+    expect(String(reply)).not.toMatch(/within 24 hours/i);
+    expect(String(reply)).toMatch(/choose a new slot/i);
+  });
+});
+
+// =============================================================================
 // SUITE — Slot list rendered as interactive list
 // =============================================================================
 describe('Slot list — rendered as interactive list for uniform UX', () => {

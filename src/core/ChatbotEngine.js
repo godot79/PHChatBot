@@ -7,7 +7,7 @@ const { checkDatabaseHealth, checkAPIHealth } = require('../routes/health.js');
 const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
-const { bookingConfirmed, appointmentCancelled, appointmentRescheduled } = require('../../prohealth-mailer/EmailTemplates');
+const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
 const { REGION_SUPPORT_INFO, REGION_FEES } = require('../config/regions');
 const {
   getAllAppointmentTypesForAllPractitioners,
@@ -57,6 +57,10 @@ const SLOT_LIST_PAGE_FIRST = 8;  // page 0: up to 8 slots + next + back = 10 row
 const SLOT_LIST_PAGE_REST  = 7;  // page 1+: up to 7 slots + prev + next + back = 10 rows max
 const MAX_DATE_ITEMS = 5;
 const MAX_DATE_PAGES = 2; // 2 pages of 5 = 10 business days (excluding Sundays)
+// Appointments starting within this window cannot be cancelled or rescheduled
+// via WhatsApp — front desk must be contacted directly since cancellation
+// fees may apply.
+const APPOINTMENT_CHANGE_BLOCK_WINDOW_MS = 24 * 60 * 60 * 1000;
 // Interactive selection list page sizes — kept small so the Send button stays
 // visible on Mac WhatsApp Desktop without scrolling past the list rows.
 const INTERACTIVE_SELECT_PAGE_FIRST = 5; // page 0: up to 5 items + next + back = 7
@@ -914,7 +918,7 @@ class ChatbotEngine {
         { id: '9',      title: 'Logout & Delete My Data' },
       ]);
     } else {
-      const body = `👋 *Welcome to ProHealthAsia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
+      const body = `👋 *Welcome to Prohealth Asia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
       return list(body, 'Select option', [
         { id: '1',      title: 'Register as new patient' },
         { id: '2',      title: 'Book or Manage' },
@@ -4472,8 +4476,39 @@ if (/^p(rev)?$/i.test(text)) {
   }
 
   /**
+   * True if the appointment starts within APPOINTMENT_CHANGE_BLOCK_WINDOW_MS
+   * from now. Used to block both cancellation and rescheduling.
+   * @param {object} appt - must have a starts_at ISO string
+   */
+  _isAppointmentChangeBlockedByPolicy(appt) {
+    if (!appt?.starts_at) return false;
+    const msUntilStart = new Date(appt.starts_at).getTime() - Date.now();
+    return msUntilStart < APPOINTMENT_CHANGE_BLOCK_WINDOW_MS;
+  }
+
+  /**
+   * Renders the 24-hour appointment-change-blocked prompt (Main menu /
+   * Email us / Message on WhatsApp). Shared by cancel and reschedule's
+   * initial presentation and their invalid-input re-prompts.
+   * @param {string} introText
+   * @param {'cancelled'|'rescheduled'} action
+   */
+  _renderAppointmentChangeBlockedPrompt(introText, action) {
+    return buttons(
+      `${introText}\n\nThis appointment is within 24 hours, so it can't be ${action} here. Please contact our front desk directly — cancellation fees may apply.`,
+      [
+        { id: '1', title: 'Main menu' },
+        { id: '2', title: 'Email us' },
+        { id: '3', title: 'Message on WhatsApp' },
+      ]
+    );
+  }
+
+  /**
    * Presents cancellation confirmation for a selected appointment.
    * Used by both the single-appointment and selection flows.
+   * If the appointment starts within 24 hours, blocks cancellation and
+   * shows the front-desk contact prompt instead of Yes/No confirmation.
    * @param {object} session
    * @param {object} data
    * @param {boolean} isSingle (true if called from the "only one appt" shortcut)
@@ -4488,13 +4523,24 @@ if (/^p(rev)?$/i.test(text)) {
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
+
+    const intro = isSingle
+      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
+      : `You selected:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
+
+    if (this._isAppointmentChangeBlockedByPolicy(appt)) {
+      data.cancel_blocked_prompt = true;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.CONFIRM_CANCEL,
+        data: JSON.stringify(data)
+      });
+      return this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled');
+    }
+
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.CONFIRM_CANCEL,
       data: JSON.stringify(data)
     });
-    const intro = isSingle
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : `You selected:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
     return buttons(`${intro}\n\nConfirm cancellation?`, [
       { id: 'yes', title: 'Yes, cancel' },
       { id: '0',   title: 'Go back' }
@@ -4517,6 +4563,10 @@ if (/^p(rev)?$/i.test(text)) {
   async handleConfirmCancelState(session, message) {
     const text = (message || '').trim().toLowerCase();
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
+
+    if (data.cancel_blocked_prompt) {
+      return await this._handleCancelBlockedDecision(session, data, message);
+    }
 
     // Back/menu
     if (["0", "menu", "back"].includes(text)) {
@@ -4571,6 +4621,67 @@ if (/^p(rev)?$/i.test(text)) {
       this.logger.error('[Cancel] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
     return prependTextToEnvelope(`❌ Could not cancel your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
+  }
+
+  /**
+   * Handles the client's reply to the 24-hour cancellation-blocked prompt
+   * (Main menu / Email us / Message on WhatsApp). See _cancelPresentConfirmation.
+   * @param {object} session
+   * @param {object} data
+   * @param {string} incomingText
+   */
+  async _handleCancelBlockedDecision(session, data, incomingText) {
+    const text = (incomingText || '').trim().toLowerCase();
+    const appt = data.selected_cancel_appt;
+
+    const cleanup = async () => {
+      delete data.cancel_blocked_prompt;
+      delete data.cancel_appt_list;
+      delete data.cancel_appt_page;
+      delete data.selected_cancel_appt;
+      delete data.selected_cancel_appt_idx;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    };
+
+    // 1 (or 0/menu/back) — main menu
+    if (text === '1' || ['0', 'menu', 'back'].includes(text)) {
+      await cleanup();
+      return await this.goToInteractiveMenu(session);
+    }
+
+    // 2 — email us (front desk + patient, best-effort)
+    if (text === '2') {
+      try {
+        const emailPayload = await this._composeSupportEmailPayloadCancelBlocked(session, data, appt);
+        await this._postEmail(emailPayload);
+      } catch (e) {
+        this.logger.error('[CancelBlocked] Email send failed', { error: e?.message || e, sessionId: session.id });
+      }
+      const region = this._getSessionRegion(session);
+      await cleanup();
+      return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
+    }
+
+    // 3 — message us (open WhatsApp with pre-filled context)
+    if (text === '3') {
+      const region = this._getSessionRegion(session);
+      // _getNoSlotsPhone resolves HK's per-clinic phone from data.selected_clinic —
+      // the cancel flow doesn't have that field, so pass an adapter using the
+      // enriched appointment's business name instead.
+      const phoneLookupData = { ...data, selected_clinic: { business_name: appt?._business_display || '' } };
+      const waLink = this._buildWaLink(
+        this._getNoSlotsPhone(session, phoneLookupData),
+        this._buildAppointmentChangeBlockedSummary(session, appt, 'cancel')
+      );
+      await cleanup();
+      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.goToInteractiveMenu(session));
+    }
+
+    // Unknown input — re-render the same blocked prompt with an error prefix
+    const intro = appt
+      ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
+      : 'This appointment cannot be cancelled here.';
+    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled'));
   }
 
   // ========== RESCHEDULE WORKFLOW  ==========
@@ -4697,13 +4808,24 @@ if (/^p(rev)?$/i.test(text)) {
       return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
     }
     data.is_single_reschedule_appt = isSingle;
+
+    const intro = isSingle
+      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
+      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+
+    if (this._isAppointmentChangeBlockedByPolicy(appt)) {
+      data.reschedule_blocked_prompt = true;
+      await this.sessionManager.updateSession(session.id, {
+        conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
+        data: JSON.stringify(data)
+      });
+      return this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled');
+    }
+
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
       data: JSON.stringify(data)
     });
-    const intro = isSingle
-      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
-      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
     return buttons(`${intro}\n\nWould you like to proceed?`, [
       { id: 'yes', title: 'Yes, reschedule' },
       { id: '0',   title: 'Go back' }
@@ -4794,6 +4916,10 @@ if (/^p(rev)?$/i.test(text)) {
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     const appt = data.selected_reschedule_appt;
 
+    if (data.reschedule_blocked_prompt) {
+      return await this._handleRescheduleBlockedDecision(session, data, message);
+    }
+
     if (text === 'yes') {
       return await this._rescheduleFetchAndShowSlots(session, data);
     }
@@ -4824,6 +4950,68 @@ if (/^p(rev)?$/i.test(text)) {
         { id: '0',   title: 'Go back' }
       ])
     );
+  }
+
+  /**
+   * Handles the client's reply to the 24-hour reschedule-blocked prompt
+   * (Main menu / Email us / Message on WhatsApp). See _rescheduleShowConfirm.
+   * @param {object} session
+   * @param {object} data
+   * @param {string} incomingText
+   */
+  async _handleRescheduleBlockedDecision(session, data, incomingText) {
+    const text = (incomingText || '').trim().toLowerCase();
+    const appt = data.selected_reschedule_appt;
+
+    const cleanup = async () => {
+      delete data.reschedule_blocked_prompt;
+      delete data.reschedule_appt_list;
+      delete data.reschedule_appt_page;
+      delete data.selected_reschedule_appt;
+      delete data.selected_reschedule_appt_idx;
+      delete data.is_single_reschedule_appt;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+    };
+
+    // 1 (or 0/menu/back) — main menu
+    if (text === '1' || ['0', 'menu', 'back'].includes(text)) {
+      await cleanup();
+      return await this.goToInteractiveMenu(session);
+    }
+
+    // 2 — email us (front desk + patient, best-effort)
+    if (text === '2') {
+      try {
+        const emailPayload = await this._composeSupportEmailPayloadRescheduleBlocked(session, data, appt);
+        await this._postEmail(emailPayload);
+      } catch (e) {
+        this.logger.error('[RescheduleBlocked] Email send failed', { error: e?.message || e, sessionId: session.id });
+      }
+      const region = this._getSessionRegion(session);
+      await cleanup();
+      return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
+    }
+
+    // 3 — message us (open WhatsApp with pre-filled context)
+    if (text === '3') {
+      const region = this._getSessionRegion(session);
+      // _getNoSlotsPhone resolves HK's per-clinic phone from data.selected_clinic —
+      // the reschedule flow doesn't have that field, so pass an adapter using
+      // the enriched appointment's business name instead.
+      const phoneLookupData = { ...data, selected_clinic: { business_name: appt?._business_display || '' } };
+      const waLink = this._buildWaLink(
+        this._getNoSlotsPhone(session, phoneLookupData),
+        this._buildAppointmentChangeBlockedSummary(session, appt, 'reschedule')
+      );
+      await cleanup();
+      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.goToInteractiveMenu(session));
+    }
+
+    // Unknown input — re-render the same blocked prompt with an error prefix
+    const intro = appt
+      ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
+      : 'This appointment cannot be rescheduled here.';
+    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled'));
   }
 
   /**
@@ -5133,6 +5321,105 @@ if (/^p(rev)?$/i.test(text)) {
       : `[Cancelled] ${region} — ${phone || userEmail || 'unknown'} — ${subject}`;
 
     return { to, subject: prefixedSubject, html, text };
+  }
+
+  /**
+   * Build the email payload for a cancellation blocked by the 24-hour policy.
+   * Uses the HTML template from EmailTemplates.js. Unlike
+   * _composeSupportEmailPayloadCancelled({failed:true}), this does not reuse
+   * the "cancelled" template — the appointment was never actually cancelled,
+   * so that copy would be misleading.
+   *
+   * @param {object} session
+   * @param {object} data - parsed session.data
+   * @param {object} appt - enriched appointment object
+   * @returns {Promise<{to:string[], subject:string, html:string, text:string}>}
+   */
+  async _composeSupportEmailPayloadCancelBlocked(session, data, appt) {
+    const s   = session || {};
+    const d   = (data && typeof data === 'object') ? data : (() => { try { return JSON.parse(s.data || '{}'); } catch { return {}; } })();
+    const ctx = (() => { try { return typeof s.context === 'string' ? JSON.parse(s.context) : (s.context || {}); } catch { return {}; } })();
+
+    const region     = String(ctx.region || d.region || 'SG').trim();
+    const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+
+    const userEmail = String(ctx.email || s.email || d.email || appt?.patient_email || '').trim();
+
+    const to = [];
+    if (supportEmail) to.push(supportEmail);
+    if (userEmail)    to.push(userEmail);
+
+    const practitioner = appt?._practitioner_display || appt?.practitioner || '—';
+    const clinic       = appt?._business_display      || appt?.clinic       || '—';
+    const dateTime     = appt?.starts_at ? formatSlotDateTime(appt.starts_at, this._regionTz(session)) : '—';
+    const apptType     = appt?._appointment_type_display || appt?.appointment_type || '';
+
+    const { subject, html, text } = cancellationBlocked({ practitioner, clinic, dateTime, apptType });
+
+    const prefixedSubject = `[Cancel Blocked — 24h] ${region} — ${phone || userEmail || 'unknown'} — ${subject}`;
+
+    return { to, subject: prefixedSubject, html, text };
+  }
+
+  /**
+   * Build the email payload for a reschedule blocked by the 24-hour policy.
+   * Uses the HTML template from EmailTemplates.js. Mirrors
+   * _composeSupportEmailPayloadCancelBlocked — see that method's note on why
+   * the "rescheduled" template is not reused here.
+   *
+   * @param {object} session
+   * @param {object} data - parsed session.data
+   * @param {object} appt - enriched appointment object
+   * @returns {Promise<{to:string[], subject:string, html:string, text:string}>}
+   */
+  async _composeSupportEmailPayloadRescheduleBlocked(session, data, appt) {
+    const s   = session || {};
+    const d   = (data && typeof data === 'object') ? data : (() => { try { return JSON.parse(s.data || '{}'); } catch { return {}; } })();
+    const ctx = (() => { try { return typeof s.context === 'string' ? JSON.parse(s.context) : (s.context || {}); } catch { return {}; } })();
+
+    const region     = String(ctx.region || d.region || 'SG').trim();
+    const phone      = String(s.phone_number || s.phoneNumber || d.phone || '').trim();
+    const supportEmail = (REGION_SUPPORT_INFO[region] || REGION_SUPPORT_INFO.SG).email;
+
+    const userEmail = String(ctx.email || s.email || d.email || appt?.patient_email || '').trim();
+
+    const to = [];
+    if (supportEmail) to.push(supportEmail);
+    if (userEmail)    to.push(userEmail);
+
+    const practitioner = appt?._practitioner_display || appt?.practitioner || '—';
+    const clinic       = appt?._business_display      || appt?.clinic       || '—';
+    const dateTime     = appt?.starts_at ? formatSlotDateTime(appt.starts_at, this._regionTz(session)) : '—';
+    const apptType     = appt?._appointment_type_display || appt?.appointment_type || '';
+
+    const { subject, html, text } = rescheduleBlocked({ practitioner, clinic, dateTime, apptType });
+
+    const prefixedSubject = `[Reschedule Blocked — 24h] ${region} — ${phone || userEmail || 'unknown'} — ${subject}`;
+
+    return { to, subject: prefixedSubject, html, text };
+  }
+
+  /**
+   * Pre-filled WhatsApp message text for the "Message on WhatsApp" option on
+   * the 24-hour appointment-change-blocked prompt (cancel or reschedule).
+   * @param {object} session
+   * @param {object} appt - enriched appointment object
+   * @param {'cancel'|'reschedule'} action
+   */
+  _buildAppointmentChangeBlockedSummary(session, appt, action) {
+    const userPhone = session.phone_number || session.phoneNumber || '';
+    const practitioner = appt?._practitioner_display || '';
+    const clinic = appt?._business_display || '';
+    const dt = appt?._display_dt || '';
+
+    let msg = `Hi, I wanted to ${action} my appointment`;
+    if (practitioner) msg += ` with ${practitioner}`;
+    if (clinic) msg += ` at ${clinic}`;
+    if (dt) msg += ` (${dt})`;
+    msg += ", but it's within 24 hours so the bot could not process it.";
+    if (userPhone) msg += ` My WhatsApp: ${userPhone}.`;
+    return msg;
   }
 
   /**

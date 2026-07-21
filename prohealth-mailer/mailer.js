@@ -1,5 +1,5 @@
 /**
- * ProHealth Mailer Service
+ * Prohealth Mailer Service
  *
  * Accepts:
  *   POST /email  { to: string[], subject: string, html: string, text?: string }
@@ -29,7 +29,7 @@ app.use(bodyParser.json({ limit: '2mb' }));
 
 const user        = process.env.GMAIL_USER;
 const pass        = process.env.GMAIL_APP_PASSWORD;
-const displayName = process.env.GMAIL_FROM_NAME || 'ProHealth';
+const displayName = process.env.GMAIL_FROM_NAME || 'Prohealth';
 const PORT        = process.env.PORT || 8089;
 
 // ─── Logo attachment ──────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ const LOGO_PATH = path.join(__dirname, 'prohealth-logo.png');
 const LOGO_CID  = 'prohealth-logo';
 
 /**
- * Returns the nodemailer inline attachment object for the ProHealth logo,
+ * Returns the nodemailer inline attachment object for the Prohealth logo,
  * or null if the logo file is not found.
  */
 function getLogoAttachment() {
@@ -144,7 +144,7 @@ app.post('/email', async (req, res) => {
 
     const body    = req.body || {};
     const to      = Array.isArray(body.to) ? body.to.filter(Boolean) : [];
-    const subject = String(body.subject || 'ProHealth Notification');
+    const subject = String(body.subject || 'Prohealth Notification');
     const html    = body.html  ? String(body.html)  : '';
     const text    = body.text  ? String(body.text)  : '';
 
@@ -175,14 +175,14 @@ app.get('/smoke', async (_req, res) => {
 
     const html = `<!DOCTYPE html>
 <html><body style="font-family:Arial,sans-serif;padding:32px;">
-  <img src="cid:${LOGO_CID}" alt="ProHealth" style="max-width:180px;display:block;margin-bottom:16px;"/>
+  <img src="cid:${LOGO_CID}" alt="Prohealth" style="max-width:180px;display:block;margin-bottom:16px;"/>
   <h2 style="color:#005587;">Mailer Smoke Test ✅</h2>
   <p>If you can see the logo above and this text, the mailer is working correctly.</p>
 </body></html>`;
 
     await sendEmail({
       to:      [user],
-      subject: 'ProHealth Mailer Smoke Test',
+      subject: 'Prohealth Mailer Smoke Test',
       html,
       text:    'Mailer smoke test — if you see this, it works.',
     });

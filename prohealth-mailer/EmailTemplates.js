@@ -1,6 +1,6 @@
 // File: /opt/prohealth-mailer/EmailTemplates.js
 //
-// Modular HTML email templates for ProHealth appointment notifications.
+// Modular HTML email templates for Prohealth appointment notifications.
 // Each exported function returns { subject, html, text } ready to POST to /email.
 //
 // Logo is embedded via CID (cid:prohealth-logo). The mailer service attaches
@@ -15,15 +15,15 @@
 
 // ─── Shared layout helpers ────────────────────────────────────────────────────
 
-const BRAND_COLOR      = '#005587';   // ProHealth navy
-const ACCENT_COLOR     = '#00AEEF';   // ProHealth teal
+const BRAND_COLOR      = '#005587';   // Prohealth navy
+const ACCENT_COLOR     = '#00AEEF';   // Prohealth teal
 const SUCCESS_COLOR    = '#27AE60';
 const CANCEL_COLOR     = '#E74C3C';
 const RESCHEDULE_COLOR = '#F39C12';
 const FONT_STACK       = "Arial, 'Helvetica Neue', Helvetica, sans-serif";
 
 /**
- * Wraps content in the shared ProHealth email chrome:
+ * Wraps content in the shared Prohealth email chrome:
  *   - White card on a light-grey background
  *   - Logo at top
  *   - Coloured header bar with title
@@ -63,7 +63,7 @@ function wrapTemplate({ headerColor, headerIcon, headerTitle, bodyHtml }) {
           <!-- Logo row -->
           <tr>
             <td align="center" style="background:#ffffff;padding:28px 32px 20px;">
-              <img src="cid:prohealth-logo" alt="ProHealth" width="180"
+              <img src="cid:prohealth-logo" alt="Prohealth" width="180"
                    style="display:block;max-width:180px;height:auto;border:0;"/>
             </td>
           </tr>
@@ -97,7 +97,7 @@ function wrapTemplate({ headerColor, headerIcon, headerTitle, bodyHtml }) {
             <td style="padding:20px 32px 28px;text-align:center;">
               <p style="margin:0;font-size:12px;color:#8a9ab0;line-height:1.6;">
                 Need help? Reply to this email or message us on WhatsApp.<br/>
-                &copy; ${new Date().getFullYear()} ProHealth Asia. All rights reserved.
+                &copy; ${new Date().getFullYear()} Prohealth Asia. All rights reserved.
               </p>
             </td>
           </tr>
@@ -173,13 +173,13 @@ function p(text, style = {}) {
  *
  * @param {object} opts
  * @param {string} opts.practitioner  - e.g. "Dr. Jane Smith"
- * @param {string} opts.clinic        - e.g. "ProHealth In Touch Physiotherapy"
+ * @param {string} opts.clinic        - e.g. "Prohealth In Touch Physiotherapy"
  * @param {string} opts.dateTime      - human-readable date/time string
  * @param {string} [opts.apptType]    - e.g. "Initial Physiotherapy"
  * @returns {{ subject: string, html: string, text: string }}
  */
 function bookingConfirmed({ practitioner, clinic, dateTime, apptType }) {
-  const subject = 'Your Appointment is Confirmed – ProHealth';
+  const subject = 'Your Appointment is Confirmed – Prohealth';
 
   const bodyHtml = `
     ${p('Hi there,')}
@@ -196,7 +196,7 @@ function bookingConfirmed({ practitioner, clinic, dateTime, apptType }) {
   `;
 
   const text =
-    `Your Appointment is Confirmed – ProHealth\n\n` +
+    `Your Appointment is Confirmed – Prohealth\n\n` +
     `Hi there,\n\n` +
     `Your appointment has been successfully booked.\n\n` +
     `Practitioner : ${practitioner || '—'}\n` +
@@ -205,7 +205,7 @@ function bookingConfirmed({ practitioner, clinic, dateTime, apptType }) {
     (apptType ? `Type         : ${apptType}\n` : '') +
     `\nPlease arrive 10 minutes early to complete any necessary paperwork.\n\n` +
     `To cancel or reschedule, message us on WhatsApp.\n\n` +
-    `We look forward to seeing you!\n\nProHealth`;
+    `We look forward to seeing you!\n\nProhealth`;
 
   const html = wrapTemplate({
     headerColor: SUCCESS_COLOR,
@@ -228,7 +228,7 @@ function bookingConfirmed({ practitioner, clinic, dateTime, apptType }) {
  * @returns {{ subject: string, html: string, text: string }}
  */
 function appointmentCancelled({ practitioner, clinic, dateTime, apptType }) {
-  const subject = 'Your Appointment Has Been Cancelled – ProHealth';
+  const subject = 'Your Appointment Has Been Cancelled – Prohealth';
 
   const bodyHtml = `
     ${p('Hi there,')}
@@ -244,7 +244,7 @@ function appointmentCancelled({ practitioner, clinic, dateTime, apptType }) {
   `;
 
   const text =
-    `Your Appointment Has Been Cancelled – ProHealth\n\n` +
+    `Your Appointment Has Been Cancelled – Prohealth\n\n` +
     `Hi there,\n\n` +
     `Your appointment has been cancelled.\n\n` +
     `Practitioner : ${practitioner || '—'}\n` +
@@ -252,12 +252,108 @@ function appointmentCancelled({ practitioner, clinic, dateTime, apptType }) {
     `Date & Time  : ${dateTime || '—'}\n` +
     (apptType ? `Type         : ${apptType}\n` : '') +
     `\nIf this was a mistake or you'd like to rebook, message us on WhatsApp.\n\n` +
-    `We hope to see you again soon.\n\nProHealth`;
+    `We hope to see you again soon.\n\nProhealth`;
 
   const html = wrapTemplate({
     headerColor: CANCEL_COLOR,
     headerIcon:  '❌',
     headerTitle: 'Appointment Cancelled',
+    bodyHtml,
+  });
+
+  return { subject, html, text };
+}
+
+/**
+ * Cancellation blocked by the 24-hour policy — contact-required notice.
+ * Sent when a patient tries to cancel via WhatsApp within 24h of the
+ * appointment start; the bot does not cancel it, so front desk needs to
+ * follow up directly (cancellation fees may apply).
+ *
+ * @param {object} opts
+ * @param {string} opts.practitioner
+ * @param {string} opts.clinic
+ * @param {string} opts.dateTime
+ * @param {string} [opts.apptType]
+ * @returns {{ subject: string, html: string, text: string }}
+ */
+function cancellationBlocked({ practitioner, clinic, dateTime, apptType }) {
+  const subject = 'Cancellation Request Within 24 Hours – Contact Required – Prohealth';
+
+  const bodyHtml = `
+    ${p('Hi there,')}
+    ${p('A patient tried to cancel the appointment below via WhatsApp, but it starts within the next 24 hours, so it was not cancelled automatically. Cancellation fees may apply — please contact the patient directly to confirm.')}
+    ${appointmentBox({
+      'Practitioner': practitioner,
+      'Clinic':       clinic,
+      'Date & Time':  dateTime,
+      'Type':         apptType,
+    })}
+    ${p('Please follow up with the patient as soon as possible.', { 'margin-bottom': '0' })}
+  `;
+
+  const text =
+    `Cancellation Request Within 24 Hours – Contact Required – Prohealth\n\n` +
+    `Hi there,\n\n` +
+    `A patient tried to cancel the appointment below via WhatsApp, but it starts within the next 24 hours, so it was not cancelled automatically. Cancellation fees may apply — please contact the patient directly to confirm.\n\n` +
+    `Practitioner : ${practitioner || '—'}\n` +
+    `Clinic       : ${clinic || '—'}\n` +
+    `Date & Time  : ${dateTime || '—'}\n` +
+    (apptType ? `Type         : ${apptType}\n` : '') +
+    `\nPlease follow up with the patient as soon as possible.\n\nProhealth`;
+
+  const html = wrapTemplate({
+    headerColor: CANCEL_COLOR,
+    headerIcon:  '⚠️',
+    headerTitle: 'Cancellation Needs Attention',
+    bodyHtml,
+  });
+
+  return { subject, html, text };
+}
+
+/**
+ * Reschedule blocked by the 24-hour policy — contact-required notice.
+ * Sent when a patient tries to reschedule via WhatsApp within 24h of the
+ * appointment start; the bot does not reschedule it, so front desk needs to
+ * follow up directly (cancellation fees may apply).
+ *
+ * @param {object} opts
+ * @param {string} opts.practitioner
+ * @param {string} opts.clinic
+ * @param {string} opts.dateTime
+ * @param {string} [opts.apptType]
+ * @returns {{ subject: string, html: string, text: string }}
+ */
+function rescheduleBlocked({ practitioner, clinic, dateTime, apptType }) {
+  const subject = 'Reschedule Request Within 24 Hours – Contact Required – Prohealth';
+
+  const bodyHtml = `
+    ${p('Hi there,')}
+    ${p('A patient tried to reschedule the appointment below via WhatsApp, but it starts within the next 24 hours, so it was not rescheduled automatically. Cancellation fees may apply — please contact the patient directly to confirm.')}
+    ${appointmentBox({
+      'Practitioner': practitioner,
+      'Clinic':       clinic,
+      'Date & Time':  dateTime,
+      'Type':         apptType,
+    })}
+    ${p('Please follow up with the patient as soon as possible.', { 'margin-bottom': '0' })}
+  `;
+
+  const text =
+    `Reschedule Request Within 24 Hours – Contact Required – Prohealth\n\n` +
+    `Hi there,\n\n` +
+    `A patient tried to reschedule the appointment below via WhatsApp, but it starts within the next 24 hours, so it was not rescheduled automatically. Cancellation fees may apply — please contact the patient directly to confirm.\n\n` +
+    `Practitioner : ${practitioner || '—'}\n` +
+    `Clinic       : ${clinic || '—'}\n` +
+    `Date & Time  : ${dateTime || '—'}\n` +
+    (apptType ? `Type         : ${apptType}\n` : '') +
+    `\nPlease follow up with the patient as soon as possible.\n\nProhealth`;
+
+  const html = wrapTemplate({
+    headerColor: RESCHEDULE_COLOR,
+    headerIcon:  '⚠️',
+    headerTitle: 'Reschedule Needs Attention',
     bodyHtml,
   });
 
@@ -276,7 +372,7 @@ function appointmentCancelled({ practitioner, clinic, dateTime, apptType }) {
  * @returns {{ subject: string, html: string, text: string }}
  */
 function appointmentRescheduled({ practitioner, clinic, oldDateTime, newDateTime, apptType }) {
-  const subject = 'Your Appointment Has Been Rescheduled – ProHealth';
+  const subject = 'Your Appointment Has Been Rescheduled – Prohealth';
 
   const bodyHtml = `
     ${p('Hi there,')}
@@ -319,7 +415,7 @@ function appointmentRescheduled({ practitioner, clinic, oldDateTime, newDateTime
   `;
 
   const text =
-    `Your Appointment Has Been Rescheduled – ProHealth\n\n` +
+    `Your Appointment Has Been Rescheduled – Prohealth\n\n` +
     `Hi there,\n\n` +
     `Your appointment has been rescheduled.\n\n` +
     `Previous slot : ${oldDateTime || '—'}\n` +
@@ -328,7 +424,7 @@ function appointmentRescheduled({ practitioner, clinic, oldDateTime, newDateTime
     `Clinic       : ${clinic || '—'}\n` +
     (apptType ? `Type         : ${apptType}\n` : '') +
     `\nPlease arrive 10 minutes early for your rescheduled appointment.\n\n` +
-    `To make further changes, message us on WhatsApp.\n\nProHealth`;
+    `To make further changes, message us on WhatsApp.\n\nProhealth`;
 
   const html = wrapTemplate({
     headerColor: RESCHEDULE_COLOR,
@@ -340,4 +436,4 @@ function appointmentRescheduled({ practitioner, clinic, oldDateTime, newDateTime
   return { subject, html, text };
 }
 
-module.exports = { bookingConfirmed, appointmentCancelled, appointmentRescheduled };
+module.exports = { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked };
