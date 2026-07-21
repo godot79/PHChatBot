@@ -2,6 +2,31 @@
 
 const axios = require("axios");
 const ClinikoHeaders = require("./ClinikoHeaders.js");
+const BulkContext = require("../core/BulkContext.js");
+
+// Shared concurrency cap for requests made inside BulkContext.run()/bulkAll()
+// (fan-outs like BOOK_SOONEST's ~30-40 practitioner sweep). Firing all of
+// them at once regularly overwhelmed Cliniko's gateway and cascaded into mass
+// 15s timeouts (confirmed live 2026-07-21). Regular single calls never touch
+// this queue — only bulk-flagged callers do, so one heavy fan-out can't slow
+// down an unrelated single-call request from a different user/flow.
+const BULK_CONCURRENCY_LIMIT = 15;
+let _activeBulk = 0;
+const _bulkQueue = [];
+
+function _acquireBulkSlot() {
+  if (_activeBulk < BULK_CONCURRENCY_LIMIT) {
+    _activeBulk++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _bulkQueue.push(resolve));
+}
+
+function _releaseBulkSlot() {
+  const next = _bulkQueue.shift();
+  if (next) next(); // hand the slot straight to the next waiter
+  else _activeBulk--;
+}
 
 /**
  * Utility class for sending HTTP requests to the Cliniko API with appropriate headers.
@@ -23,6 +48,8 @@ class SendMessage {
    * @returns {Promise<Object>} Response data.
    */
   async patch(data = {}) {
+    const bulk = BulkContext.isBulk();
+    if (bulk) await _acquireBulkSlot();
     try {
       console.log('PATCHing to Cliniko:', `${this.baseURL}${this.endpoint}`);
       console.log('With payload:', JSON.stringify(data));
@@ -36,6 +63,8 @@ class SendMessage {
       const message = error.response?.data || error.message;
       console.error(`[SendMessage] PATCH ${this.endpoint} failed:`, message);
       throw { status, error: message };
+    } finally {
+      if (bulk) _releaseBulkSlot();
     }
   }
 
@@ -44,6 +73,8 @@ class SendMessage {
    * @returns {Promise<Object>} Response data.
    */
   async get() {
+    const bulk = BulkContext.isBulk();
+    if (bulk) await _acquireBulkSlot();
     try {
       console.info(`Sending GET ${this.baseURL}${this.endpoint} with params: `, this.params);
       const response = await axios.get(`${this.baseURL}${this.endpoint}`, {
@@ -57,6 +88,8 @@ class SendMessage {
       const message = error.response?.data || error.message;
       console.error(`[SendMessage] GET ${this.endpoint} failed:`, message);
       throw { status, error: message };
+    } finally {
+      if (bulk) _releaseBulkSlot();
     }
   }
 
@@ -66,6 +99,8 @@ class SendMessage {
    * @returns {Promise<Object>} Response data.
    */
   async post(data = {}) {
+    const bulk = BulkContext.isBulk();
+    if (bulk) await _acquireBulkSlot();
     try {
       console.log('POSTing to Cliniko:', `${this.baseURL}${this.endpoint}`);
       console.log('With payload:', JSON.stringify(data));
@@ -79,8 +114,13 @@ class SendMessage {
       const message = error.response?.data || error.message;
       console.error(`[SendMessage] POST ${this.endpoint} failed:`, message);
       throw { status, error: message };
+    } finally {
+      if (bulk) _releaseBulkSlot();
     }
   }
 }
 
 module.exports = SendMessage;
+// Exposed for tests only — a plain number, unaffected by jest.mock()
+// automocking (which only replaces function properties).
+module.exports.BULK_CONCURRENCY_LIMIT = BULK_CONCURRENCY_LIMIT;

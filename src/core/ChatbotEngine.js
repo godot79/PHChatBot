@@ -15,9 +15,8 @@ const {
   getPractitionersForTypeName,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
-  mapInBatches,
-  PRACTITIONER_FETCH_BATCH_SIZE,
 } = require('./_appointmentTypeHelpers');
+const { bulkAll } = require('./BulkContext');
 
 
 function getMailerConfig() {
@@ -2458,16 +2457,16 @@ if (/^p(rev)?$/i.test(text)) {
       const allPractitioners = [...new Map(
         (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
       ).values()];
-      // Filter by type name — batched to avoid overwhelming Cliniko's gateway
-      // with ~30-40 concurrent requests at once (see PRACTITIONER_FETCH_BATCH_SIZE).
-      const allTypes = await mapInBatches(allPractitioners, PRACTITIONER_FETCH_BATCH_SIZE,
+      // Filter by type name — bulkAll flags this as bulk so SendMessage
+      // throttles concurrency instead of firing ~30-40 requests at once.
+      const allTypes = await bulkAll(allPractitioners,
         p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id })
       );
       const phys = allPractitioners.filter((p, i) =>
         (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
       );
-      // Filter by slot availability — same batching
-      const flags = await mapInBatches(phys, PRACTITIONER_FETCH_BATCH_SIZE,
+      // Filter by slot availability — same throttling
+      const flags = await bulkAll(phys,
         p => practitionerHasSlotsForTypeName(p, typeNorm)
       );
       return phys.filter((_, i) => flags[i]);

@@ -6,6 +6,8 @@
  * required directly by tests without going through ChatbotEngine.
  */
 
+const { bulkAll } = require('./BulkContext');
+
 // Same non-enumerable _partial convention as ClinikoAPI.js — a caller-supplied
 // clinikoAPI is not guaranteed to be the real resilient class (tests inject
 // plain mocks), so these fan-outs defend their own per-call failures rather
@@ -13,32 +15,6 @@
 function _markPartial(arr) {
   Object.defineProperty(arr, '_partial', { value: true, enumerable: false, configurable: true });
   return arr;
-}
-
-// Concurrency cap for practitioner-level Cliniko fanouts. Firing all ~30-40
-// practitioners' getAppointmentTypes at once regularly overwhelms Cliniko's
-// gateway and cascades into mass 15s timeouts (confirmed live 2026-07-21).
-// Smaller sequential batches trade a little wall-clock time for not hammering
-// the gateway — a bad batch only costs that batch, not the whole fanout.
-// Chosen after comparing 5/10/15/20/unbatched against real HK data — under
-// healthy conditions every size succeeds with zero failures (this can't
-// reproduce the actual gateway congestion that motivated the fix), so 15 was
-// picked as a balance: meaningfully smaller than firing all ~34-40 at once,
-// without the ~5x common-case slowdown a batch size of 5 costs.
-const PRACTITIONER_FETCH_BATCH_SIZE = 15;
-
-/**
- * Runs `fn` over `items` in fixed-size sequential batches — each batch's
- * items run concurrently via Promise.all, batches run one after another.
- * Result order matches `items` order.
- */
-async function mapInBatches(items, batchSize, fn) {
-  const results = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    results.push(...await Promise.all(batch.map(fn)));
-  }
-  return results;
 }
 
 /**
@@ -53,7 +29,7 @@ async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
   const result = [];
   const allPractitioners = (groups || []).flatMap(g => g.practitioners || []);
   let hadFailure = false;
-  const allTypes = await mapInBatches(allPractitioners, PRACTITIONER_FETCH_BATCH_SIZE, p =>
+  const allTypes = await bulkAll(allPractitioners, p =>
     clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
       hadFailure = true;
       return [];
@@ -81,7 +57,7 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
   let hadFailure = false;
-  const allTypes = await mapInBatches(practitioners, PRACTITIONER_FETCH_BATCH_SIZE, p =>
+  const allTypes = await bulkAll(practitioners, p =>
     clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
       hadFailure = true;
       return [];
@@ -111,7 +87,7 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
   let hadFailure = false;
-  const allTypes = await mapInBatches(practitioners, PRACTITIONER_FETCH_BATCH_SIZE, p =>
+  const allTypes = await bulkAll(practitioners, p =>
     clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
       hadFailure = true;
       return [];
@@ -196,6 +172,4 @@ module.exports = {
   parseApptPatientType,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
-  mapInBatches,
-  PRACTITIONER_FETCH_BATCH_SIZE,
 };
