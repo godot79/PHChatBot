@@ -1979,7 +1979,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         const buckets = new Map(); // norm -> { displayName, ids:Set }
         for (const t of types || []) {
           if (!t || !t.name) continue;
-          if (/UWC/i.test(t.name)) continue;
+          if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
           const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
           const n = normName(display);
@@ -2400,7 +2400,7 @@ if (/^p(rev)?$/i.test(text)) {
       const buckets = new Map(); // norm -> { displayName, ids:Set }
       for (const t of allTypes || []) {
         if (!t || !t.name) continue;
-        if (/UWC/i.test(t.name)) continue;
+        if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
         const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
         const n = normName(display);
         if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
@@ -2912,7 +2912,7 @@ if (/^p(rev)?$/i.test(text)) {
             const buckets = new Map();
             for (const t of allTypes || []) {
               if (!t || !t.name) continue;
-              if (/UWC/i.test(t.name)) continue;
+              if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
               const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
               const n = normName(display);
               if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
@@ -2982,7 +2982,7 @@ if (/^p(rev)?$/i.test(text)) {
         const buckets = new Map();
         for (const t of allTypes || []) {
           if (!t || !t.name) continue;
-          if (/UWC/i.test(t.name)) continue;
+          if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
@@ -3384,7 +3384,7 @@ if (/^p(rev)?$/i.test(text)) {
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
-          if (/UWC/i.test(t.name)) continue;
+          if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
           if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
@@ -3729,7 +3729,7 @@ if (/^p(rev)?$/i.test(text)) {
         for (const types of allClinicTypes) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
-            if (/UWC/i.test(t.name)) continue;
+            if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
             const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
             const n = normName(display);
             if (!buckets.has(n)) buckets.set(n, { display, ids: new Set() });
