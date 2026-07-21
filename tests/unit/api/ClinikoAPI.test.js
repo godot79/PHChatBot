@@ -47,10 +47,22 @@ describe('ClinikoAPI', () => {
       expect(result.map(c => c.id)).toEqual(['1', '4']);
     });
 
-    test('returns [] when SendMessage throws', async () => {
+    // Regression: a failed fetch (e.g. a 429) must not read the same as a
+    // genuine "zero clinics" response — see handleViewLocationsState, which
+    // used to tell the user "No clinic information is currently available"
+    // on a transient Cliniko error (2026-07-21 chatbot-webhook incident).
+    test('returns [] marked _partial when SendMessage throws', async () => {
       mockGet.mockRejectedValue(new Error('network error'));
       const result = await api.getClinics();
       expect(result).toEqual([]);
+      expect(result._partial).toBe(true);
+    });
+
+    test('genuine zero clinics (200 response, empty list) is not marked _partial', async () => {
+      mockGet.mockResolvedValue({ businesses: [] });
+      const result = await api.getClinics();
+      expect(result).toEqual([]);
+      expect(result._partial).toBeUndefined();
     });
   });
 
@@ -96,6 +108,43 @@ describe('ClinikoAPI', () => {
       const result = await api.findPatientByEmailAndDob('nobody@example.com', null);
 
       expect(result).toBeNull();
+    });
+
+    // Regression: a real API failure (429/5xx/network) during patient lookup
+    // used to be swallowed to null — identical to "you're not a registered
+    // patient". A registered patient hitting a transient Cliniko error during
+    // verification would be wrongly told to check their details / re-register,
+    // instead of "try again". Genuine non-match (tested above) must still
+    // resolve to null, not throw.
+    test('genuine non-match still resolves to null, not an error', async () => {
+      mockGet.mockResolvedValue({ patients: [] });
+      await expect(api.findPatientByEmailAndDob('nobody@example.com', '1990-01-15'))
+        .resolves.toBeNull();
+    });
+
+    test('throws (does not return null) when the primary lookup fails', async () => {
+      mockGet.mockRejectedValue({ status: 429, message: 'Too Many Requests' });
+
+      await expect(api.findPatientByEmailAndDob('test@example.com', '1990-01-15'))
+        .rejects.toBeTruthy();
+    });
+
+    test('throws when the email-only lookup fails (no DOB provided)', async () => {
+      mockGet.mockRejectedValue({ status: 500, message: 'server error' });
+
+      await expect(api.findPatientByEmailAndDob('test@example.com', null))
+        .rejects.toBeTruthy();
+    });
+
+    test('throws when the lenient DOB-fallback lookup fails after the primary call finds no match', async () => {
+      // Primary email+DOB query succeeds with no rows, so it falls through to
+      // the lenient email-only fallback — which then fails.
+      mockGet
+        .mockResolvedValueOnce({ patients: [] })
+        .mockRejectedValueOnce({ status: 429, message: 'Too Many Requests' });
+
+      await expect(api.findPatientByEmailAndDob('test@example.com', '1990-01-15'))
+        .rejects.toBeTruthy();
     });
   });
 
@@ -230,10 +279,68 @@ describe('ClinikoAPI', () => {
       expect(result[0].id).toBe('X');
     });
 
-    test('returns empty array when API throws', async () => {
+    test('returns [] marked _partial when API throws', async () => {
       mockGet.mockRejectedValue({ status: 500, error: 'server error' });
       const result = await api.getBookingsByPatientId('42', { when: 'future' });
       expect(result).toEqual([]);
+      expect(result._partial).toBe(true);
+    });
+
+    // Regression: 'both' mode catches each side's failure locally so the
+    // other side's real results still come back — but that success-path
+    // return used to bypass the outer catch entirely, so a one-sided failure
+    // here read as a complete, confirmed result instead of a possibly-short one.
+    test('both mode: one side fails, other succeeds — merged result returned, marked _partial', async () => {
+      const cancelledAppt = { id: 'C1', starts_at: new Date().toISOString() };
+      mockGet
+        .mockRejectedValueOnce({ status: 429, error: 'rate limited' })       // active fetch fails
+        .mockResolvedValueOnce({ individual_appointments: [cancelledAppt] }); // cancelled fetch succeeds
+
+      const result = await api.getBookingsByPatientId('42', { when: 'future', statusMode: 'both' });
+
+      expect(result).toHaveLength(1);        // cancelled's real result survives
+      expect(result[0].id).toBe('C1');
+      expect(result._partial).toBe(true);    // but active-side rows may be missing
+    });
+
+    test('both mode: both sides succeed — not marked _partial', async () => {
+      mockGet.mockResolvedValue({ individual_appointments: [] });
+      const result = await api.getBookingsByPatientId('42', { when: 'future', statusMode: 'both' });
+      expect(result._partial).toBeUndefined();
+    });
+  });
+
+  // ─── getPractitionersForClinic ─────────────────────────────────────────────
+
+  describe('getPractitionersForClinic()', () => {
+    test('returns practitioners for a clinic', async () => {
+      mockGet.mockResolvedValue({ practitioners: [{ id: 'p1' }] });
+      const result = await api.getPractitionersForClinic('biz-1');
+      expect(result).toEqual([{ id: 'p1' }]);
+    });
+
+    test('returns [] marked _partial when SendMessage throws', async () => {
+      mockGet.mockRejectedValue({ status: 429, error: 'rate limited' });
+      const result = await api.getPractitionersForClinic('biz-1');
+      expect(result).toEqual([]);
+      expect(result._partial).toBe(true);
+    });
+
+    test('genuine zero practitioners (200 response, no practitioners key) is not marked _partial', async () => {
+      mockGet.mockResolvedValue({});
+      const result = await api.getPractitionersForClinic('biz-1');
+      expect(result).toEqual([]);
+      expect(result._partial).toBeUndefined();
+    });
+
+    test('a failed fetch is not cached — the very next call retries against Cliniko', async () => {
+      mockGet.mockRejectedValueOnce({ status: 429, error: 'rate limited' });
+      const failed = await api.getPractitionersForClinic('biz-1');
+      expect(failed._partial).toBe(true);
+
+      mockGet.mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
+      const retried = await api.getPractitionersForClinic('biz-1');
+      expect(retried).toEqual([{ id: 'p1' }]);
     });
   });
 

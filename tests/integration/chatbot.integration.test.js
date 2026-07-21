@@ -5033,6 +5033,28 @@ describe('Interactive envelope integrity — fees, locations, and string+menu re
     ]);
   });
 
+  // Regression: a failed Cliniko fetch (e.g. a 429 under load) must not be
+  // told to the user as "no clinic information is currently available" — that
+  // reads as a data/config problem instead of "try again in a moment".
+  // ClinikoAPI.getClinics() marks a failed fetch with a non-enumerable
+  // _partial flag on the returned empty array (see ClinikoAPI.test.js);
+  // this proves the engine actually branches on it.
+  test('handleViewLocationsState shows a retry message (not "no clinic information") when getClinics() fetch failed', async () => {
+    const partialEmpty = [];
+    Object.defineProperty(partialEmpty, '_partial', { value: true, enumerable: false, configurable: true });
+    engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue(partialEmpty);
+
+    const session = await unverifiedLocationSession('+6562000005');
+    const [text] = await engine.handleViewLocationsState(session, '');
+
+    expect(text).toMatch(/trouble reaching|try again/i);
+    expect(text).not.toMatch(/no clinic information/i);
+
+    engine.clinikoAPI.getClinics = jest.fn().mockResolvedValue([
+      { business_name: 'Clinic A', address_1: '1 Test St', city: 'Singapore', phone_number: '+6512345678', profile_url: null },
+    ]);
+  });
+
   // ─── String + menu coercion guard ──────────────────────────────────────────
 
   test('Verification success reply is a MessageEnvelope (not plain string)', async () => {
@@ -5057,6 +5079,81 @@ describe('Interactive envelope integrity — fees, locations, and string+menu re
     const session = await db.getSession(id);
     const reply = await engine.handleBookManageOptions(session, 'zzzzunknown');
     expect(reply).toHaveProperty('interactive');
+  });
+});
+
+// =============================================================================
+// SUITE — handleVerifyState: email+DOB lookup distinguishes a genuine
+// non-match from a real Cliniko API failure.
+//
+// findPatientByEmailAndDob() used to swallow every failure (network, 429,
+// 5xx) to null — identical to "no patient with this email/DOB". A registered
+// patient hitting a transient Cliniko error during verification was wrongly
+// told to double-check their details (or push into duplicate registration),
+// instead of "try again". See ClinikoAPI.test.js for the underlying
+// throw-vs-null unit coverage; this proves handleVerifyState actually
+// surfaces the distinction to the user.
+// =============================================================================
+describe('handleVerifyState — email+DOB verification distinguishes real failure from no-match', () => {
+  let db, sm, engine;
+
+  beforeAll(async () => {
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  // Pre-seeds verify_email/verify_dob so handleVerifyState skips straight to
+  // the "Step 3: verify with API" branch instead of walking the email/DOB
+  // collection prompts.
+  async function verifyStepSession(phone) {
+    const id = await db.createSession(phone, null, 60);
+    await db.updateSession(id, {
+      verified: 0, conversation_state: 'VERIFY',
+      context: JSON.stringify({ region: 'SG' }),
+      data: JSON.stringify({ verify_email: 'test@example.com', verify_dob: '1990-01-15' }),
+    });
+    return db.getSession(id);
+  }
+
+  test('genuine non-match (no such patient) shows the "check your details" prompt', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockResolvedValue(null);
+    const session = await verifyStepSession('+6564000001');
+    const reply = await engine.handleVerifyState(session, '');
+    expect(String(reply)).toMatch(/couldn't verify those details/i);
+  });
+
+  test('a real API failure (e.g. Cliniko rate-limited) shows a distinct "try again" message, not "check your details"', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockRejectedValue({ status: 429, message: 'Too Many Requests' });
+    const session = await verifyStepSession('+6564000002');
+    const reply = await engine.handleVerifyState(session, '');
+    expect(String(reply)).toMatch(/trouble verifying|try again in a moment/i);
+    expect(String(reply)).not.toMatch(/check your email and date of birth/i);
+  });
+
+  test('a successful match still verifies normally (regression guard)', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockResolvedValue({ id: 'pat-1', email: 'test@example.com' });
+    const session = await verifyStepSession('+6564000003');
+    const reply = await engine.handleVerifyState(session, '');
+    expect(String(reply)).toMatch(/verification successful/i);
+    const updated = await db.getSessionByPhone('+6564000003');
+    expect(updated.verified).toBeTruthy();
+    expect(updated.patient_id).toBe('pat-1');
+  });
+
+  test('after an API-failure reply, the session lands in the same verify_error_prompt retry state as a genuine non-match', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockRejectedValue({ status: 500 });
+    const session = await verifyStepSession('+6564000004');
+    await engine.handleVerifyState(session, '');
+    const updated = await db.getSessionByPhone('+6564000004');
+    expect(updated.conversation_state).toBe('VERIFY');
+    const data = JSON.parse(updated.data || '{}');
+    expect(data.verify_error_prompt).toBe(true);
   });
 });
 

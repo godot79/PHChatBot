@@ -1356,7 +1356,16 @@ async handleMessageEnvelope(message, phoneNumber) {
       this.logger.error('[handleVerifyState] API error during verification', { err: e?.message });
       cleared.verify_error_prompt = true;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
-      return FAIL_PROMPT;
+      // Distinct from the "wrong email/DOB" message above — this is a real
+      // fetch failure (e.g. Cliniko rate-limited), not a non-matching patient.
+      return buttons(
+        "We're having trouble verifying your details right now. Please try again in a moment.",
+        [
+          { id: '1', title: 'Try again' },
+          { id: '2', title: 'Email us' },
+          { id: '3', title: 'Main menu' }
+        ]
+      );
     }
   }
 
@@ -4244,10 +4253,17 @@ if (/^p(rev)?$/i.test(text)) {
 
   async handleViewLocationsState(session, message) {
     const clinics = await this.clinikoAPI.getClinics();
-    const displayText = clinics.length
-      ? clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n')
-      : 'No clinic information is currently available.';
-    const locationText = `Here are our clinic locations:\n\n${displayText}`;
+    // clinics._partial means the fetch failed (e.g. a 429) — not a confirmed
+    // empty list. Don't tell the user "no clinics" when it's really "try again".
+    let locationText;
+    if (clinics._partial) {
+      locationText = "We're having trouble reaching our clinic system right now. Please try again in a moment.";
+    } else {
+      const displayText = clinics.length
+        ? clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n')
+        : 'No clinic information is currently available.';
+      locationText = `Here are our clinic locations:\n\n${displayText}`;
+    }
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
     return [locationText, await this.renderMainMenu(fresh)];

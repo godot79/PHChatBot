@@ -37,6 +37,16 @@ function _cacheSet(map, key, data, ttlMs) {
   map.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
+// Tags an array with a non-enumerable _partial marker so callers can tell
+// "confirmed empty" apart from "a fetch failed, this result may be short/wrong"
+// without changing the array's shape (JSON.stringify/spread/length unaffected).
+// Same convention already used by getPractitionersByClinic() and
+// getAvailableSlotsByBusinessAndDate().
+function _markPartial(arr) {
+  Object.defineProperty(arr, '_partial', { value: true, enumerable: false, configurable: true });
+  return arr;
+}
+
 /**
  * Cliniko API wrapper for patient, appointment, and clinic actions.
  */
@@ -84,7 +94,9 @@ class ClinikoAPI {
       return await this._getClinicsRaw();
     } catch (error) {
       this.logger.error("getClinics failed");
-      return [];
+      // A failed fetch (e.g. a 429) is not a confirmed "zero clinics" result —
+      // see _markPartial().
+      return _markPartial([]);
     }
   }
 
@@ -109,7 +121,9 @@ class ClinikoAPI {
       return result;
     } catch (error) {
       this.logger.error(`getPractitionersForClinic failed ${error}`);
-      return [];
+      // Not cached (cache-set only happens in the try body above) and marked
+      // _partial — a failed fetch is not a confirmed "zero practitioners" result.
+      return _markPartial([]);
     }
   }
 
@@ -160,19 +174,19 @@ class ClinikoAPI {
 
       // If DOB provided but no direct match was returned by API, try a lenient filter:
       // Fetch email-only and then filter client-side on DOB (in case API ignores DOB filter in some tenants)
-      try {
-        const p2 = new URLSearchParams();
-        p2.append('q[]', `email:=${safeEmail}`);
-        const d2 = await new SendMessage(`/patients?${p2.toString()}`, {}).get();
-        const rows = Array.isArray(d2?.patients) ? d2.patients : [];
-        const found = rows.find(r => String(r?.date_of_birth || '').slice(0,10) === safeDob);
-        return found || null;
-      } catch {
-        return null;
-      }
+      const p2 = new URLSearchParams();
+      p2.append('q[]', `email:=${safeEmail}`);
+      const d2 = await new SendMessage(`/patients?${p2.toString()}`, {}).get();
+      const rows = Array.isArray(d2?.patients) ? d2.patients : [];
+      const found = rows.find(r => String(r?.date_of_birth || '').slice(0,10) === safeDob);
+      return found || null;
     } catch (error) {
+      // A genuine "no such patient" is a 200 response handled by the return
+      // paths above — this only fires on a real fetch failure (network, 429,
+      // 5xx). Rethrow rather than returning null: callers must not treat an
+      // API outage as "you're not a registered patient".
       this.logger.error(`findPatientByEmailAndDob failed for ${safeEmail}/${safeDob || '—'}`);
-      return null;
+      throw error;
     }
   }
 
@@ -520,14 +534,17 @@ class ClinikoAPI {
       };
 
       let rows = [];
+      let hadFailure = false;
       if (statusMode === 'both') {
         // Sequential to avoid transient 4xx surfacing as double-fail
         const active = await fetchOne('active').catch(() => {
           this.logger.error(`getBookingsByPatientId(active) failed for ${patientId}`);
+          hadFailure = true;
           return [];
         });
         const cancelled = await fetchOne('cancelled').catch(() => {
           this.logger.error(`getBookingsByPatientId(cancelled) failed for ${patientId}`);
+          hadFailure = true;
           return [];
         });
         const map = new Map();
@@ -548,10 +565,15 @@ class ClinikoAPI {
         return (when === 'past') ? (db - da) : (da - db);
       });
 
+      // 'both' mode catches each side locally so one failing side doesn't
+      // discard the other's real results — but that means a partial failure
+      // here never reaches the outer catch below. Mark it explicitly instead.
+      if (hadFailure) return _markPartial(rows);
+
       return rows;
     } catch (error) {
       this.logger.error(`getBookingsByPatientId failed for ${patientId}`, { error: error?.response?.status || error?.message });
-      return [];
+      return _markPartial([]);
     }
   }
 
