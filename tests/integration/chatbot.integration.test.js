@@ -744,6 +744,55 @@ describe('ChatbotEngine — state machine', () => {
     expect(reply).toMatch(/no.*slot|try another/i);
   });
 
+  // Regression (2026-07-21 staging incident): buildAvailablePhysiosForTypeName
+  // used to fan out getAppointmentTypes() per practitioner via Promise.all —
+  // one practitioner's fetch failing discarded every other practitioner's
+  // real, successfully-fetched data too, turning "1 of 2 practitioners timed
+  // out" into a false "no practitioners available" for the whole clinic.
+  test('BOOK_SOONEST: one practitioner\'s appointment-types fetch failing does not hide the other practitioner who has slots', async () => {
+    engine.clinikoAPI.getPractitionersByClinic = jest.fn().mockResolvedValue([
+      {
+        clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch',
+        practitioners: [
+          { id: 'PRAC-FAIL', first_name: 'Fails', last_name: 'Timesout' },
+          { id: 'PRAC-OK', first_name: 'Jolinna', last_name: 'Chan' },
+        ],
+      },
+    ]);
+    engine.clinikoAPI.getAppointmentTypes = jest.fn(({ practitioner_id }) => {
+      if (practitioner_id === 'PRAC-FAIL') return Promise.reject(new Error('timeout of 15000ms exceeded'));
+      return Promise.resolve([{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' }]);
+    });
+    engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([
+      { appointment_type_name: 'Initial 60 Min Visit (New Clients)', slot: futureISO(2) },
+    ]);
+
+    const session = await seedVerified(db, '+6530000052');
+    await db.updateSession(session.id, {
+      conversation_state: 'BOOK_SOONEST',
+      data: JSON.stringify({
+        email: 'p@test.com',
+        patient_name: 'Test Patient',
+        selection_step: 'choose_type',
+        appt_type_page: 0,
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)' },
+        ],
+        funnel_catalogue: [{ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', service: 'Physiotherapy', insurer: null, patientType: null, duration: 60 }],
+      }),
+    });
+    const fresh = await db.getSession(session.id);
+    const reply = await callHandler(engine, ['handleBookSoonestState', 'handleBookSoonest'], fresh, '1');
+
+    // Must not be the generic top-level error, and must not falsely claim no
+    // practitioners are available. Only one physio matches (the other errored
+    // out), so the funnel auto-advances all the way to Jolinna's real slot
+    // list instead of stopping on an error or a false "nothing available".
+    expect(reply).not.toMatch(/unexpected error/i);
+    expect(reply).toMatch(/Jolinna Chan/);
+    expect(reply).not.toMatch(/no.*practitioners|no.*slot/i);
+  });
+
   // Confirm booking — yes
   test('CONFIRM_BOOKING "yes" calls createAppointment and returns success', async () => {
     ClinikoAPI.prototype.createAppointment = jest.fn().mockResolvedValue({ id: 'NEW-001', starts_at: futureISO(2) });

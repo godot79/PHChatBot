@@ -197,45 +197,90 @@ describe('getPractitionersForTypeName()', () => {
   });
 });
 
-// ─── getAppointmentTypes rejection behaviour ──────────────────────────────────
-// Documents the current fast-fail behaviour: if one practitioner's fetch rejects,
-// the whole Promise.all rejects and propagates up to the handler (and ultimately
-// to handleMessageEnvelope's catch block). No partial results are returned.
+// ─── getAppointmentTypes partial-failure resilience ───────────────────────────
+// Regression coverage for the 2026-07-21 staging incident: BOOK_SOONEST (and
+// the equivalent BOOK_SPECIFIC_CLINIC choose_type/choose_physio steps) fanned
+// out one getAppointmentTypes() call per practitioner via Promise.all — a
+// single practitioner's fetch failing (timeout, 429, etc.) rejected the whole
+// batch and discarded every OTHER practitioner's already-fetched, real types,
+// surfacing as a generic error / false "nothing available" to the user. Live
+// verified: forcing exactly one timeout among 40 real practitioner fetches
+// against the live account caused the old code to throw away all 39 good
+// results. Now uses Promise.allSettled — a single failure only shortens the
+// result (tagged _partial), it never discards the rest or throws.
 
-describe('rejection propagation — current fast-fail behaviour', () => {
+describe('getAppointmentTypes partial-failure resilience', () => {
   const groups = [{ clinic_id: 'c1', clinic_name: 'C', practitioners: [{ id: 'p1' }, { id: 'p2' }] }];
 
-  test('getAllAppointmentTypesForAllPractitioners rejects when one fetch fails', async () => {
+  test('getAllAppointmentTypesForAllPractitioners: one rejection does not discard the other practitioner\'s types, and does not throw', async () => {
     const api = {
       getAppointmentTypes: jest.fn()
         .mockResolvedValueOnce([{ id: 't1', name: 'Initial' }])
         .mockRejectedValueOnce(new Error('Cliniko 429')),
     };
 
-    await expect(getAllAppointmentTypesForAllPractitioners(api, groups))
-      .rejects.toThrow('Cliniko 429');
+    const result = await getAllAppointmentTypesForAllPractitioners(api, groups);
+
+    expect(result.map(t => t.id)).toEqual(['t1']);
+    expect(result._partial).toBe(true);
   });
 
-  test('getPractitionersForType rejects when one fetch fails', async () => {
+  test('getAllAppointmentTypesForAllPractitioners: all succeeding is not marked _partial', async () => {
+    const api = {
+      getAppointmentTypes: jest.fn().mockResolvedValue([{ id: 't1', name: 'Initial' }]),
+    };
+    const result = await getAllAppointmentTypesForAllPractitioners(api, groups);
+    expect(result._partial).toBeUndefined();
+  });
+
+  test('getPractitionersForType: one rejection does not discard the other practitioner, and does not throw', async () => {
     const api = {
       getAppointmentTypes: jest.fn()
         .mockResolvedValueOnce([{ id: 't1', name: 'Initial' }])
         .mockRejectedValueOnce(new Error('network error')),
     };
 
-    await expect(getPractitionersForType(groups, api, 't1'))
-      .rejects.toThrow('network error');
+    const result = await getPractitionersForType(groups, api, 't1');
+
+    expect(result.map(p => p.id)).toEqual(['p1']);
+    expect(result._partial).toBe(true);
   });
 
-  test('getPractitionersForTypeName rejects when one fetch fails', async () => {
+  test('getPractitionersForType: all succeeding is not marked _partial', async () => {
+    const api = { getAppointmentTypes: jest.fn().mockResolvedValue([{ id: 't1', name: 'Initial' }]) };
+    const result = await getPractitionersForType(groups, api, 't1');
+    expect(result._partial).toBeUndefined();
+  });
+
+  test('getPractitionersForTypeName: one rejection does not discard the other practitioner, and does not throw', async () => {
     const api = {
       getAppointmentTypes: jest.fn()
         .mockResolvedValueOnce([{ id: 't1', name: 'Initial' }])
         .mockRejectedValueOnce(new Error('timeout')),
     };
 
-    await expect(getPractitionersForTypeName(groups, api, 'Initial'))
-      .rejects.toThrow('timeout');
+    const result = await getPractitionersForTypeName(groups, api, 'Initial');
+
+    expect(result.map(p => p.id)).toEqual(['p1']);
+    expect(result._partial).toBe(true);
+  });
+
+  test('getPractitionersForTypeName: all succeeding is not marked _partial', async () => {
+    const api = { getAppointmentTypes: jest.fn().mockResolvedValue([{ id: 't1', name: 'Initial' }]) };
+    const result = await getPractitionersForTypeName(groups, api, 'Initial');
+    expect(result._partial).toBeUndefined();
+  });
+
+  test('_partial is non-enumerable — does not change JSON.stringify or spread behavior', async () => {
+    const api = {
+      getAppointmentTypes: jest.fn()
+        .mockResolvedValueOnce([{ id: 't1', name: 'Initial' }])
+        .mockRejectedValueOnce(new Error('Cliniko 429')),
+    };
+    const result = await getAllAppointmentTypesForAllPractitioners(api, groups);
+    expect(result._partial).toBe(true);
+    expect(JSON.stringify(result)).toBe(JSON.stringify([{ id: 't1', name: 'Initial' }]));
+    expect([...result]).toEqual([{ id: 't1', name: 'Initial' }]);
   });
 });
 
