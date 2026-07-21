@@ -20,8 +20,12 @@ function _markPartial(arr) {
 // gateway and cascades into mass 15s timeouts (confirmed live 2026-07-21).
 // Smaller sequential batches trade a little wall-clock time for not hammering
 // the gateway — a bad batch only costs that batch, not the whole fanout.
-// Starting value; tune based on observed Cliniko behavior.
-const PRACTITIONER_FETCH_BATCH_SIZE = 5;
+// Chosen after comparing 5/10/15/20/unbatched against real HK data — under
+// healthy conditions every size succeeds with zero failures (this can't
+// reproduce the actual gateway congestion that motivated the fix), so 15 was
+// picked as a balance: meaningfully smaller than firing all ~34-40 at once,
+// without the ~5x common-case slowdown a batch size of 5 costs.
+const PRACTITIONER_FETCH_BATCH_SIZE = 15;
 
 /**
  * Runs `fn` over `items` in fixed-size sequential batches — each batch's
