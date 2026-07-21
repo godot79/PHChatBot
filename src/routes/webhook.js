@@ -108,11 +108,10 @@ async function handleIncomingMessage(data) {
       if (!content) {
         const interactiveSubtype = message.interactive?.type;
         logger.warn(`Unhandled interactive subtype: ${interactiveSubtype} payload: ${JSON.stringify(message.interactive)}`);
-        // If message.interactive is absent this is an automatic WhatsApp system event
-        // (e.g. delivery/render notification), not a user tap — drop silently.
-        if (message.interactive == null) continue;
-        // Real tap with unrecognised subtype — send a plain text nudge so the user
-        // can type their choice instead (avoids re-sending buttons which would loop).
+        // message.interactive absent/unrecognised — this branch only runs for items in
+        // data.messages (real inbound taps); delivery/status events arrive via the
+        // separate `statuses` array and never reach here. Send a plain text nudge so
+        // the user can type their choice instead (avoids re-sending buttons which would loop).
         await whatsAppAPI.sendTextMessage(phone, "Sorry, that tap didn't come through. Please type a number to respond (e.g. type 1, 2, or 3).");
         continue;
       }

@@ -4,7 +4,7 @@
  * Unit tests for handleIncomingMessage in webhook.js.
  *
  * Covers the interactive message type parsing fix:
- *   - message.interactive absent/null  → silent drop (WhatsApp system event)
+ *   - message.interactive absent/null  → plain text nudge, no chatbot call
  *   - message.interactive with unknown subtype → plain text nudge, no chatbot call
  *   - valid button_reply / list_reply   → routed to chatbot engine normally
  *   - text / button messages            → routed normally
@@ -111,19 +111,19 @@ const ERROR_NUDGE = expect.stringContaining('type a number');
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('webhook: interactive message parsing', () => {
-  test('interactive with message.interactive = null → silent drop', async () => {
+  test('interactive with message.interactive = null → plain text nudge, no engine call', async () => {
     await postWebhook([{ from: '123', type: 'interactive', interactive: null }]);
     await settle();
     expect(mockEngineInstance.handleMessageEnvelope).not.toHaveBeenCalled();
-    expect(mockApiInstance.sendTextMessage).not.toHaveBeenCalled();
+    expect(mockApiInstance.sendTextMessage).toHaveBeenCalledWith('123', ERROR_NUDGE);
     expect(mockApiInstance.sendInteractive).not.toHaveBeenCalled();
   });
 
-  test('interactive with message.interactive absent → silent drop', async () => {
+  test('interactive with message.interactive absent → plain text nudge, no engine call', async () => {
     await postWebhook([{ from: '123', type: 'interactive' }]);
     await settle();
     expect(mockEngineInstance.handleMessageEnvelope).not.toHaveBeenCalled();
-    expect(mockApiInstance.sendTextMessage).not.toHaveBeenCalled();
+    expect(mockApiInstance.sendTextMessage).toHaveBeenCalledWith('123', ERROR_NUDGE);
   });
 
   test('interactive with unknown subtype (nfm_reply) → plain text nudge, no engine call', async () => {
