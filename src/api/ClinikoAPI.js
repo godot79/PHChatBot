@@ -8,12 +8,17 @@ const RegionContext = require('../core/RegionContext');
 const EXCLUDED_CLINIC_PATTERN = /UWC|physio\s*focus/i;
 
 // Short-lived cache for getPractitionersByClinic(), keyed by region.
-// Practitioners change rarely; 30 s collapses the 14 call sites in the engine
-// to at most one real Cliniko fetch per region per request window.
+// Practitioners change rarely; 120 s collapses the 14 call sites in the engine
+// to at most one real Cliniko fetch per region per request window. Was 30 s,
+// but a single BOOK_SOONEST catalogue-build fanout across ~34-40 practitioners
+// regularly takes 70-90 s on its own, so the old TTL had already expired by
+// the time buildAvailablePhysiosForTypeName re-scanned the same practitioners
+// moments later — forcing a full second live fanout that collided with
+// Cliniko and caused mass 15s timeouts. 120 s comfortably covers that window.
 const _groupsCache = new Map();
-const GROUPS_CACHE_TTL_MS = 30_000;
+const GROUPS_CACHE_TTL_MS = 120_000;
 
-// Same 30 s pattern for the other rarely-changing lookups that a single
+// Same pattern for the other rarely-changing lookups that a single
 // availability sweep (buildAvailablePhysiosForTypeName) re-fetches dozens of
 // times for data already implied by the cached groups above.
 const _apptTypesCache = new Map();          // key: `${region}:${practitioner_id}`
@@ -344,7 +349,10 @@ class ClinikoAPI {
       return output;
     } catch (err) {
       this.logger.error(`getAppointmentTypes failed: ${err.message}`);
-      throw err;
+      // Not cached (cache-set only happens in the try body above) and marked
+      // _partial — a failed fetch (e.g. a 15s timeout) is not a confirmed
+      // "zero types" result. Same convention as getPractitionersForClinic().
+      return _markPartial([]);
     }
   }
 
@@ -646,25 +654,29 @@ class ClinikoAPI {
     const cached = _groupsCache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt) return cached.data;
 
-    const params = new URLSearchParams();
-    params.append('q[]', 'show_in_online_bookings:=T');
     try {
       // Use the throwing variant so a failed clinics fetch (e.g. a 429 under
       // load) skips the cache-set below instead of caching an empty result
       // for GROUPS_CACHE_TTL_MS and masking real availability underneath it.
       const clinics = await this._getClinicsRaw();
+      let hadFailure = false;
       const results = await Promise.all(
         clinics.map(async (clinic) => {
-          const url = `/businesses/${clinic.id}/practitioners?${params.toString()}`;
-          console.debug(`Fetching physios : ${url}`);
-          const practitioners = await new SendMessage(url, {}).get();
+          // Reuses the already-protected per-clinic lookup instead of an
+          // inline fetch — one clinic timing out no longer discards every
+          // other clinic's data (see _markPartial()).
+          const practitioners = await this.getPractitionersForClinic(clinic.id);
+          if (practitioners._partial) hadFailure = true;
           return {
             clinic_id: clinic.id,
             clinic_name: clinic.business_name,
-            practitioners: practitioners.practitioners || []
+            practitioners
           };
         })
       );
+      // A partial result is missing data for at least one clinic — don't
+      // cache it, same reasoning as the failed-clinics-fetch case below.
+      if (hadFailure) return _markPartial(results);
       _groupsCache.set(cacheKey, { data: results, expiresAt: Date.now() + GROUPS_CACHE_TTL_MS });
       return results;
     } catch (error) {

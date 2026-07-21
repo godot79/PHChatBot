@@ -344,6 +344,40 @@ describe('ClinikoAPI', () => {
     });
   });
 
+  // ─── getAppointmentTypes ────────────────────────────────────────────────────
+
+  describe('getAppointmentTypes()', () => {
+    test('returns filtered types for a practitioner', async () => {
+      mockGet.mockResolvedValue({
+        appointment_types: [{ id: 't1', name: 'Initial', show_in_online_bookings: true }],
+      });
+      const result = await api.getAppointmentTypes({ practitioner_id: 'p1' });
+      expect(result).toEqual([{ id: 't1', name: 'Initial', show_in_online_bookings: true }]);
+    });
+
+    // Regression: this used to re-throw, which crashed every Promise.all fan-out
+    // built on top of it (buildAvailablePhysiosForTypeName, getAllAppointmentTypesForAllPractitioners,
+    // etc.) on a single practitioner's timeout instead of degrading gracefully.
+    test('returns [] marked _partial when SendMessage throws — does not re-throw', async () => {
+      mockGet.mockRejectedValue({ status: 429, error: 'timeout' });
+      const result = await api.getAppointmentTypes({ practitioner_id: 'p1' });
+      expect(result).toEqual([]);
+      expect(result._partial).toBe(true);
+    });
+
+    test('a failed fetch is not cached — the very next call retries against Cliniko', async () => {
+      mockGet.mockRejectedValueOnce({ status: 429, error: 'timeout' });
+      const failed = await api.getAppointmentTypes({ practitioner_id: 'p1' });
+      expect(failed._partial).toBe(true);
+
+      mockGet.mockResolvedValueOnce({
+        appointment_types: [{ id: 't1', name: 'Initial', show_in_online_bookings: true }],
+      });
+      const retried = await api.getAppointmentTypes({ practitioner_id: 'p1' });
+      expect(retried).toEqual([{ id: 't1', name: 'Initial', show_in_online_bookings: true }]);
+    });
+  });
+
   // ─── getPractitionersByClinic ──────────────────────────────────────────────
 
   describe('getPractitionersByClinic()', () => {
@@ -422,12 +456,44 @@ describe('ClinikoAPI', () => {
       expect(retried[0]).toEqual({ clinic_id: 'c1', clinic_name: 'Clinic A', practitioners: [{ id: 'p1' }] });
     });
 
-    test('returns [] when a clinic practitioner fetch throws', async () => {
+    // Regression: one clinic's practitioner fetch timing out used to discard
+    // every other clinic's data too (Promise.all all-or-nothing). Confirmed
+    // live 2026-07-21 — a single clinic timeout turned a valid multi-clinic
+    // result into a false "no appointment types anywhere" for the user.
+    test('one clinic practitioner fetch throws — other clinics still returned, result marked _partial', async () => {
+      mockGet
+        .mockResolvedValueOnce({
+          businesses: [
+            { id: 'c1', business_name: 'Clinic A' },
+            { id: 'c2', business_name: 'Clinic B' },
+          ],
+        })
+        .mockRejectedValueOnce(new Error('timeout'))
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p2' }] });
+
+      const result = await api.getPractitionersByClinic();
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toEqual({ clinic_id: 'c1', clinic_name: 'Clinic A', practitioners: [] });
+      expect(result[1]).toEqual({ clinic_id: 'c2', clinic_name: 'Clinic B', practitioners: [{ id: 'p2' }] });
+      expect(result._partial).toBe(true);
+    });
+
+    // A partial result must not be cached — the failed clinic should retry
+    // for real on the very next call, not serve stale/incomplete data.
+    test('a partial result (one clinic failed) is not cached', async () => {
       mockGet
         .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
         .mockRejectedValueOnce(new Error('timeout'));
-      const result = await api.getPractitionersByClinic();
-      expect(result).toEqual([]);
+      await api.getPractitionersByClinic();
+
+      mockGet
+        .mockResolvedValueOnce({ businesses: [{ id: 'c1', business_name: 'Clinic A' }] })
+        .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
+      const retried = await api.getPractitionersByClinic();
+
+      expect(retried[0].practitioners).toEqual([{ id: 'p1' }]);
+      expect(retried._partial).toBeUndefined();
     });
 
     test('returns empty practitioners array when API response has no practitioners key', async () => {
@@ -459,7 +525,7 @@ describe('ClinikoAPI', () => {
         .mockResolvedValueOnce({ practitioners: [{ id: 'p1' }] });
 
       await api.getPractitionersByClinic();
-      jest.advanceTimersByTime(31_000);           // expire the cache entry
+      jest.advanceTimersByTime(121_000);          // expire the cache entry
       await api.getPractitionersByClinic();
 
       expect(mockGet).toHaveBeenCalledTimes(4);  // 2 fetches × (getClinics + 1 clinic)
