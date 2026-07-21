@@ -25,6 +25,8 @@ const {
   parseApptPatientType,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  mapInBatches,
+  PRACTITIONER_FETCH_BATCH_SIZE,
 } = require('../../../src/core/_appointmentTypeHelpers');
 
 // Minimal mock of clinikoAPI — only getAppointmentTypes is needed here
@@ -80,6 +82,44 @@ describe('getAllAppointmentTypesForAllPractitioners()', () => {
     expect(callOrder).toEqual(['p1', 'p2', 'p3']);
 
     resolvers.forEach(r => r([]));
+    await resultPromise;
+  });
+
+  // Regression: firing every practitioner's fetch at once (Promise.all with no
+  // batching) regularly overwhelmed Cliniko's gateway and cascaded into mass
+  // 15s timeouts (confirmed live 2026-07-21). Batching trades a little
+  // wall-clock time for containing a bad batch to just that batch.
+  test('batches practitioner fetches at PRACTITIONER_FETCH_BATCH_SIZE — second batch does not start until the first settles', async () => {
+    const batchSize = PRACTITIONER_FETCH_BATCH_SIZE;
+    const totalPractitioners = batchSize + 2; // guarantees a second, partial batch
+    const groups = [{
+      clinic_id: 'c1',
+      clinic_name: 'C',
+      practitioners: Array.from({ length: totalPractitioners }, (_, i) => ({ id: `p${i + 1}` })),
+    }];
+
+    const callOrder = [];
+    const resolvers = [];
+    const api = {
+      getAppointmentTypes: jest.fn(({ practitioner_id }) => {
+        callOrder.push(practitioner_id);
+        return new Promise(resolve => resolvers.push(resolve));
+      }),
+    };
+
+    const resultPromise = getAllAppointmentTypesForAllPractitioners(api, groups);
+    await new Promise(r => setImmediate(r));
+
+    // Only the first batch has fired so far
+    expect(callOrder).toHaveLength(batchSize);
+
+    // Resolve batch 1 — batch 2 should only fire after this
+    resolvers.splice(0).forEach(r => r([]));
+    await new Promise(r => setImmediate(r));
+
+    expect(callOrder).toHaveLength(totalPractitioners);
+
+    resolvers.splice(0).forEach(r => r([]));
     await resultPromise;
   });
 

@@ -15,6 +15,28 @@ function _markPartial(arr) {
   return arr;
 }
 
+// Concurrency cap for practitioner-level Cliniko fanouts. Firing all ~30-40
+// practitioners' getAppointmentTypes at once regularly overwhelms Cliniko's
+// gateway and cascades into mass 15s timeouts (confirmed live 2026-07-21).
+// Smaller sequential batches trade a little wall-clock time for not hammering
+// the gateway — a bad batch only costs that batch, not the whole fanout.
+// Starting value; tune based on observed Cliniko behavior.
+const PRACTITIONER_FETCH_BATCH_SIZE = 5;
+
+/**
+ * Runs `fn` over `items` in fixed-size sequential batches — each batch's
+ * items run concurrently via Promise.all, batches run one after another.
+ * Result order matches `items` order.
+ */
+async function mapInBatches(items, batchSize, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    results.push(...await Promise.all(batch.map(fn)));
+  }
+  return results;
+}
+
 /**
  * Fetch appointment types for every practitioner in parallel and return a
  * deduplicated union, preserving first-seen order. A practitioner whose fetch
@@ -27,13 +49,11 @@ async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
   const result = [];
   const allPractitioners = (groups || []).flatMap(g => g.practitioners || []);
   let hadFailure = false;
-  const allTypes = await Promise.all(
-    allPractitioners.map(p =>
-      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
-        hadFailure = true;
-        return [];
-      })
-    )
+  const allTypes = await mapInBatches(allPractitioners, PRACTITIONER_FETCH_BATCH_SIZE, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
   );
   for (const types of allTypes) {
     for (const t of (types || [])) {
@@ -57,13 +77,11 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
   let hadFailure = false;
-  const allTypes = await Promise.all(
-    practitioners.map(p =>
-      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
-        hadFailure = true;
-        return [];
-      })
-    )
+  const allTypes = await mapInBatches(practitioners, PRACTITIONER_FETCH_BATCH_SIZE, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
   );
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => String(t.id) === targetId)) result.push(p);
@@ -89,13 +107,11 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
   let hadFailure = false;
-  const allTypes = await Promise.all(
-    practitioners.map(p =>
-      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
-        hadFailure = true;
-        return [];
-      })
-    )
+  const allTypes = await mapInBatches(practitioners, PRACTITIONER_FETCH_BATCH_SIZE, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
   );
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => normalize(t.name) === target)) result.push(p);
@@ -176,4 +192,6 @@ module.exports = {
   parseApptPatientType,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  mapInBatches,
+  PRACTITIONER_FETCH_BATCH_SIZE,
 };

@@ -15,6 +15,8 @@ const {
   getPractitionersForTypeName,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  mapInBatches,
+  PRACTITIONER_FETCH_BATCH_SIZE,
 } = require('./_appointmentTypeHelpers');
 
 
@@ -875,7 +877,7 @@ class ChatbotEngine {
   async renderBookingMethodMenu(session) {
     return list('How would you like to book?', 'Choose method', [
       { id: '1', title: 'By last visit' },
-      { id: '2', title: 'Soonest available' },
+      { id: '2', title: 'Soonest available', description: 'Searches all physios — can take a minute' },
       { id: '3', title: 'Specific date' },
       { id: '4', title: 'Specific physio' },
       { id: '5', title: 'Specific clinic' },
@@ -2456,16 +2458,17 @@ if (/^p(rev)?$/i.test(text)) {
       const allPractitioners = [...new Map(
         (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
       ).values()];
-      // Filter by type name — all getAppointmentTypes fetches in parallel
-      const allTypes = await Promise.all(
-        allPractitioners.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+      // Filter by type name — batched to avoid overwhelming Cliniko's gateway
+      // with ~30-40 concurrent requests at once (see PRACTITIONER_FETCH_BATCH_SIZE).
+      const allTypes = await mapInBatches(allPractitioners, PRACTITIONER_FETCH_BATCH_SIZE,
+        p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id })
       );
       const phys = allPractitioners.filter((p, i) =>
         (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
       );
-      // Filter by slot availability — all slot checks in parallel
-      const flags = await Promise.all(
-        phys.map(p => practitionerHasSlotsForTypeName(p, typeNorm))
+      // Filter by slot availability — same batching
+      const flags = await mapInBatches(phys, PRACTITIONER_FETCH_BATCH_SIZE,
+        p => practitionerHasSlotsForTypeName(p, typeNorm)
       );
       return phys.filter((_, i) => flags[i]);
     };
