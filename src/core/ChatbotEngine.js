@@ -15,6 +15,7 @@ const {
   getPractitionersForTypeName,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  _markPartial,
 } = require('./_appointmentTypeHelpers');
 
 
@@ -2430,18 +2431,24 @@ if (/^p(rev)?$/i.test(text)) {
       const allPractitioners = [...new Map(
         (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
       ).values()];
-      // Filter by type name — all getAppointmentTypes fetches in parallel
-      const allTypes = await Promise.all(
+      // Filter by type name — all getAppointmentTypes fetches in parallel.
+      // One practitioner's fetch failing (timeout, 429, etc.) must not discard
+      // every other practitioner's already-fetched types — Promise.all would
+      // reject the whole batch on a single rejection.
+      const settledTypes = await Promise.allSettled(
         allPractitioners.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
       );
+      const hadTypeFetchFailure = settledTypes.some(s => s.status === 'rejected');
       const phys = allPractitioners.filter((p, i) =>
-        (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
+        settledTypes[i].status === 'fulfilled' &&
+        (settledTypes[i].value || []).some(t => normName(t.name) === typeNorm)
       );
       // Filter by slot availability — all slot checks in parallel
       const flags = await Promise.all(
         phys.map(p => practitionerHasSlotsForTypeName(p, typeNorm))
       );
-      return phys.filter((_, i) => flags[i]);
+      const result = phys.filter((_, i) => flags[i]);
+      return hadTypeFetchFailure ? _markPartial(result) : result;
     };
 
     if (data.no_slots_prompt) {
@@ -2564,6 +2571,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
           context: 'soonest',
           retryStep: 'choose_type',
+          result: practitioners,
           confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
         });
       }
@@ -3688,6 +3696,7 @@ if (/^p(rev)?$/i.test(text)) {
     // choose_type — type names available in this clinic
     // =====================================================================
     if (data.selection_step === 'choose_type') {
+      let hadClinicTypeFailure = false;
       if (!Array.isArray(data.appointment_type_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const clinicId = String(data.selected_clinic?.id || data.selected_clinic || '');
@@ -3695,10 +3704,16 @@ if (/^p(rev)?$/i.test(text)) {
         const pracList = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
 
         const buckets = new Map(); // norm -> { display, ids:Set }
-        const allClinicTypes = await Promise.all(
+        // One practitioner's fetch failing must not discard every other
+        // practitioner's already-fetched types — Promise.all would reject
+        // the whole batch on a single rejection.
+        const settledClinicTypes = await Promise.allSettled(
           pracList.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) }))
         );
-        for (const types of allClinicTypes) {
+        hadClinicTypeFailure = settledClinicTypes.some(s => s.status === 'rejected');
+        for (const s of settledClinicTypes) {
+          if (s.status === 'rejected') continue;
+          const types = s.value;
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name)) continue;
@@ -3725,6 +3740,7 @@ if (/^p(rev)?$/i.test(text)) {
       if ((data.appointment_type_list || []).length === 0) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
+          result: hadClinicTypeFailure ? _markPartial([]) : [],
           confirmedMessage: `No appointment types found at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
         });
       }
@@ -3774,11 +3790,16 @@ if (/^p(rev)?$/i.test(text)) {
         const pracInClinic = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
         const wanted = new Set((data.appt_type_name_to_ids_norm?.[normName(data.selected_appt_type?.name || '')] || []).map(String));
 
-        const physioTypeResults = await Promise.all(
+        // One practitioner's fetch failing must not discard every other
+        // practitioner's already-fetched types — Promise.all would reject
+        // the whole batch on a single rejection.
+        const settledPhysioTypes = await Promise.allSettled(
           pracInClinic.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) }))
         );
+        const hadPhysioTypeFailure = settledPhysioTypes.some(s => s.status === 'rejected');
         const practitioners = pracInClinic.filter((p, i) =>
-          (physioTypeResults[i] || []).some(t => wanted.has(String(t.id)))
+          settledPhysioTypes[i].status === 'fulfilled' &&
+          (settledPhysioTypes[i].value || []).some(t => wanted.has(String(t.id)))
         );
 
         data.practitioner_list = sortPractitioners(practitioners);
@@ -3799,7 +3820,7 @@ if (/^p(rev)?$/i.test(text)) {
           delete data.practitioner_list;
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_physio_list',
-            result: groups,
+            result: [groups, hadPhysioTypeFailure ? _markPartial([]) : []],
             confirmedMessage: `No practitioners at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'} offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
           });
         }

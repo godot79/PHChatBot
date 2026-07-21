@@ -6,31 +6,46 @@
  * required directly by tests without going through ChatbotEngine.
  */
 
+// Tags an array with a non-enumerable _partial marker so callers can tell
+// "confirmed complete" apart from "one or more practitioner fetches failed,
+// this result may be short" — same convention as ClinikoAPI's _markPartial.
+function _markPartial(arr) {
+  Object.defineProperty(arr, '_partial', { value: true, enumerable: false, configurable: true });
+  return arr;
+}
+
 /**
  * Fetch appointment types for every practitioner in parallel and return a
- * deduplicated union, preserving first-seen order.
+ * deduplicated union, preserving first-seen order. A single practitioner's
+ * fetch failing (timeout, 429, etc.) no longer discards every other
+ * practitioner's real, already-fetched types — the result is tagged _partial
+ * instead, so it may be short but is never silently empty.
  */
 async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
   const seen = new Set();
   const result = [];
   const allPractitioners = (groups || []).flatMap(g => g.practitioners || []);
-  const allTypes = await Promise.all(
+  const settled = await Promise.allSettled(
     allPractitioners.map(p => clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
   );
-  for (const types of allTypes) {
-    for (const t of (types || [])) {
+  let hadFailure = false;
+  for (const s of settled) {
+    if (s.status === 'rejected') { hadFailure = true; continue; }
+    for (const t of (s.value || [])) {
       if (!seen.has(t.id)) {
         seen.add(t.id);
         result.push(t);
       }
     }
   }
-  return result;
+  return hadFailure ? _markPartial(result) : result;
 }
 
 /**
  * Return all unique practitioners who offer the given appointment type ID.
- * Compares IDs as strings — Cliniko may return numeric IDs.
+ * Compares IDs as strings — Cliniko may return numeric IDs. A single
+ * practitioner's fetch failing no longer discards the others (see
+ * getAllAppointmentTypesForAllPractitioners); result is tagged _partial.
  */
 async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
   const targetId = String(apptTypeId);
@@ -38,18 +53,22 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
   const practitioners = [...new Map(
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
-  const allTypes = await Promise.all(
+  const settled = await Promise.allSettled(
     practitioners.map(p => clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
   );
+  let hadFailure = false;
   practitioners.forEach((p, i) => {
-    if ((allTypes[i] || []).some(t => String(t.id) === targetId)) result.push(p);
+    if (settled[i].status === 'rejected') { hadFailure = true; return; }
+    if ((settled[i].value || []).some(t => String(t.id) === targetId)) result.push(p);
   });
-  return result;
+  return hadFailure ? _markPartial(result) : result;
 }
 
 /**
  * Return all practitioners who offer an appointment type by NAME.
- * Type IDs differ per practitioner for the same label, so ID matching is insufficient.
+ * Type IDs differ per practitioner for the same label, so ID matching is
+ * insufficient. A single practitioner's fetch failing no longer discards
+ * the others; result is tagged _partial.
  */
 async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   const normalize = (s) => String(s || '')
@@ -64,13 +83,15 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   const practitioners = [...new Map(
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
-  const allTypes = await Promise.all(
+  const settled = await Promise.allSettled(
     practitioners.map(p => clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
   );
+  let hadFailure = false;
   practitioners.forEach((p, i) => {
-    if ((allTypes[i] || []).some(t => normalize(t.name) === target)) result.push(p);
+    if (settled[i].status === 'rejected') { hadFailure = true; return; }
+    if ((settled[i].value || []).some(t => normalize(t.name) === target)) result.push(p);
   });
-  return result;
+  return hadFailure ? _markPartial(result) : result;
 }
 
 /**
@@ -146,4 +167,5 @@ module.exports = {
   parseApptPatientType,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  _markPartial,
 };
