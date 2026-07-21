@@ -4326,13 +4326,22 @@ if (/^p(rev)?$/i.test(text)) {
 
     if (next) {
       if (text) {
-        data[next] = text;
+        if (next === 'email') {
+          // Same format check as handleVerifyState's email step.
+          const email = text.toLowerCase();
+          if (!email.includes('@') || !email.includes('.')) {
+            return buttons("That doesn't look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+          }
+          data.email = email;
+        } else {
+          data[next] = text;
+        }
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         log.info('Collected field', { field: next });
       }
-      if (!data.first_name) return "Please tell me your first name:\n(0️⃣ Back)";
-      if (!data.last_name)  return "Got it. What's your last name?\n(0️⃣ Back)";
-      if (!data.email)      return "Thanks. Lastly, what's your email address?\n(0️⃣ Back)";
+      if (!data.first_name) return buttons("Please tell me your first name:\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+      if (!data.last_name)  return buttons("Got it. What's your last name?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+      if (!data.email)      return buttons("Thanks. Lastly, what's your email address?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
     }
 
     // All fields collected → register
