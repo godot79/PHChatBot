@@ -6,16 +6,34 @@
  * required directly by tests without going through ChatbotEngine.
  */
 
+// Same non-enumerable _partial convention as ClinikoAPI.js — a caller-supplied
+// clinikoAPI is not guaranteed to be the real resilient class (tests inject
+// plain mocks), so these fan-outs defend their own per-call failures rather
+// than assuming the injected API never rejects.
+function _markPartial(arr) {
+  Object.defineProperty(arr, '_partial', { value: true, enumerable: false, configurable: true });
+  return arr;
+}
+
 /**
  * Fetch appointment types for every practitioner in parallel and return a
- * deduplicated union, preserving first-seen order.
+ * deduplicated union, preserving first-seen order. A practitioner whose fetch
+ * fails contributes nothing (rather than failing the whole lookup); the
+ * result is marked _partial so callers can tell that apart from a confirmed
+ * "no types anywhere" result.
  */
 async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
   const seen = new Set();
   const result = [];
   const allPractitioners = (groups || []).flatMap(g => g.practitioners || []);
+  let hadFailure = false;
   const allTypes = await Promise.all(
-    allPractitioners.map(p => clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+    allPractitioners.map(p =>
+      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+        hadFailure = true;
+        return [];
+      })
+    )
   );
   for (const types of allTypes) {
     for (const t of (types || [])) {
@@ -25,7 +43,7 @@ async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
       }
     }
   }
-  return result;
+  return hadFailure ? _markPartial(result) : result;
 }
 
 /**
@@ -38,13 +56,19 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
   const practitioners = [...new Map(
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
+  let hadFailure = false;
   const allTypes = await Promise.all(
-    practitioners.map(p => clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+    practitioners.map(p =>
+      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+        hadFailure = true;
+        return [];
+      })
+    )
   );
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => String(t.id) === targetId)) result.push(p);
   });
-  return result;
+  return hadFailure ? _markPartial(result) : result;
 }
 
 /**
@@ -64,13 +88,19 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   const practitioners = [...new Map(
     (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
   ).values()];
+  let hadFailure = false;
   const allTypes = await Promise.all(
-    practitioners.map(p => clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+    practitioners.map(p =>
+      clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+        hadFailure = true;
+        return [];
+      })
+    )
   );
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => normalize(t.name) === target)) result.push(p);
   });
-  return result;
+  return hadFailure ? _markPartial(result) : result;
 }
 
 /**

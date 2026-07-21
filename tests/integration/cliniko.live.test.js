@@ -1060,6 +1060,10 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
     const clinicId = groups[0]?.clinic_id;
     if (!clinicId) { console.warn('[live] no clinics — skipping'); return; }
 
+    // getPractitionersByClinic() now calls getPractitionersForClinic() per clinic
+    // internally, so the cache this test targets may already be warm from the
+    // groups fetch above — clear it so "first call" below is a real cache miss.
+    ClinikoAPI._clearGroupsCache();
     const before = getSpy.count();
     await hk(() => api.getPractitionersForClinic(clinicId));
     const afterFirst = getSpy.count();

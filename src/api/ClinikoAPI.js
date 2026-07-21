@@ -349,7 +349,10 @@ class ClinikoAPI {
       return output;
     } catch (err) {
       this.logger.error(`getAppointmentTypes failed: ${err.message}`);
-      throw err;
+      // Not cached (cache-set only happens in the try body above) and marked
+      // _partial — a failed fetch (e.g. a 15s timeout) is not a confirmed
+      // "zero types" result. Same convention as getPractitionersForClinic().
+      return _markPartial([]);
     }
   }
 
@@ -651,25 +654,29 @@ class ClinikoAPI {
     const cached = _groupsCache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt) return cached.data;
 
-    const params = new URLSearchParams();
-    params.append('q[]', 'show_in_online_bookings:=T');
     try {
       // Use the throwing variant so a failed clinics fetch (e.g. a 429 under
       // load) skips the cache-set below instead of caching an empty result
       // for GROUPS_CACHE_TTL_MS and masking real availability underneath it.
       const clinics = await this._getClinicsRaw();
+      let hadFailure = false;
       const results = await Promise.all(
         clinics.map(async (clinic) => {
-          const url = `/businesses/${clinic.id}/practitioners?${params.toString()}`;
-          console.debug(`Fetching physios : ${url}`);
-          const practitioners = await new SendMessage(url, {}).get();
+          // Reuses the already-protected per-clinic lookup instead of an
+          // inline fetch — one clinic timing out no longer discards every
+          // other clinic's data (see _markPartial()).
+          const practitioners = await this.getPractitionersForClinic(clinic.id);
+          if (practitioners._partial) hadFailure = true;
           return {
             clinic_id: clinic.id,
             clinic_name: clinic.business_name,
-            practitioners: practitioners.practitioners || []
+            practitioners
           };
         })
       );
+      // A partial result is missing data for at least one clinic — don't
+      // cache it, same reasoning as the failed-clinics-fetch case below.
+      if (hadFailure) return _markPartial(results);
       _groupsCache.set(cacheKey, { data: results, expiresAt: Date.now() + GROUPS_CACHE_TTL_MS });
       return results;
     } catch (error) {
