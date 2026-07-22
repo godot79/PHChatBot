@@ -333,6 +333,7 @@ function resetCliniko () {
   ClinikoAPI.prototype.getPractitionerById          = jest.fn().mockResolvedValue({ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' });
   ClinikoAPI.prototype.getAppointmentTypeById       = jest.fn().mockResolvedValue({ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' });
   ClinikoAPI.prototype.getAvailableSlotsByBusinessAndDate = jest.fn().mockResolvedValue([SOONEST_SLOT]);
+  ClinikoAPI.prototype.registerNewPatient           = jest.fn().mockResolvedValue({ id: 'NEW-PATIENT-DEFAULT' });
 }
 
 function resetWhatsApp () {
@@ -4300,6 +4301,39 @@ describe('Dead-end standardization', () => {
       const reply = await callHandler(engine, ['handleVerifyState'], session, '');
       expect(reply).toMatch(/email/i);
       expect(reply).not.toMatch(/registered with us/i);
+    });
+  });
+
+  // ─── Register new patient — DOB collection ───────────────────────────────────
+  // Regression: registration used to collect only first/last name + email, so
+  // a newly-registered patient's Cliniko record had a blank date_of_birth —
+  // they could never re-verify later via "Yes, I'm registered" (email + DOB),
+  // since a real DOB can never match a blank field on file.
+  describe('Register new patient — DOB collection', () => {
+    test('after email is given, next prompt asks for date of birth (not registration yet)', async () => {
+      // seedAt() bakes in a default email — override it to undefined so this
+      // session is genuinely mid-registration with no email collected yet.
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: undefined });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, 'jane@test.com');
+      expect(reply).toMatch(/date of birth/i);
+      expect(engine.clinikoAPI.registerNewPatient).not.toHaveBeenCalled();
+    });
+
+    test('invalid DOB format is rejected with a helpful re-prompt', async () => {
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, 'not a date');
+      expect(reply).toMatch(/doesn.t look like a valid date/i);
+      expect(engine.clinikoAPI.registerNewPatient).not.toHaveBeenCalled();
+    });
+
+    test('valid DOB completes registration and is sent to Cliniko as date_of_birth', async () => {
+      engine.clinikoAPI.registerNewPatient.mockResolvedValueOnce({ id: 'NEW-PATIENT-001' });
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '15 03 1990');
+      expect(reply).toMatch(/registered/i);
+      expect(engine.clinikoAPI.registerNewPatient).toHaveBeenCalledWith(
+        expect.objectContaining({ date_of_birth: '1990-03-15' })
+      );
     });
   });
 
