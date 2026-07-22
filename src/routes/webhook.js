@@ -164,7 +164,16 @@ async function handleStatusUpdate(data) {
  * Send Test Message (POST)
  */
 router.post('/test-message', async (req, res) => {
-  const { phoneNumber, message } = req.body;
+  // /webhook is mounted behind express.raw() (needed for Meta signature
+  // verification on the real POST / route), so req.body arrives as a Buffer
+  // here too — parse it before destructuring.
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : req.body);
+  } catch (err) {
+    return res.status(400).json({ success: false, error: 'Invalid JSON body' });
+  }
+  const { phoneNumber, message } = parsedBody;
   if (!phoneNumber || !message) {
     return res.status(400).json({ success: false, error: 'Missing phoneNumber or message' });
   }
