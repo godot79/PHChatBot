@@ -15,6 +15,7 @@ const {
   getPractitionersForTypeName,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  _markPartial,
 } = require('./_appointmentTypeHelpers');
 const { bulkAll } = require('./BulkContext');
 
@@ -2433,8 +2434,9 @@ if (/^p(rev)?$/i.test(text)) {
      */
     const practitionerHasSlotsForTypeName = async (practitioner, typeNorm) => {
       const clinics = await clinicsForPractitioner(practitioner.id);
-      if (!clinics.length) return false;
+      if (!clinics.length) return { hasSlots: false, partial: false };
       const { from, to } = normalizeDateWindow();
+      let partial = false;
       for (const c of clinics) {
         const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
           business_id: String(c.id),
@@ -2442,14 +2444,20 @@ if (/^p(rev)?$/i.test(text)) {
           from,
           to
         });
+        if (raw && raw._partial) partial = true;
         const any = (raw || []).some(s => normName(s.appointment_type_name) === typeNorm);
-        if (any) return true;
+        if (any) return { hasSlots: true, partial };
       }
-      return false;
+      return { hasSlots: false, partial };
     };
 
     /**
      * Build physio list that offers the TYPE NAME and has at least one slot.
+     * Marks the returned array _partial if any practitioner's type or slot
+     * fetch failed, so a resulting empty list surfaces as "trouble checking
+     * availability, try again" (via _noSlotsRetry) rather than a confirmed
+     * "no one has slots" — matching the same convention already used by
+     * getAllAppointmentTypesForAllPractitioners and friends.
      */
     const buildAvailablePhysiosForTypeName = async (typeNorm) => {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
@@ -2462,14 +2470,17 @@ if (/^p(rev)?$/i.test(text)) {
       const allTypes = await bulkAll(allPractitioners,
         p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id })
       );
+      const hadTypeFetchFailure = allTypes.some(t => t && t._partial);
       const phys = allPractitioners.filter((p, i) =>
         (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
       );
       // Filter by slot availability — same throttling
-      const flags = await bulkAll(phys,
+      const slotResults = await bulkAll(phys,
         p => practitionerHasSlotsForTypeName(p, typeNorm)
       );
-      return phys.filter((_, i) => flags[i]);
+      const hadSlotFetchFailure = slotResults.some(r => r.partial);
+      const result = phys.filter((_, i) => slotResults[i].hasSlots);
+      return (hadTypeFetchFailure || hadSlotFetchFailure) ? _markPartial(result) : result;
     };
 
     if (data.no_slots_prompt) {
@@ -2592,6 +2603,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
           context: 'soonest',
           retryStep: 'choose_type',
+          result: practitioners,
           confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
         });
       }
