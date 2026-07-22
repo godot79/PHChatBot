@@ -474,7 +474,7 @@ class ClinikoAPI {
       this.logger.info(`Creating individual appointment:`, payload);
       const response = await new SendMessage(`/individual_appointments`).post(payload);
       this.logger.info(`Individual appointment booked:`, response?.id);
-      this.logger.info('ANALYTICS_EVENT', {
+      this.logger.analyticsEvent({
         event: 'booking_confirmed', sessionId, region, patient_id, practitioner_id, business_id,
         appointment_type_id, appointment_id: response?.id, starts_at, ts: Date.now()
       });

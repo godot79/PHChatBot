@@ -16,7 +16,7 @@
 
 jest.mock('../../src/core/Logger', () =>
   jest.fn().mockImplementation(() => ({
-    info: () => {}, warn: () => {}, error: () => {}, debug: () => {},
+    info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, analyticsEvent: () => {},
     child: function () { return this; },
   }))
 );

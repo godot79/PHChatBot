@@ -28,7 +28,7 @@ const mockApiInstance = {
 
 jest.mock('../../../src/core/Logger', () =>
   jest.fn().mockImplementation(() => ({
-    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), analyticsEvent: jest.fn(),
   }))
 );
 

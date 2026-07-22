@@ -6,6 +6,7 @@ jest.mock('../../../src/core/Logger', () =>
     warn:  () => {},
     error: () => {},
     debug: () => {},
+    analyticsEvent: () => {},
   }))
 );
 
@@ -214,11 +215,11 @@ describe('ClinikoAPI', () => {
     test('emits a structured ANALYTICS_EVENT with booking fields on success', async () => {
       const appointment = { id: '999', starts_at: validArgs.starts_at };
       mockPost.mockResolvedValue(appointment);
-      const infoSpy = jest.spyOn(api.logger, 'info');
+      const analyticsSpy = jest.spyOn(api.logger, 'analyticsEvent');
 
       await api.bookAppointment({ ...validArgs, sessionId: 'session_abc', region: 'SG' });
 
-      expect(infoSpy).toHaveBeenCalledWith('ANALYTICS_EVENT', expect.objectContaining({
+      expect(analyticsSpy).toHaveBeenCalledWith(expect.objectContaining({
         event:                'booking_confirmed',
         sessionId:            'session_abc',
         region:               'SG',
@@ -231,13 +232,13 @@ describe('ClinikoAPI', () => {
       }));
     });
 
-    test('does not emit ANALYTICS_EVENT when booking fails validation (no HTTP call made)', async () => {
+    test('does not emit an analytics event when booking fails validation (no HTTP call made)', async () => {
       const { starts_at: _omit, ...missing } = validArgs;
-      const infoSpy = jest.spyOn(api.logger, 'info');
+      const analyticsSpy = jest.spyOn(api.logger, 'analyticsEvent');
 
       await api.bookAppointment(missing);
 
-      expect(infoSpy).not.toHaveBeenCalledWith('ANALYTICS_EVENT', expect.anything());
+      expect(analyticsSpy).not.toHaveBeenCalled();
     });
 
     // The analytics log call is fire-and-forget (not awaited) — it must not
