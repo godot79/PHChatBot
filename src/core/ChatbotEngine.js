@@ -4344,8 +4344,20 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.renderMainMenu(updated);
     }
 
-    // Collect required fields in order
-    const required = ['first_name', 'last_name', 'email'];
+    // Same DOB parser as handleVerifyState's step — accepts "dd mm yyyy", "dd/mm/yyyy", etc.
+    const parseDob = (raw) => {
+      const m = String(raw || '').trim().match(/^(\d{1,2})(?:[\s\/\-\.])+(\d{1,2})(?:[\s\/\-\.])+(\d{4})$/);
+      if (!m) return null;
+      const [, dd, mm, yyyy] = m;
+      const d = new Date(Date.UTC(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10)));
+      return isNaN(d.getTime()) ? null : `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    };
+
+    // Collect required fields in order. DOB is required so this patient can
+    // later re-verify via "Yes, I'm registered" (email + DOB) — without it,
+    // Cliniko's record has a blank date_of_birth that can never match a real
+    // DOB the patient enters, permanently locking them out of re-verification.
+    const required = ['first_name', 'last_name', 'email', 'dob'];
     let next = null;
     for (const f of required) {
       if (!data[f]) { next = f; break; }
@@ -4360,6 +4372,12 @@ if (/^p(rev)?$/i.test(text)) {
             return buttons("That doesn't look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
           }
           data.email = email;
+        } else if (next === 'dob') {
+          const parsed = parseDob(text);
+          if (!parsed) {
+            return buttons("That doesn't look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+          }
+          data.dob = parsed; // stored as YYYY-MM-DD
         } else {
           data[next] = text;
         }
@@ -4368,7 +4386,8 @@ if (/^p(rev)?$/i.test(text)) {
       }
       if (!data.first_name) return buttons("Please tell me your first name:\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
       if (!data.last_name)  return buttons("Got it. What's your last name?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.email)      return buttons("Thanks. Lastly, what's your email address?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+      if (!data.email)      return buttons("Thanks. What's your email address?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+      if (!data.dob)        return buttons("Lastly, what's your date of birth? (e.g. 15 03 1985 or 15/03/1985)\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
     }
 
     // All fields collected → register
@@ -4384,9 +4403,10 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     const patient = {
-      first_name: data.first_name,
-      last_name:  data.last_name,
-      email:      data.email,
+      first_name:     data.first_name,
+      last_name:      data.last_name,
+      email:          data.email,
+      date_of_birth:  data.dob,
     };
     const phone = String(session.phoneNumber || '').trim();
     if (phone) {
