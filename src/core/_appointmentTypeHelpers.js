@@ -48,7 +48,9 @@ async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
 
 /**
  * Return all unique practitioners who offer the given appointment type ID.
- * Compares IDs as strings — Cliniko may return numeric IDs.
+ * Compares IDs as strings — Cliniko may return numeric IDs. A single
+ * practitioner's fetch failing no longer discards the others (see
+ * getAllAppointmentTypesForAllPractitioners); result is tagged _partial.
  */
 async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
   const targetId = String(apptTypeId);
@@ -71,7 +73,9 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
 
 /**
  * Return all practitioners who offer an appointment type by NAME.
- * Type IDs differ per practitioner for the same label, so ID matching is insufficient.
+ * Type IDs differ per practitioner for the same label, so ID matching is
+ * insufficient. A single practitioner's fetch failing no longer discards
+ * the others; result is tagged _partial.
  */
 async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   const normalize = (s) => String(s || '')

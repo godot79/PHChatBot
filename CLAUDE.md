@@ -27,6 +27,13 @@ For any non-trivial task:
 6. Apply only approved changes.
 7. Summarize exact changes.
 
+## Dev & deploy workflow
+- All dev work happens in `~/CodingProjects/PHChatBot-staging`, not in this (`PHChatBot`) directory.
+- All dev work happens on feature branches — never commit directly to `main`.
+- After dev + testing in the feature branch: merge it to `main` in the staging directory, then deploy that staging-directory `main` to the `chatbot-webhook-staging` Cloud Run service.
+- Once the staging deploy is confirmed working: push the staging directory's `main` upstream to `origin/main`.
+- This (`PHChatBot`) directory is deploy-only for production: `git pull` from upstream, then deploy that pulled state to the `chatbot-webhook` (prod) service with no further changes made here.
+
 ## Repo review mode
 When asked to review the repo:
 - Identify:

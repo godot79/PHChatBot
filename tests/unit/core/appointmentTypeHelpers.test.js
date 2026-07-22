@@ -258,6 +258,12 @@ describe('partial-failure tolerance — one practitioner fetch fails', () => {
     expect(result._partial).toBe(true);
   });
 
+  test('getPractitionersForType: all succeeding is not marked _partial', async () => {
+    const api = { getAppointmentTypes: jest.fn().mockResolvedValue([{ id: 't1', name: 'Initial' }]) };
+    const result = await getPractitionersForType(groups, api, 't1');
+    expect(result._partial).toBeUndefined();
+  });
+
   test('getPractitionersForTypeName excludes the failed practitioner, marks result _partial', async () => {
     const api = {
       getAppointmentTypes: jest.fn()
@@ -271,6 +277,12 @@ describe('partial-failure tolerance — one practitioner fetch fails', () => {
     expect(result._partial).toBe(true);
   });
 
+  test('getPractitionersForTypeName: all succeeding is not marked _partial', async () => {
+    const api = { getAppointmentTypes: jest.fn().mockResolvedValue([{ id: 't1', name: 'Initial' }]) };
+    const result = await getPractitionersForTypeName(groups, api, 'Initial');
+    expect(result._partial).toBeUndefined();
+  });
+
   test('no failures — result is not marked _partial', async () => {
     const api = {
       getAppointmentTypes: jest.fn().mockResolvedValue([{ id: 't1', name: 'Initial' }]),
@@ -279,6 +291,18 @@ describe('partial-failure tolerance — one practitioner fetch fails', () => {
     const result = await getAllAppointmentTypesForAllPractitioners(api, groups);
 
     expect(result._partial).toBeUndefined();
+  });
+
+  test('_partial is non-enumerable — does not change JSON.stringify or spread behavior', async () => {
+    const api = {
+      getAppointmentTypes: jest.fn()
+        .mockResolvedValueOnce([{ id: 't1', name: 'Initial' }])
+        .mockRejectedValueOnce(new Error('Cliniko 429')),
+    };
+    const result = await getAllAppointmentTypesForAllPractitioners(api, groups);
+    expect(result._partial).toBe(true);
+    expect(JSON.stringify(result)).toBe(JSON.stringify([{ id: 't1', name: 'Initial' }]));
+    expect([...result]).toEqual([{ id: 't1', name: 'Initial' }]);
   });
 });
 
