@@ -270,6 +270,19 @@ class Logger {
     }
 
     /**
+     * Log a structured analytics event as raw JSON on stdout.
+     * Bypasses consoleFormat (which only prints message/timestamp/level/
+     * sessionId/userId, dropping other fields) so Cloud Run's captured
+     * stdout — the only durable copy of these events — carries the full
+     * payload, parseable by Cloud Logging as jsonPayload.
+     */
+    analyticsEvent(payload = {}) {
+        this.stats.info++;
+        this.stats.total++;
+        console.log(JSON.stringify({ marker: 'ANALYTICS_EVENT', ...payload }));
+    }
+
+    /**
      * Log conversation activity
      */
     conversation(sessionId, direction, messageType, meta = {}) {

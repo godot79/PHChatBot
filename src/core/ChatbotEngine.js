@@ -1117,13 +1117,13 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     // Unverified menu routing — IDs match display order (1=Register, 2=Book, 3=Fees, 4=Locations)
     if (text === '1' || text.includes('register')) {
-      this.logger.info('ANALYTICS_EVENT', { event: 'conversation_intent_register', sessionId: session.id, region: context.region, phone_number: session.phone_number || session.phoneNumber, ts: Date.now() });
+      this.logger.analyticsEvent({ event: 'conversation_intent_register', sessionId: session.id, region: context.region, phone_number: session.phone_number || session.phoneNumber, ts: Date.now() });
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.REGISTER_PATIENT });
       const fresh = await this.sessionManager.getSession(session.id);
       return await this.handleRegisterPatientState(fresh, '');
     }
     if (text === '2' || text.includes('book') || text.includes('manage')) {
-      this.logger.info('ANALYTICS_EVENT', { event: 'conversation_intent_existing', sessionId: session.id, region: context.region, phone_number: session.phone_number || session.phoneNumber, ts: Date.now() });
+      this.logger.analyticsEvent({ event: 'conversation_intent_existing', sessionId: session.id, region: context.region, phone_number: session.phone_number || session.phoneNumber, ts: Date.now() });
       await this.sessionManager.updateSession(session.id, {
         conversation_state: this.STATES.VERIFY,
         verified: false
@@ -1766,7 +1766,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       let context = session.context;
       if (context && typeof context === 'string') { try { context = JSON.parse(context); } catch {} }
       const region = (context && context.region) || emailPayload?.meta?.region || 'SG';
-      this.logger.info('ANALYTICS_EVENT', { event: 'handoff_frontdesk', reason: 'no_slots', sessionId: session.id, region, ts: Date.now() });
+      this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'no_slots', sessionId: session.id, region, ts: Date.now() });
       const userPhone = session.phone_number || session.phoneNumber || emailPayload?.meta?.phone || '';
 
       delete data.no_slots_prompt;
@@ -4706,7 +4706,7 @@ if (/^p(rev)?$/i.test(text)) {
       } catch (e) {
         this.logger.error('[Cancel] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
-      this.logger.info('ANALYTICS_EVENT', {
+      this.logger.analyticsEvent({
         event: 'cancellation_confirmed', sessionId: session.id, region: this._getSessionRegion(session),
         appointment_id: appt.id,
         practitioner_id: extractIdFromClinikoRef(appt.practitioner, 'practitioners'),
@@ -4762,7 +4762,7 @@ if (/^p(rev)?$/i.test(text)) {
         this.logger.error('[CancelBlocked] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
       const region = this._getSessionRegion(session);
-      this.logger.info('ANALYTICS_EVENT', { event: 'handoff_frontdesk', reason: 'cancel_blocked', sessionId: session.id, region, ts: Date.now() });
+      this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'cancel_blocked', sessionId: session.id, region, ts: Date.now() });
       await cleanup();
       return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
     }
@@ -5093,7 +5093,7 @@ if (/^p(rev)?$/i.test(text)) {
         this.logger.error('[RescheduleBlocked] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
       const region = this._getSessionRegion(session);
-      this.logger.info('ANALYTICS_EVENT', { event: 'handoff_frontdesk', reason: 'reschedule_blocked', sessionId: session.id, region, ts: Date.now() });
+      this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'reschedule_blocked', sessionId: session.id, region, ts: Date.now() });
       await cleanup();
       return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
     }
@@ -5217,7 +5217,7 @@ if (/^p(rev)?$/i.test(text)) {
       } catch (e) {
         this.logger.error('[Reschedule] Email send failed', { error: e?.message || e, sessionId: session.id });
       }
-      this.logger.info('ANALYTICS_EVENT', {
+      this.logger.analyticsEvent({
         event: 'reschedule_confirmed', sessionId: session.id, region: this._getSessionRegion(session),
         appointment_id: appt.id, practitioner_id: payload.practitioner_id, business_id: payload.business_id,
         appointment_type_id: payload.appointment_type_id, starts_at: payload.starts_at, ts: Date.now()
