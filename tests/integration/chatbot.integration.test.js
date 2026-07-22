@@ -2671,6 +2671,40 @@ describe('Booking menu and flow coverage', () => {
       expect(dispatched).toContain(PHYSIO_1.id);
       expect(dispatched).toContain(PHYSIO_2.id);
     });
+
+    // Regression: buildAvailablePhysiosForTypeName used to return a plain []
+    // when every practitioner it did successfully check had no slots — even if
+    // ONE of them couldn't actually be checked (a real Cliniko fetch failure).
+    // That looked identical to "confirmed nobody has slots" to the caller, so
+    // the user got the flat "no practitioners have available slots" message
+    // instead of the honest "trouble checking availability, try again" one
+    // _noSlotsRetry already supports elsewhere. Fixed 2026-07-22.
+    test('one practitioner\'s slot fetch failing yields "trouble checking availability" instead of a confirmed no-slots message', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockImplementation(({ practitioner_id }) => {
+        if (practitioner_id === PHYSIO_1.id) {
+          // Simulates what the real (fixed) getAvailableSlotsByBusinessAndDate
+          // returns on a fetch failure: an empty array tagged _partial, not a
+          // rejection — production code never throws here after the Layer B fix.
+          const empty = [];
+          Object.defineProperty(empty, '_partial', { value: true, enumerable: false });
+          return Promise.resolve(empty);
+        }
+        return Promise.resolve([]); // PHYSIO_2 checked fine, genuinely has no matching slots
+      });
+
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type', appt_type_page: 0,
+        appointment_type_list: TYPE_LIST_1,
+        funnel_catalogue: [FUNNEL_CAT_1],
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+
+      expect(reply).toMatch(/trouble checking availability/i);
+      expect(reply).not.toMatch(/no practitioners have available slots/i);
+    });
   });
 
   // ─── BOOK_SOONEST — funnel step pagination ───────────────────────────────────

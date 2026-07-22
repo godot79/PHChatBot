@@ -184,4 +184,5 @@ module.exports = {
   parseApptPatientType,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  _markPartial,
 };
