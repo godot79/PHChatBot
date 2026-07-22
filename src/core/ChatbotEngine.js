@@ -1900,12 +1900,14 @@ async handleMessageEnvelope(message, phoneNumber) {
       for (const a of rows || []) {
         const pid = String(a.practitioner_id || refId(a.practitioner, 'practitioners') || '');
         if (!pid) continue;
+        const practitioner = pracById.get(pid);
+        if (!practitioner) continue; // not in the online-booking practitioner list (e.g. a room/resource, not a physio)
         const bid = String(a.business_id || refId(a.business, 'businesses') || '');
         const seen = a.starts_at || a.created_at || a.updated_at || new Date(0).toISOString();
         const prev = byPrac.get(pid);
         if (!prev || new Date(seen) > new Date(prev.last_seen)) {
           byPrac.set(pid, {
-            practitioner: pracById.get(pid) || { id: pid },
+            practitioner,
             last_seen: seen,
             last_clinic_id: bid
           });
