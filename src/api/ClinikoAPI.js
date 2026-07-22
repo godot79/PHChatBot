@@ -455,7 +455,7 @@ class ClinikoAPI {
    * @param {string} [options.ends_at]
    * @returns {Promise<{success: boolean, appointment?: Object, message?: string}>}
    */
-  async bookAppointment({ patient_id, practitioner_id, business_id, appointment_type_id, starts_at, ends_at }) {
+  async bookAppointment({ patient_id, practitioner_id, business_id, appointment_type_id, starts_at, ends_at, sessionId, region }) {
     try {
       if (!patient_id || !practitioner_id || !business_id || !appointment_type_id || !starts_at) {
         this.logger.error("bookAppointment: Missing required field", {
@@ -474,6 +474,10 @@ class ClinikoAPI {
       this.logger.info(`Creating individual appointment:`, payload);
       const response = await new SendMessage(`/individual_appointments`).post(payload);
       this.logger.info(`Individual appointment booked:`, response?.id);
+      this.logger.info('ANALYTICS_EVENT', {
+        event: 'booking_confirmed', sessionId, region, patient_id, practitioner_id, business_id,
+        appointment_type_id, appointment_id: response?.id, starts_at, ts: Date.now()
+      });
       return { success: true, appointment: response };
     } catch (error) {
       this.logger.error(`bookAppointment failed: ${error}`);

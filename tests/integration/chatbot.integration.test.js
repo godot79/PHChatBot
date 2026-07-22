@@ -1074,6 +1074,8 @@ describe('Booking confirmation — bookAppointment call contract', () => {
       business_id:         SLOT_WITH_SLOT_FIELD.business_id,
       appointment_type_id: SLOT_WITH_SLOT_FIELD.appointment_type_id,
       starts_at:           SLOT_WITH_SLOT_FIELD.slot,
+      sessionId:           session.id,
+      region:              'SG',
     });
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/booked|appointment|✅/i);
