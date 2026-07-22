@@ -1434,6 +1434,36 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
     });
+
+    test('past visit against a practitioner not in the online-booking list (e.g. a room/resource) is dropped, not shown as "Practitioner"', async () => {
+      // PRAC-002 has a past booking but is absent from getPractitionersByClinic (not show_in_online_bookings) —
+      // this mirrors a Cliniko resource like a "GYM" room rather than a real physio.
+      engine.clinikoAPI.getBookingsByPatientId.mockResolvedValue([
+        { id: 'H1', starts_at: pastISO(5),  practitioner_id: 'PRAC-001', business_id: 'BIZ-001' },
+        { id: 'H2', starts_at: pastISO(2),  practitioner_id: 'PRAC-002', business_id: 'BIZ-001' },
+      ]);
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [
+          { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' },
+        ]},
+      ]);
+      const session = await seedAt('BOOK_HISTORY');
+      const reply   = await callHandler(engine, ['handleBookHistory'], session, '');
+      expect(reply).toMatch(/Jolinna/i);
+      expect(reply).not.toMatch(/\bPractitioner\b/);
+    });
+
+    test('only visit on record is against an excluded practitioner → treated as no prior visits', async () => {
+      engine.clinikoAPI.getBookingsByPatientId.mockResolvedValue([
+        { id: 'H1', starts_at: pastISO(2), practitioner_id: 'PRAC-999', business_id: 'BIZ-001' },
+      ]);
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PHYSIOS);
+      const session = await seedAt('BOOK_HISTORY');
+      const reply   = await callHandler(engine, ['handleBookHistory'], session, '');
+      expect(reply).toMatch(/no prior|no past|another booking/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
   });
 
   // ─── BOOK_HISTORY — physio pagination ───────────────────────────────────────
