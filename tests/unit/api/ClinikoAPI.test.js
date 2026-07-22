@@ -192,6 +192,72 @@ describe('ClinikoAPI', () => {
 
       expect(result).toEqual({ success: false, message: 'Failed to book appointment.' });
     });
+
+    // Regression guard for the analytics instrumentation added alongside
+    // sessionId/region params — must not change the pre-existing return
+    // shape or payload sent to Cliniko.
+    test('sessionId/region are additive — return value and Cliniko payload unchanged whether present or omitted', async () => {
+      const appointment = { id: '999', starts_at: validArgs.starts_at };
+      mockPost.mockResolvedValue(appointment);
+
+      const withoutAnalyticsFields = await api.bookAppointment(validArgs);
+      const cliniko_payload_without = mockPost.mock.calls[0][0];
+
+      mockPost.mockClear();
+      const withAnalyticsFields = await api.bookAppointment({ ...validArgs, sessionId: 'session_abc', region: 'SG' });
+      const cliniko_payload_with = mockPost.mock.calls[0][0];
+
+      expect(withAnalyticsFields).toEqual(withoutAnalyticsFields);
+      expect(cliniko_payload_with).toEqual(cliniko_payload_without);
+    });
+
+    test('emits a structured ANALYTICS_EVENT with booking fields on success', async () => {
+      const appointment = { id: '999', starts_at: validArgs.starts_at };
+      mockPost.mockResolvedValue(appointment);
+      const infoSpy = jest.spyOn(api.logger, 'info');
+
+      await api.bookAppointment({ ...validArgs, sessionId: 'session_abc', region: 'SG' });
+
+      expect(infoSpy).toHaveBeenCalledWith('ANALYTICS_EVENT', expect.objectContaining({
+        event:                'booking_confirmed',
+        sessionId:            'session_abc',
+        region:               'SG',
+        patient_id:           validArgs.patient_id,
+        practitioner_id:      validArgs.practitioner_id,
+        business_id:          validArgs.business_id,
+        appointment_type_id:  validArgs.appointment_type_id,
+        appointment_id:       '999',
+        starts_at:            validArgs.starts_at,
+      }));
+    });
+
+    test('does not emit ANALYTICS_EVENT when booking fails validation (no HTTP call made)', async () => {
+      const { starts_at: _omit, ...missing } = validArgs;
+      const infoSpy = jest.spyOn(api.logger, 'info');
+
+      await api.bookAppointment(missing);
+
+      expect(infoSpy).not.toHaveBeenCalledWith('ANALYTICS_EVENT', expect.anything());
+    });
+
+    // The analytics log call is fire-and-forget (not awaited) — it must not
+    // add measurable latency to the booking path itself.
+    test('analytics logging adds no meaningful latency to bookAppointment', async () => {
+      const appointment = { id: '999', starts_at: validArgs.starts_at };
+      mockPost.mockResolvedValue(appointment);
+
+      const iterations = 200;
+      const start = process.hrtime.bigint();
+      for (let i = 0; i < iterations; i++) {
+        await api.bookAppointment({ ...validArgs, sessionId: `s${i}`, region: 'SG' });
+      }
+      const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+
+      // Generous ceiling — this only guards against an accidental blocking
+      // call (e.g. a synchronous file write or awaited I/O) being introduced,
+      // not a strict perf benchmark.
+      expect(elapsedMs / iterations).toBeLessThan(5);
+    });
   });
 
   // ─── cancelSpecificAppointment ─────────────────────────────────────────────
