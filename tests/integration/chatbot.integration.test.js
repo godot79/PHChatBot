@@ -169,6 +169,16 @@ jest.mock('../../src/core/DatabaseManager', () => {
       );
     }
 
+    async getChatHistory (sessionId, limit = 50) {
+      return new Promise((res, rej) =>
+        this.db.all(
+          'SELECT * FROM chat_history WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?',
+          [sessionId, limit],
+          (err, rows) => (err ? rej(err) : res(rows || []))
+        )
+      );
+    }
+
     async query (sql, params = []) {
       return new Promise((res, rej) =>
         this.db.all(sql, params, (err, rows) => (err ? rej(err) : res(rows || [])))
@@ -623,6 +633,38 @@ describe('ChatbotEngine — state machine', () => {
       const session = await seedUnverified('+6531000007');
       const reply = await callHandler(engine, ['handleIntroState'], session, 'book');
       expect(reply).toMatch(/registered with us/i);
+    });
+  });
+
+  // ─── First-contact acknowledgment (regression: Conray Chan support case, 2026-07-25) ──
+  // Client's very first message was a free-text info dump ("my name is X, I'd like a
+  // reservation for next Monday afternoon 230pm") rather than a greeting or a recognised
+  // keyword. The bot silently fell through to the unmatched-input menu with no
+  // acknowledgment of what was said. First contact should now get a short "collecting
+  // details" message instead; later unmatched input in the same session should get a
+  // lighter "let's start again" instead of an apology.
+  describe('First-contact acknowledgment', () => {
+    test('brand-new phone, free-text info dump → acknowledges instead of silent menu', async () => {
+      const reply = await engine.handleMessage(
+        "Good morning, my name is Jane Doe. I'd like a reservation for next Monday afternoon 230pm please",
+        '+6532000001'
+      );
+      expect(reply).toMatch(/collect.*details|step by step/i);
+      expect(reply).not.toMatch(/sorry, i didn't understand/i);
+    });
+
+    test('brand-new phone, greeting → no acknowledgment text, goes straight to menu', async () => {
+      const reply = await engine.handleMessage('hi', '+6532000002');
+      expect(reply).not.toMatch(/collect.*details|step by step/i);
+    });
+
+    test('second unmatched message in same session → "let\'s start again", not an apology', async () => {
+      const phone = '+6532000003';
+      await engine.handleMessage('some unrecognised first message', phone);
+      const reply = await engine.handleMessage('xyzzy_still_garbage', phone);
+      expect(reply).toMatch(/let's start again/i);
+      expect(reply).not.toMatch(/sorry, i didn't understand/i);
+      expect(reply).not.toMatch(/collect.*details|step by step/i);
     });
   });
 

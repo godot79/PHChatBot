@@ -970,9 +970,18 @@ async handleMessageEnvelope(message, phoneNumber) {
         return 'Sorry, there was an issue starting your session. Please try again.';
       }
 
+      // conversation_state defaults to 'INTRO' at the DB column level, so it's always
+      // truthy for a freshly created session — it can't be used to detect first contact.
+      // Absence of chat history is the reliable signal instead.
+      try {
+        const priorHistory = await this.sessionManager.db.getChatHistory(session.id, 1);
+        session._isFirstContactMessage = !priorHistory || priorHistory.length === 0;
+      } catch {
+        session._isFirstContactMessage = false;
+      }
+
       // FIXED: First message always starts in INTRO (this restores the original working flow)
       if (!session.conversation_state) {
-        session._isFirstContactMessage = true;
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.INTRO
         });
