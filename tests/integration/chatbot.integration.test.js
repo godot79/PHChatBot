@@ -83,6 +83,7 @@ jest.mock('../../src/core/DatabaseManager', () => {
             appt_preference TEXT,
             patient_id TEXT,
             verified BOOLEAN DEFAULT 0,
+            language TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
           )`, (err) => {
             if (err) return rej(err);
@@ -200,21 +201,22 @@ jest.mock('../../src/core/DatabaseManager', () => {
     }
 
     async upsertPatientState (phone, updates) {
-      const { region, appt_preference, patient_id, verified } = updates;
+      const { region, appt_preference, patient_id, verified, language } = updates;
       const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
       return new Promise((res, rej) =>
         this.db.run(
-          `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, updated_at)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, language, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(phone_number) DO UPDATE SET
              region = COALESCE(?, region),
              appt_preference = COALESCE(?, appt_preference),
              patient_id = COALESCE(?, patient_id),
              verified = COALESCE(?, verified),
+             language = COALESCE(?, language),
              updated_at = CURRENT_TIMESTAMP`,
           [
-            phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
-            region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
+            phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null,
+            region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null,
           ],
           (err) => (err ? rej(err) : res())
         )
@@ -574,7 +576,7 @@ describe('ChatbotEngine — state machine', () => {
 
   test('new user reply contains a welcome/verify cue', async () => {
     const r = await engine.handleMessage('hi', '+6530000002');
-    expect(r).toMatch(/welcome|hello|verify|email|hi|start/i);
+    expect(r).toMatch(/welcome|hello|verify|email|hi|start|select your language/i);
   });
 
   // ─── Unverified intro menu — display and routing ──────────────────────────────
@@ -584,7 +586,7 @@ describe('ChatbotEngine — state machine', () => {
       await engine.sessionManager.updateSession(s.id, {
         conversation_state: 'INTRO',
         verified: false,
-        context: JSON.stringify({ region: 'SG' }),
+        context: JSON.stringify({ region: 'SG', language: 'en' }),
       });
       return engine.sessionManager.getSession(s.id);
     }
@@ -3999,7 +4001,7 @@ describe('Global region-change interception', () => {
       conversation_state: state,
       verification_status: 'verified',
       verified: 1,
-      context: { region: 'SG' },
+      context: { region: 'SG', language: 'en' },
       data: JSON.stringify({ email: 'p@test.com' }),
     });
     return session.id;
@@ -4075,6 +4077,155 @@ describe('Global region-change interception', () => {
     const session = await getSession(phone);
     const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
     expect(ctx.region).toBeTruthy();
+  });
+
+  test('"region" reset preserves the previously-selected language (no redundant re-pick)', async () => {
+    const phone = '+6591000207';
+    await seedAt('BOOK_MANAGE_OPTIONS', phone); // seedAt sets language: 'en'
+    const reply = await engine.handleMessage('region', phone); // reset + region prompt
+    // Language already known → straight to region prompt, not a language prompt
+    expect(reply).toMatch(/select your region/i);
+    expect(reply).not.toMatch(/select your language/i);
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('en');
+  });
+});
+
+// =============================================================================
+// SUITE — Language selection (Cantonese/Mandarin support)
+// =============================================================================
+describe('Language selection (English/Cantonese/Mandarin)', () => {
+  let db, engine;
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    engine = new ChatbotEngine();
+    await engine.initialize();
+    db = engine.sessionManager.db;
+  });
+  afterAll(() => { if (engine.sessionManager.cleanupInterval) clearInterval(engine.sessionManager.cleanupInterval); db.close(); });
+  beforeEach(() => { resetCliniko(); resetWhatsApp(); });
+
+  const getSession = (phone) => engine.sessionManager.getSessionByPhone(phone);
+
+  async function seedUnverifiedNoLanguage(phone, extra = {}) {
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'SG', ...extra }),
+    });
+    return engine.sessionManager.getSession(s.id);
+  }
+
+  test('brand-new session: first prompt is the trilingual language selector, before region', async () => {
+    const reply = await engine.handleMessage('hi', '+6592000001');
+    expect(String(reply)).toMatch(/select your language/i);
+    expect(String(reply)).toMatch(/廣東話/);
+    expect(String(reply)).toMatch(/普通话/);
+  });
+
+  test('numeric selection "2" sets Cantonese (yue) and persists on the session', async () => {
+    const phone = '+6592000002';
+    await seedUnverifiedNoLanguage(phone);
+    await engine.handleMessage('hi', phone); // language prompt
+    await engine.handleMessage('2', phone);  // pick Cantonese
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('yue');
+    expect(ctx.awaiting_language_selection).toBeFalsy();
+  });
+
+  test('substring selection ("mandarin"-style match) also works', async () => {
+    const phone = '+6592000003';
+    await seedUnverifiedNoLanguage(phone);
+    await engine.handleMessage('hi', phone);
+    const reply = await engine.handleMessage('普通话', phone);
+    expect(String(reply)).not.toMatch(/select your language/i);
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('zh');
+  });
+
+  test('language selection also persists to patient_state (durable store)', async () => {
+    const phone = '+6592000004';
+    await seedUnverifiedNoLanguage(phone);
+    await engine.handleMessage('hi', phone);
+    await engine.handleMessage('2', phone); // Cantonese
+    // upsertPatientState is fire-and-forget in the engine; give the microtask queue a tick
+    await new Promise((r) => setImmediate(r));
+    const patientState = await db.getPatientState(phone);
+    expect(patientState).toBeTruthy();
+    expect(patientState.language).toBe('yue');
+  });
+
+  test('once language is set, the region prompt itself is localized', async () => {
+    const phone = '+447700900099'; // unrecognized country code → region can't be auto-detected
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ language: 'yue' }), // language known, region not yet
+    });
+    const fresh = await engine.sessionManager.getSession(s.id);
+    const reply = await engine.handleIntroState(fresh, '');
+    expect(String(reply)).toMatch(/請選擇你所喺嘅地區/);
+  });
+
+  test('goToInteractiveMenu routes to intro when region is set but language is not (pre-existing session)', async () => {
+    const phone = '+6592000006';
+    const session = await seedUnverifiedNoLanguage(phone); // region: 'SG', no language key at all
+    const reply = String(await engine.goToInteractiveMenu(session));
+    expect(reply).toMatch(/select your language/i);
+    expect(reply).not.toMatch(/register as new patient/i);
+  });
+
+  test('soft "change language" from the verified main menu does not reset the session', async () => {
+    const phone = '+6592000007';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'BOOK_MANAGE_OPTIONS',
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'SG', language: 'en' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    const reply = await engine.handleMessage('language', phone);
+    expect(reply).toMatch(/select your language/i);
+    const session = await getSession(phone);
+    // Unlike "change region", the session itself must survive (same id)
+    expect(session.id).toBe(s.id);
+  });
+
+  test('global "change language" from a non-INTRO state does not reset the session (unlike region)', async () => {
+    const phone = '+6592000008';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'SELECT_SLOT',
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'SG', language: 'en' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    const reply = await engine.handleMessage('change language', phone);
+    expect(reply).toMatch(/select your language/i);
+    const session = await getSession(phone);
+    expect(session.id).toBe(s.id);
+  });
+
+  test('"Change Language" row appears in the verified main menu', async () => {
+    const phone = '+6592000009';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verification_status: 'verified',
+      verified: 1,
+      context: JSON.stringify({ region: 'SG', language: 'en' }),
+    });
+    const fresh = await engine.sessionManager.getSession(s.id);
+    const reply = await engine.renderMainMenu(fresh);
+    expect(String(reply)).toMatch(/change language/i);
   });
 });
 
@@ -6882,7 +7033,7 @@ describe('goToInteractiveMenu — region guard', () => {
     await sm.updateSession(s.id, {
       conversation_state: 'INTRO',
       verified: false,
-      context: JSON.stringify({}),
+      context: JSON.stringify({ language: 'en' }),
     });
     return sm.getSession(s.id);
   }
@@ -6892,7 +7043,7 @@ describe('goToInteractiveMenu — region guard', () => {
     await sm.updateSession(s.id, {
       conversation_state: 'INTRO',
       verified: false,
-      context: JSON.stringify({ region }),
+      context: JSON.stringify({ region, language: 'en' }),
     });
     return sm.getSession(s.id);
   }
@@ -6913,16 +7064,20 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('SG number sends "hello" → main menu shown (region auto-detected, no extra region step)', async () => {
-    const reply = await engine.handleMessage('hello', '+6562000001');
+  test('SG number sends "hello" then picks language → main menu shown (region auto-detected, no extra region step)', async () => {
+    const r0 = await engine.handleMessage('hello', '+6562000001');
+    expect(String(r0)).toMatch(/select your language/i);
+    const reply = await engine.handleMessage('1', '+6562000001'); // pick English
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/welcome|register|book/i);
     // Region selection prompt must not appear for a known-region number
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('unknown-region number sends "hello" → region selection shown (not main menu)', async () => {
-    const reply = await engine.handleMessage('hello', '+447700900001');
+  test('unknown-region number sends "hello" then picks language → region selection shown (not main menu)', async () => {
+    const r0 = await engine.handleMessage('hello', '+447700900001');
+    expect(String(r0)).toMatch(/select your language/i);
+    const reply = await engine.handleMessage('1', '+447700900001'); // pick English
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/region|hong kong|singapore|india|philippines/i);
     expect(reply).not.toMatch(/register as new patient/i);
@@ -6943,21 +7098,25 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('unknown-region multi-turn: hello → pick region → pick Register → first name (3 steps, not 4)', async () => {
+  test('unknown-region multi-turn: hello → pick language → pick region → pick Register → first name (4 steps, not 5)', async () => {
     const phone = '+447700900002';
-    // Step 1: "hello" → should show region selection
+    // Step 1: "hello" → should show language selection (asked before region)
     const r1 = await engine.handleMessage('hello', phone);
-    expect(String(r1)).toMatch(/region|hong kong|singapore/i);
+    expect(String(r1)).toMatch(/select your language/i);
 
-    // Step 2: "1" → picks first region (HK) → should show main unverified menu
+    // Step 2: "1" → picks English → should show region selection
     const r2 = await engine.handleMessage('1', phone);
-    expect(String(r2)).toMatch(/register as new patient/i);
+    expect(String(r2)).toMatch(/region|hong kong|singapore/i);
 
-    // Step 3: "1" → picks Register → should ask for first name (NOT show region/menu again)
+    // Step 3: "1" → picks first region (HK) → should show main unverified menu
     const r3 = await engine.handleMessage('1', phone);
-    expect(String(r3)).toMatch(/first name/i);
-    expect(String(r3)).not.toMatch(/register as new patient/i);
-    expect(String(r3)).not.toMatch(/region|hong kong/i);
+    expect(String(r3)).toMatch(/register as new patient/i);
+
+    // Step 4: "1" → picks Register → should ask for first name (NOT show region/menu again)
+    const r4 = await engine.handleMessage('1', phone);
+    expect(String(r4)).toMatch(/first name/i);
+    expect(String(r4)).not.toMatch(/register as new patient/i);
+    expect(String(r4)).not.toMatch(/region|hong kong/i);
   });
 });
 

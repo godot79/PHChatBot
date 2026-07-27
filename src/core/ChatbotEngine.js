@@ -9,6 +9,8 @@ const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
 const { REGION_SUPPORT_INFO, REGION_FEES } = require('../config/regions');
+const { LANGUAGE_LABELS } = require('../config/languages');
+const { t } = require('../config/strings');
 const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
@@ -724,6 +726,19 @@ class ChatbotEngine {
     return (context && context.region) || 'SG';
   }
 
+  /**
+   * Returns the language code for this session, or 'en' if not set.
+   * @param {object} session
+   * @returns {string}
+   */
+  _getSessionLanguage(session) {
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch {}
+    }
+    return (context && context.language) || 'en';
+  }
+
   _regionTz(session) {
     return REGION_TZ[this._getSessionRegion(session)] || 'Asia/Singapore';
   }
@@ -854,12 +869,12 @@ class ChatbotEngine {
     if (!updatedSession.verified) {
       await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
       const fresh = await this.sessionManager.getSession(updatedSession.id);
-      // If no region is set, route through handleIntroState so region selection is shown first.
+      // If no region or language is set, route through handleIntroState so that gate is shown first.
       // Bypassing this caused unknown-region users to see the main menu twice: once from
       // goToInteractiveMenu (no region), then again after handleIntroState consumed their
       // first menu selection as a region pick.
       const ctx = (() => { try { return typeof fresh.context === 'string' ? JSON.parse(fresh.context) : (fresh.context || {}); } catch { return {}; } })();
-      if (!ctx.region) {
+      if (!ctx.region || !ctx.language) {
         return await this.handleIntroState(fresh, '');
       }
       return await this.renderMainMenu(fresh);
@@ -910,23 +925,27 @@ class ChatbotEngine {
       }
     }
 
+    const language = this._getSessionLanguage(session);
+
     if (session.verified) {
-      const body = `${region}What would you like to do?`;
+      const body = `${region}${t(language, 'mainMenu.verifiedBody')}`;
       return list(body, 'Select option', [
-        { id: '1',      title: 'Book Appointment' },
-        { id: '2',      title: 'Cancel Appointment' },
-        { id: '3',      title: 'Reschedule' },
-        { id: 'region', title: 'Change Country' },
-        { id: '9',      title: 'Logout & Delete My Data' },
+        { id: '1',        title: t(language, 'mainMenu.book') },
+        { id: '2',        title: t(language, 'mainMenu.cancel') },
+        { id: '3',        title: t(language, 'mainMenu.reschedule') },
+        { id: 'region',   title: t(language, 'mainMenu.changeCountry') },
+        { id: 'language', title: t(language, 'mainMenu.changeLanguage') },
+        { id: '9',        title: t(language, 'mainMenu.logout') },
       ]);
     } else {
-      const body = `👋 *Welcome to Prohealth Asia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
+      const body = `${t(language, 'mainMenu.welcomeHeader')}${region}${t(language, 'mainMenu.unverifiedPrompt')}`;
       return list(body, 'Select option', [
-        { id: '1',      title: 'Register as new patient' },
-        { id: '2',      title: 'Book or Manage' },
-        { id: '3',      title: 'View Fees' },
-        { id: '4',      title: 'View Locations' },
-        { id: 'region', title: 'Change Country' },
+        { id: '1',        title: t(language, 'mainMenu.register') },
+        { id: '2',        title: t(language, 'mainMenu.bookOrManage') },
+        { id: '3',        title: t(language, 'mainMenu.viewFees') },
+        { id: '4',        title: t(language, 'mainMenu.viewLocations') },
+        { id: 'region',   title: t(language, 'mainMenu.changeCountry') },
+        { id: 'language', title: t(language, 'mainMenu.changeLanguage') },
       ]);
     }
   }
@@ -1003,10 +1022,31 @@ async handleMessageEnvelope(message, phoneNumber) {
       // than INTRO, reset the session (logout) and prompt for region on a clean session.
       // From INTRO, fall through to handleIntroState which already handles region selection.
       if ((_globalText === 'region' || _globalText === 'change region') && currentState !== this.STATES.INTRO) {
+        let priorCtx = session.context;
+        if (priorCtx && typeof priorCtx === 'string') { try { priorCtx = JSON.parse(priorCtx); } catch { priorCtx = {}; } }
+        const priorLanguage = (priorCtx && priorCtx.language) || null;
         const phone = session.phone_number || session.phoneNumber;
         await this.sessionManager.deleteSessionAndData(session.id);
         const freshSession = await this.sessionManager.getOrCreateSession(phone, true);
-        return await this.handleIntroState(freshSession, 'region');
+        // Carry the language preference across the reset — changing region shouldn't
+        // force the user to re-pick a language they'd already chosen.
+        if (priorLanguage) {
+          await this.sessionManager.updateSession(freshSession.id, { context: { language: priorLanguage } });
+        }
+        const updatedFresh = await this.sessionManager.getSession(freshSession.id);
+        return await this.handleIntroState(updatedFresh, 'region');
+      }
+
+      // Global language-change interception: unlike region, language doesn't affect Cliniko
+      // tenant/API routing, so this does NOT reset the session — it just re-prompts in place.
+      if ((_globalText === 'language' || _globalText === 'change language') && currentState !== this.STATES.INTRO) {
+        let ctx = session.context;
+        if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
+        ctx = ctx || {};
+        ctx.awaiting_language_selection = true;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context: ctx });
+        const updated = await this.sessionManager.getSession(session.id);
+        return await this.handleIntroState(updated, 'language');
       }
 
       if (!this.stateHandlers[currentState]) {
@@ -1068,6 +1108,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       PH: 'Philippines 🇵🇭'
     };
     const regionCodes = Object.keys(regionLabels);
+    const languageCodes = Object.keys(LANGUAGE_LABELS);
 
     let context = (session.context && typeof session.context === 'string')
       ? JSON.parse(session.context)
@@ -1093,6 +1134,36 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
     }
 
+    // Show language selection if needed (asked before region)
+    if (!context.language || text === 'language' || text === 'change language' || context.awaiting_language_selection) {
+      context.awaiting_language_selection = true;
+      if (/^\d+$/.test(text)) {
+        const idx = parseInt(text, 10) - 1;
+        if (idx >= 0 && idx < languageCodes.length) {
+          context.language = languageCodes[idx];
+          delete context.awaiting_language_selection;
+          await this.sessionManager.updateSession(session.id, { context });
+          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
+          // Re-enter (rather than jump to the main menu) so the region gate below still runs if needed
+          return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+        }
+      } else if (languageCodes.some(code => text.includes(LANGUAGE_LABELS[code].toLowerCase()))) {
+        const found = languageCodes.find(code => text.includes(LANGUAGE_LABELS[code].toLowerCase()));
+        context.language = found;
+        delete context.awaiting_language_selection;
+        await this.sessionManager.updateSession(session.id, { context });
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
+        return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+      }
+
+      await this.sessionManager.updateSession(session.id, { context });
+      return list('Please select your language / 請選擇語言 / 请选择语言:', 'Select language',
+        languageCodes.map((code, i) => ({ id: String(i + 1), title: LANGUAGE_LABELS[code] }))
+      );
+    }
+
+    const language = context.language || 'en';
+
     // Show region selection if needed
     if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
       context.awaiting_region_selection = true;
@@ -1115,7 +1186,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       await this.sessionManager.updateSession(session.id, { context });
-      return list('Please select your region:', 'Select region',
+      return list(t(language, 'region.promptBody'), t(language, 'region.buttonLabel'),
         regionCodes.map((code, i) => ({ id: String(i + 1), title: regionLabels[code] }))
       );
     }
@@ -1411,6 +1482,19 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleIntroState(updated, 'region');
     }
 
+    // Support language change from the verified main menu
+    if (text === 'language' || text === 'change language') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_language_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'language');
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       // Verified users stay on the verified menu; going to INTRO would show the unverified landing
       const updatedSession = await this.sessionManager.getSession(session.id);
@@ -1471,6 +1555,19 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.handleIntroState(updated, 'region');
+    }
+
+    // Support language change while at booking method menu
+    if (text === 'language' || text === 'change language') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_language_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'language');
     }
 
     if (['0', 'menu', 'back'].includes(text)) {
