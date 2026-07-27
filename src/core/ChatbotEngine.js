@@ -972,6 +972,7 @@ async handleMessageEnvelope(message, phoneNumber) {
 
       // FIXED: First message always starts in INTRO (this restores the original working flow)
       if (!session.conversation_state) {
+        session._isFirstContactMessage = true;
         await this.sessionManager.updateSession(session.id, {
           conversation_state: this.STATES.INTRO
         });
@@ -1142,7 +1143,10 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleViewLocationsState(fresh, '');
     }
 
-    return prependTextToEnvelope(`Sorry, I didn't understand that.`, await this.renderMainMenu(session));
+    const fallbackPrefix = session._isFirstContactMessage
+      ? `Thanks for reaching out! To make sure I get your booking right, I'll collect a few details step by step — starting with the options below.`
+      : `Let's start again — here are the options.`;
+    return prependTextToEnvelope(fallbackPrefix, await this.renderMainMenu(session));
   }
 
   /**
