@@ -14,6 +14,27 @@ const logger = new Logger('WebhookRoute');
 const chatbotEngine = new ChatbotEngine();
 const whatsAppAPI = new WhatsAppAPI();
 
+// States that only browse a paginated list (next/prev cursors) and never write
+// to Cliniko. Safe to snapshot-and-restore session state for on a failed send.
+// Deliberately excludes CONFIRM_BOOKING, REGISTER_PATIENT, CONFIRM_CANCEL,
+// CONFIRM_RESCHEDULE — those states perform real Cliniko writes, so reverting
+// session state after one of those runs would desync us from what actually
+// happened in Cliniko.
+const SAFE_ROLLBACK_STATES = new Set([
+  chatbotEngine.STATES.BOOK_HISTORY,
+  chatbotEngine.STATES.BOOK_SPECIFIC_DATE,
+  chatbotEngine.STATES.BOOK_SPECIFIC_PHYSIO,
+  chatbotEngine.STATES.BOOK_SPECIFIC_CLINIC,
+  chatbotEngine.STATES.SELECT_SLOT,
+  chatbotEngine.STATES.RESCHEDULE_CONFIRM_INTENT,
+]);
+
+function isPairRateLimit(err) {
+  return err?.response?.data?.error?.code === 131056;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * WhatsApp Webhook Verification (GET)
  */
@@ -123,9 +144,41 @@ async function handleIncomingMessage(data) {
 
     logger.info(`📩 [${phone}] ${type} - ${content}`);
     try {
+      // Snapshot pre-turn session state so a failed send can be rolled back
+      // without leaving the pagination cursor silently advanced past a page
+      // the user never received.
+      const preTurnSession = await chatbotEngine.sessionManager.getSessionByPhone(phone);
+
       const reply = await chatbotEngine.handleMessageEnvelope(content, phone);
-      const result = await sendReply(whatsAppAPI, phone, reply);
-      logger.info(`📤 Reply sent to ${phone}`, result);
+      try {
+        const result = await sendReply(whatsAppAPI, phone, reply);
+        logger.info(`📤 Reply sent to ${phone}`, result);
+      } catch (sendErr) {
+        if (isPairRateLimit(sendErr)) {
+          // Transient, per-recipient limit — the window is short-lived, so a
+          // single retry after a brief delay usually succeeds without the
+          // user ever noticing a gap.
+          await sleep(1500);
+          try {
+            const retryResult = await sendReply(whatsAppAPI, phone, reply);
+            logger.info(`📤 Reply sent to ${phone} (after rate-limit retry)`, retryResult);
+            continue;
+          } catch (retryErr) {
+            sendErr = retryErr;
+          }
+        }
+        if (preTurnSession && SAFE_ROLLBACK_STATES.has(preTurnSession.conversation_state)) {
+          await chatbotEngine.sessionManager.updateSession(preTurnSession.id, {
+            conversation_state: preTurnSession.conversation_state,
+            context: preTurnSession.context,
+            data: preTurnSession.data,
+            patient_id: preTurnSession.patient_id,
+            verified: preTurnSession.verified,
+          });
+          logger.warn(`Rolled back session ${preTurnSession.id} after failed send to ${phone}`, sendErr);
+        }
+        throw sendErr;
+      }
     } catch (err) {
       logger.error(`Failed to process or send reply to ${phone}`, err);
     }
@@ -219,5 +272,9 @@ router.get('/fees', (req, res) => {
     ]
   });
 });
+
+// Exposed for testing only — server.js consumes `router` itself as before.
+router.handleIncomingMessage = handleIncomingMessage;
+router.sendReply = sendReply;
 
 module.exports = router;

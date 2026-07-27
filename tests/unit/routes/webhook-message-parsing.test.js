@@ -18,6 +18,18 @@ const express = require('express');
 
 const mockEngineInstance = {
   handleMessageEnvelope: jest.fn().mockResolvedValue('reply'),
+  STATES: {
+    BOOK_HISTORY: 'BOOK_HISTORY',
+    BOOK_SPECIFIC_DATE: 'BOOK_SPECIFIC_DATE',
+    BOOK_SPECIFIC_PHYSIO: 'BOOK_SPECIFIC_PHYSIO',
+    BOOK_SPECIFIC_CLINIC: 'BOOK_SPECIFIC_CLINIC',
+    SELECT_SLOT: 'SELECT_SLOT',
+    RESCHEDULE_CONFIRM_INTENT: 'RESCHEDULE_CONFIRM_INTENT',
+  },
+  sessionManager: {
+    getSessionByPhone: jest.fn().mockResolvedValue(null),
+    updateSession: jest.fn().mockResolvedValue({}),
+  },
 };
 const mockApiInstance = {
   sendTextMessage: jest.fn().mockResolvedValue({}),
