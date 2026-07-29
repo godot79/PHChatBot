@@ -3069,7 +3069,7 @@ if (/^p(rev)?$/i.test(text)) {
           if ((data.appointment_type_list || []).length === 0) {
             return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
               context: 'date',
-              confirmedMessage: 'No appointment types available for that date.',
+              confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noApptTypesForDate'),
             });
           }
 
@@ -3078,7 +3078,7 @@ if (/^p(rev)?$/i.test(text)) {
             items: data.appointment_type_list || [],
             rowFn: (a) => ({ title: String(a.name) }),
             page: 0,
-            header: `Select visit type for ${headerDate}:`
+            header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectVisitType', { date: headerDate })
       });
           return reply;
         }
@@ -3106,7 +3106,7 @@ if (/^p(rev)?$/i.test(text)) {
       // render date page
       const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
       return buildInteractiveSelectionList({
-        header: `Pick a date (Page ${cur + 1}/${MAX_DATE_PAGES}):`,
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.pickDatePage', { current: cur + 1, total: MAX_DATE_PAGES }),
         items: candidates,
         rowFn: (dt) => ({ title: dt.toLocaleDateString() }),
         page: cur,
@@ -3140,7 +3140,7 @@ if (/^p(rev)?$/i.test(text)) {
       if ((data.appointment_type_list || []).length === 0) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
           context: 'date',
-          confirmedMessage: 'No appointment types available for that date.',
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noApptTypesForDate'),
         });
       }
 
@@ -3175,7 +3175,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        header: `Select visit type for ${headerDate}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectVisitType', { date: headerDate })
       });
       return reply;
     }
@@ -3200,7 +3200,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
             context: 'date_physio_list',
             result: groups,
-            confirmedMessage: `No practitioners offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noPractitionersForType', { name: data.selected_appt_type?.name || 'this visit type' }),
           });
         }
       }
@@ -3235,7 +3235,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
-        header: `Choose a physio for ${data.selected_appt_type?.name || 'visit'} on ${headerDate}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.choosePhysioForDate', { type: data.selected_appt_type?.name || 'visit', date: headerDate })
       });
       return reply;
     }
@@ -3276,9 +3276,9 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
             context: 'date_inner',
             retryStep: 'choose_physio',
-            retryLabel: 'Try another physio',
+            retryLabel: t(this._getSessionLanguage(session), 'bookSpecificDate.tryAnotherPhysio'),
             result: slotResults1,
-            confirmedMessage: `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: data.selected_appt_type?.name || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio) }),
           });
         }
 
@@ -3315,7 +3315,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name) }),
         page: data.clinic_page || 0,
-        header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)} on ${headerDate}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectClinicForDate', { physio: getPractitionerDisplayName(data.selected_physio), date: headerDate })
       });
       return reply;
     }
@@ -3344,7 +3344,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
           context: 'date',
           result: raw,
-          confirmedMessage: `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsAtClinicForDate', { type: data.selected_appt_type?.name, clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' }),
         });
       }
 
