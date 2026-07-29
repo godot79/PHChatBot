@@ -3478,7 +3478,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
             context: 'physio_list',
             result: groups,
-            confirmedMessage: 'No practitioners are available right now.',
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noPractitionersAvailable'),
           });
         }
       }
@@ -3512,7 +3512,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
-        header: 'Choose a physio:'
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.choosePhysio')
       });
       return reply;
     }
@@ -3542,7 +3542,7 @@ if (/^p(rev)?$/i.test(text)) {
       if ((data.appointment_type_list || []).length === 0) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
           context: 'physio',
-          confirmedMessage: `No visit types found for ${getPractitionerDisplayName(data.selected_physio) || 'this practitioner'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noVisitTypesForPhysio', { name: getPractitionerDisplayName(data.selected_physio) || 'this practitioner' }),
         });
       }
 
@@ -3575,7 +3575,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        header: `Select visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectVisitTypeForPhysio', { name: getPractitionerDisplayName(data.selected_physio) })
       });
       return reply;
     }
@@ -3615,9 +3615,9 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
             context: 'physio_inner',
             retryStep: 'choose_type',
-            retryLabel: 'Try another type',
+            retryLabel: t(this._getSessionLanguage(session), 'bookSpecificPhysio.tryAnotherType'),
             result: slotResults2,
-            confirmedMessage: `No slots available for ${getPractitionerDisplayName(data.selected_physio)} with ${data.selected_appt_type?.name || 'that visit type'}.`,
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio), type: data.selected_appt_type?.name || 'that visit type' }),
           });
         }
 
@@ -3653,7 +3653,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name) }),
         page: data.clinic_page || 0,
-        header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectClinicForPhysio', { name: getPractitionerDisplayName(data.selected_physio) })
       });
       return reply;
     }
@@ -3685,7 +3685,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
           context: 'physio',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' }),
         });
       }
 
