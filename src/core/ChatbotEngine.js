@@ -1157,9 +1157,21 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       await this.sessionManager.updateSession(session.id, { context });
-      return list('Please select your language / 請選擇語言 / 请选择语言:', 'Select language',
+      const languageList = list('Please select your language / 請選擇語言 / 请选择语言:', 'Select language',
         languageCodes.map((code, i) => ({ id: String(i + 1), title: LANGUAGE_LABELS[code] }))
       );
+      // Greetings/menu commands and explicit language-change requests go straight to the
+      // list untouched — the ack/"let's start again" prefix is only for genuinely unmatched
+      // free text, mirroring the fallback prefix logic further down this method.
+      const isGreetingOrMenu = !text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text);
+      const isExplicitLanguageCommand = text === 'language' || text === 'change language';
+      if (!isGreetingOrMenu && !isExplicitLanguageCommand) {
+        const prefix = session._isFirstContactMessage
+          ? `Thanks for reaching out! To make sure I get your booking right, I'll collect a few details step by step — starting with your language.`
+          : `Let's start again — here are the options.`;
+        return prependTextToEnvelope(prefix, languageList);
+      }
+      return languageList;
     }
 
     const language = context.language || 'en';

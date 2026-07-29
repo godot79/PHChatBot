@@ -4126,6 +4126,18 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
     expect(String(reply)).toMatch(/普通话/);
   });
 
+  test('brand-new session: first-contact ack is not swallowed by the language gate on free-text input', async () => {
+    const reply = String(await engine.handleMessage('I need to book an appointment for Tuesday', '+6592000009'));
+    expect(reply).toMatch(/thanks for reaching out/i);
+    expect(reply).toMatch(/select your language/i);
+  });
+
+  test('brand-new session: a plain greeting still gets no ack prefix (language gate)', async () => {
+    const reply = String(await engine.handleMessage('hi', '+6592000010'));
+    expect(reply).not.toMatch(/thanks for reaching out/i);
+    expect(reply).toMatch(/select your language/i);
+  });
+
   test('numeric selection "2" sets Cantonese (yue) and persists on the session', async () => {
     const phone = '+6592000002';
     await seedUnverifiedNoLanguage(phone);
