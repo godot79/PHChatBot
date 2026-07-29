@@ -98,6 +98,14 @@ const STRINGS = {
       selectClinicForPhysio: 'Select a clinic for {{name}}:',
       noSlotsAtClinicForPhysio: 'No slots found for {{type}} at {{clinic}}.',
     },
+    bookSpecificClinic: {
+      noClinicsAvailable: 'No clinics are available right now.',
+      selectClinic: 'Select a clinic:',
+      noApptTypesAtClinic: 'No appointment types found at {{clinic}}.',
+      selectVisitTypeForClinic: 'Select visit type for {{clinic}}:',
+      noPractitionersAtClinicForType: 'No practitioners at {{clinic}} offer {{type}} right now.',
+      choosePhysioForClinic: 'Choose a physio for {{clinic}}:',
+    },
   },
   yue: {
     common: {
@@ -181,6 +189,14 @@ const STRINGS = {
       selectClinicForPhysio: '請揀 {{name}} 嘅診所：',
       noSlotsAtClinicForPhysio: '{{clinic}} 冇 {{type}} 嘅時段。',
     },
+    bookSpecificClinic: {
+      noClinicsAvailable: '而家冇診所可供選擇。',
+      selectClinic: '請揀一間診所：',
+      noApptTypesAtClinic: '{{clinic}} 搵唔到任何預約類型。',
+      selectVisitTypeForClinic: '請揀 {{clinic}} 嘅睇症類型：',
+      noPractitionersAtClinicForType: '而家 {{clinic}} 冇物理治療師提供 {{type}}。',
+      choosePhysioForClinic: '請揀一位喺 {{clinic}} 嘅物理治療師：',
+    },
   },
   zh: {
     common: {
@@ -263,6 +279,14 @@ const STRINGS = {
       noSlotsForPhysioAndType: '{{physio}} 没有 {{type}} 的时段。',
       selectClinicForPhysio: '请选择 {{name}} 的诊所：',
       noSlotsAtClinicForPhysio: '{{clinic}} 没有 {{type}} 的时段。',
+    },
+    bookSpecificClinic: {
+      noClinicsAvailable: '目前没有诊所可供选择。',
+      selectClinic: '请选择一间诊所：',
+      noApptTypesAtClinic: '在 {{clinic}} 未找到任何预约类型。',
+      selectVisitTypeForClinic: '请选择 {{clinic}} 的就诊类型：',
+      noPractitionersAtClinicForType: '目前 {{clinic}} 没有理疗师提供 {{type}}。',
+      choosePhysioForClinic: '请选择一位在 {{clinic}} 的理疗师：',
     },
   },
 };
