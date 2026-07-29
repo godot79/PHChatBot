@@ -1747,7 +1747,8 @@ async handleMessageEnvelope(message, phoneNumber) {
    *   actually changes what gets picked, not just re-runs the same fetch.
    * @returns {Promise<object>} buttons() envelope
    */
-  async _noSlotsRetry(session, data, stateConst, { context, confirmedMessage, retryStep, result, retryLabel = 'Try Again' } = {}) {
+  async _noSlotsRetry(session, data, stateConst, { context, confirmedMessage, retryStep, result, retryLabel } = {}) {
+    const language = this._getSessionLanguage(session);
     const step = retryStep || data.selection_step;
     data.no_slots_prompt = { context, retry_step: step };
     session.conversation_state = stateConst;
@@ -1760,18 +1761,18 @@ async handleMessageEnvelope(message, phoneNumber) {
     // needing to tell us which shape it passed.
     const partial = !!(result && (result._partial || (Array.isArray(result) && result.some(r => Array.isArray(r) && r._partial))));
     const body = partial
-      ? "We're having trouble checking availability right now — this may be temporary. Please try again in a moment."
+      ? t(language, 'noSlots.transientFailure')
       : confirmedMessage;
     // If this might just be a transient fetch failure, "Try Again" is the
     // honest label regardless of what a confirmed-empty retryLabel would say
     // (e.g. 'Try another physio' implies this physio is confirmed unavailable,
     // which we can't actually assert here).
-    const label = partial ? 'Try Again' : retryLabel;
+    const label = partial ? t(language, 'common.tryAgain') : (retryLabel || t(language, 'common.tryAgain'));
 
     return buttons(body, [
       { id: '1', title: label },
-      { id: '2', title: 'Email us' },
-      { id: '3', title: 'Message on WhatsApp' },
+      { id: '2', title: t(language, 'common.emailUs') },
+      { id: '3', title: t(language, 'common.messageOnWhatsApp') },
     ]);
   }
 
@@ -1899,7 +1900,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: session.data
       });
-      return prependTextToEnvelope(`Thanks! Our ${region} support team will be in touch shortly.`, await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.supportTeamThanks', { region }), await this.renderMainMenu(session));
     }
 
     // 3 — message us (open WhatsApp with pre-filled context)
@@ -1915,7 +1916,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: session.data
       });
-      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.tapToMessageTeam', { region, link: waLink }), await this.renderMainMenu(session));
     }
 
     return null;

@@ -23,6 +23,14 @@ const STRINGS = {
       optionsNotUnderstood: 'Your response is not understood. Here are the options. Try again.',
       invalidBookingMethod: 'Please reply with a valid booking method (1–5).',
       cannotProceedBooking: 'Cannot proceed with booking. Please start again.',
+      tryAgain: 'Try Again',
+      emailUs: 'Email us',
+      messageOnWhatsApp: 'Message on WhatsApp',
+    },
+    noSlots: {
+      transientFailure: "We're having trouble checking availability right now — this may be temporary. Please try again in a moment.",
+      supportTeamThanks: 'Thanks! Our {{region}} support team will be in touch shortly.',
+      tapToMessageTeam: 'Tap to message our {{region}} team:\n{{link}}',
     },
     region: {
       promptBody: 'Please select your region:',
@@ -114,6 +122,14 @@ const STRINGS = {
       optionsNotUnderstood: '你嘅回覆我哋睇唔明。呢度係選項，請再試多次。',
       invalidBookingMethod: '請回覆一個有效嘅預約方式（1–5）。',
       cannotProceedBooking: '未能繼續預約，請重新開始。',
+      tryAgain: '再試一次',
+      emailUs: '電郵我哋',
+      messageOnWhatsApp: '喺 WhatsApp 傳訊息',
+    },
+    noSlots: {
+      transientFailure: '而家查詢時段有啲問題 — 可能係暫時性嘅。請等一陣再試多次。',
+      supportTeamThanks: '多謝！我哋{{region}}嘅支援團隊好快會聯絡你。',
+      tapToMessageTeam: '撳呢度傳訊息俾我哋{{region}}嘅團隊：\n{{link}}',
     },
     region: {
       promptBody: '請選擇你所喺嘅地區：',
@@ -205,6 +221,14 @@ const STRINGS = {
       optionsNotUnderstood: '无法理解您的回复。以下是选项，请重新尝试。',
       invalidBookingMethod: '请回复有效的预约方式（1–5）。',
       cannotProceedBooking: '无法继续预约，请重新开始。',
+      tryAgain: '重试',
+      emailUs: '给我们发邮件',
+      messageOnWhatsApp: '在 WhatsApp 上留言',
+    },
+    noSlots: {
+      transientFailure: '目前查询可用时段时遇到问题——这可能是暂时的。请稍后再试。',
+      supportTeamThanks: '谢谢！我们{{region}}的支持团队会尽快与您联系。',
+      tapToMessageTeam: '点击给我们{{region}}的团队留言：\n{{link}}',
     },
     region: {
       promptBody: '请选择您所在的地区：',
