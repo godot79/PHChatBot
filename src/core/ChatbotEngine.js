@@ -4607,7 +4607,7 @@ if (/^p(rev)?$/i.test(text)) {
     const patient_id = session.patient_id;
     if (!patient_id) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY });
-      return 'You need to be a registered patient to cancel appointments. Enter your email to verify your details first.';
+      return t(this._getSessionLanguage(session), 'cancelFlow.needVerification');
     }
 
     // Fetch future ACTIVE appts only; defensive local filter
@@ -4619,7 +4619,7 @@ if (/^p(rev)?$/i.test(text)) {
     const now = new Date();
     let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
-      return prependTextToEnvelope('No upcoming appointments found to cancel.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.noUpcomingAppointments'), await this.goToInteractiveMenu(session));
     }
 
     futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
@@ -4644,10 +4644,10 @@ if (/^p(rev)?$/i.test(text)) {
     });
 
     return buildInteractiveSelectionList({
-      header: 'Your upcoming appointments:',
+      header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
       items: futureAppts,
       rowFn: (appt) => ({
-        title: appt._practitioner_display || 'Appointment',
+        title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
         description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
       }),
       page: 0
@@ -4675,10 +4675,10 @@ if (/^p(rev)?$/i.test(text)) {
       data.cancel_appt_page = page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return buildInteractiveSelectionList({
-        header: 'Your upcoming appointments:',
+        header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
         items: appts,
         rowFn: (appt) => ({
-          title: appt._practitioner_display || 'Appointment',
+          title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
           description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
         }),
         page
@@ -4692,7 +4692,7 @@ if (/^p(rev)?$/i.test(text)) {
     const localNum = parseInt(text, 10);
     const idx = pageStart + localNum - 1;
     if (isNaN(localNum) || localNum < 1 || localNum > Math.min(pageSize, appts.length - pageStart) || !appts[idx]) {
-      return 'Invalid selection. Please reply with the number of the appointment you want to cancel, or "0" to go back.';
+      return t(this._getSessionLanguage(session), 'cancelFlow.invalidSelection');
     }
     data.selected_cancel_appt = appts[idx];
     data.selected_cancel_appt_idx = idx;
@@ -4718,13 +4718,15 @@ if (/^p(rev)?$/i.test(text)) {
    * @param {string} introText
    * @param {'cancelled'|'rescheduled'} action
    */
-  _renderAppointmentChangeBlockedPrompt(introText, action) {
+  _renderAppointmentChangeBlockedPrompt(introText, action, session) {
+    const language = this._getSessionLanguage(session);
+    const actionLabel = t(language, action === 'rescheduled' ? 'appointmentChangeBlocked.actionRescheduled' : 'appointmentChangeBlocked.actionCancelled');
     return buttons(
-      `${introText}\n\nThis appointment is within 24 hours, so it can't be ${action} here. Please contact our front desk directly — cancellation fees may apply.`,
+      t(language, 'appointmentChangeBlocked.promptBody', { intro: introText, action: actionLabel }),
       [
-        { id: '1', title: 'Main menu' },
-        { id: '2', title: 'Email us' },
-        { id: '3', title: 'Message on WhatsApp' },
+        { id: '1', title: t(language, 'common.mainMenuButton') },
+        { id: '2', title: t(language, 'common.emailUs') },
+        { id: '3', title: t(language, 'common.messageOnWhatsApp') },
       ]
     );
   }
@@ -4739,6 +4741,7 @@ if (/^p(rev)?$/i.test(text)) {
    * @param {boolean} isSingle (true if called from the "only one appt" shortcut)
   */
   async _cancelPresentConfirmation(session, data, isSingle) {
+    const language = this._getSessionLanguage(session);
     const appt = data.selected_cancel_appt;
     if (!appt) {
       // Clean up
@@ -4746,12 +4749,12 @@ if (/^p(rev)?$/i.test(text)) {
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
 
     const intro = isSingle
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : `You selected:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
+      ? t(language, 'cancelFlow.oneUpcomingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'cancelFlow.selectedIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
 
     if (this._isAppointmentChangeBlockedByPolicy(appt)) {
       data.cancel_blocked_prompt = true;
@@ -4759,16 +4762,16 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.CONFIRM_CANCEL,
         data: JSON.stringify(data)
       });
-      return this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled');
+      return this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled', session);
     }
 
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.CONFIRM_CANCEL,
       data: JSON.stringify(data)
     });
-    return buttons(`${intro}\n\nConfirm cancellation?`, [
-      { id: 'yes', title: 'Yes, cancel' },
-      { id: '0',   title: 'Go back' }
+    return buttons(`${intro}\n\n${t(language, 'cancelFlow.confirmCancellationQuestion')}`, [
+      { id: 'yes', title: t(language, 'cancelFlow.yesCancelButton') },
+      { id: '0',   title: t(language, 'slotSelection.goBackButton') }
     ]);
   }
 
@@ -4802,15 +4805,16 @@ if (/^p(rev)?$/i.test(text)) {
 
     // Require explicit yes — unknown input re-shows prompt with prefix
     if (text !== 'yes') {
+      const language = this._getSessionLanguage(session);
       const appt = data.selected_cancel_appt;
       const intro = appt
-        ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-        : 'Confirm cancellation?';
+        ? t(language, 'cancelFlow.cancellingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+        : t(language, 'cancelFlow.confirmCancellationQuestion');
       return prependTextToEnvelope(
-        "Please reply 'Yes' to confirm cancellation, or '0' to go back.",
-        buttons(`${intro}\n\nConfirm cancellation?`, [
-          { id: 'yes', title: 'Yes, cancel' },
-          { id: '0',   title: 'Go back' }
+        t(language, 'cancelFlow.replyYesOrBack'),
+        buttons(`${intro}\n\n${t(language, 'cancelFlow.confirmCancellationQuestion')}`, [
+          { id: 'yes', title: t(language, 'cancelFlow.yesCancelButton') },
+          { id: '0',   title: t(language, 'slotSelection.goBackButton') }
         ])
       );
     }
@@ -4819,7 +4823,7 @@ if (/^p(rev)?$/i.test(text)) {
     if (!appt || !appt.id) {
       delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
 
     const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
@@ -4843,7 +4847,7 @@ if (/^p(rev)?$/i.test(text)) {
         appointment_type_id: extractIdFromClinikoRef(appt.appointment_type, 'appointment_types'),
         starts_at: appt.starts_at, ts: Date.now()
       });
-      return prependTextToEnvelope(`✅ Your appointment has been cancelled.`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.cancelSuccess'), await this.goToInteractiveMenu(session));
     }
 
     // Cancellation failed — send contact/failure email
@@ -4853,7 +4857,7 @@ if (/^p(rev)?$/i.test(text)) {
     } catch (e) {
       this.logger.error('[Cancel] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
-    return prependTextToEnvelope(`❌ Could not cancel your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.cancelFailed', { message: result?.message || '' }), await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -4893,7 +4897,7 @@ if (/^p(rev)?$/i.test(text)) {
       const region = this._getSessionRegion(session);
       this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'cancel_blocked', sessionId: session.id, region, ts: Date.now() });
       await cleanup();
-      return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'appointmentChangeBlocked.frontDeskThanks', { region }), await this.goToInteractiveMenu(session));
     }
 
     // 3 — message us (open WhatsApp with pre-filled context)
@@ -4908,14 +4912,15 @@ if (/^p(rev)?$/i.test(text)) {
         this._buildAppointmentChangeBlockedSummary(session, appt, 'cancel')
       );
       await cleanup();
-      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.tapToMessageTeam', { region, link: waLink }), await this.goToInteractiveMenu(session));
     }
 
     // Unknown input — re-render the same blocked prompt with an error prefix
+    const language = this._getSessionLanguage(session);
     const intro = appt
-      ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : 'This appointment cannot be cancelled here.';
-    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled'));
+      ? t(language, 'cancelFlow.cancellingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'cancelFlow.cannotCancelHereFallback');
+    return prependTextToEnvelope(t(language, 'appointmentChangeBlocked.replyWith123'), this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled', session));
   }
 
   // ========== RESCHEDULE WORKFLOW  ==========
@@ -5053,7 +5058,7 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
         data: JSON.stringify(data)
       });
-      return this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled');
+      return this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled', session);
     }
 
     await this.sessionManager.updateSession(session.id, {
@@ -5246,7 +5251,7 @@ if (/^p(rev)?$/i.test(text)) {
     const intro = appt
       ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
       : 'This appointment cannot be rescheduled here.';
-    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled'));
+    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled', session));
   }
 
   /**
