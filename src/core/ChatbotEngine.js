@@ -889,13 +889,14 @@ class ChatbotEngine {
     return await this.renderMainMenu(fresh);
   }
   async renderBookingMethodMenu(session) {
-    return list('How would you like to book?', 'Choose method', [
-      { id: '1', title: 'By last visit' },
-      { id: '2', title: 'Soonest available', description: 'Searches all physios — can take a minute' },
-      { id: '3', title: 'Specific date' },
-      { id: '4', title: 'Specific physio' },
-      { id: '5', title: 'Specific clinic' },
-      { id: '0', title: '← Back' },
+    const language = this._getSessionLanguage(session);
+    return list(t(language, 'bookingMenu.title'), t(language, 'bookingMenu.subtitle'), [
+      { id: '1', title: t(language, 'bookingMenu.byLastVisit') },
+      { id: '2', title: t(language, 'bookingMenu.soonest'), description: t(language, 'bookingMenu.soonestDesc') },
+      { id: '3', title: t(language, 'bookingMenu.specificDate') },
+      { id: '4', title: t(language, 'bookingMenu.specificPhysio') },
+      { id: '5', title: t(language, 'bookingMenu.specificClinic') },
+      { id: '0', title: t(language, 'bookingMenu.back') },
     ]);
   }
 
@@ -1997,7 +1998,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const patientId = session?.patient_id || data?.patient_id;
       if (!patientId) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: null });
-        return 'Verify your details before booking from history.';
+        return t(this._getSessionLanguage(session), 'bookHistory.verifyRequired');
       }
 
       const nowISO = new Date().toISOString();
@@ -2043,7 +2044,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const physios = Array.from(byPrac.values()).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen));
       if (!physios.length) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-        return 'No prior physio visits found. Choose another booking method.';
+        return t(this._getSessionLanguage(session), 'bookHistory.noPriorVisits');
       }
 
       data.history_physio_list = physios;
@@ -2078,7 +2079,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid selection. Reply with a number from the list.';
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidNumericSelection');
         data.selected_physio = list[idx].practitioner;
         data.last_clinic_id = list[idx].last_clinic_id || '';
         data.selection_step = 'choose_type';
@@ -2087,14 +2088,15 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.handleBookHistory(session, '');
       }
 
+      const language = this._getSessionLanguage(session);
       const reply = buildInteractiveSelectionList({
         items: list,
         rowFn: (p) => ({
           title: getPractitionerDisplayName(p.practitioner) || '',
-          description: `Last seen: ${formatSlotDateTime(p.last_seen, this._regionTz(session))}`
+          description: t(language, 'bookHistory.lastSeen', { date: formatSlotDateTime(p.last_seen, this._regionTz(session)) })
         }),
         page: data.history_physio_page || 0,
-        header: 'Choose a physio from your past visits:'
+        header: t(language, 'bookHistory.choosePhysio')
       });
       return reply;
     }
@@ -2148,7 +2150,7 @@ if (/^p(rev)?$/i.test(text)) {
         const localNum = parseInt(text, 10);
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid appointment type selection.';
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidApptTypeSelection');
         data.selected_appt_type = list[idx];
         data.selection_step = 'choose_clinic';
         navPush(data, 'choose_clinic', { had_multiple_options: (list.length > 1), auto: false });
@@ -2160,7 +2162,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}:`
+        header: t(this._getSessionLanguage(session), 'bookHistory.chooseApptType', { name: getPractitionerDisplayName(data.selected_physio) })
       });
       return reply2;
     }
@@ -2206,7 +2208,7 @@ if (/^p(rev)?$/i.test(text)) {
         const localNum = parseInt(text, 10);
         const list = data.clinic_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid clinic selection.';
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidClinicSelection');
         data.selected_clinic = list[idx];
         data.selection_step = 'view_slots';
         navPush(data, 'view_slots', { had_multiple_options: (list.length > 1), auto: false });
@@ -2218,7 +2220,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(c.business_name) }),
         page: data.clinic_page || 0,
-        header: 'Select a clinic:'
+        header: t(this._getSessionLanguage(session), 'bookHistory.selectClinic')
       });
       return reply3;
     }
@@ -2246,7 +2248,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_HISTORY, {
           context: 'history',
           result: raw,
-          confirmedMessage: 'No available slots for that combination.',
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookHistory.noSlotsForCombo'),
         });
       }
 
