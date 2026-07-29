@@ -77,6 +77,17 @@ const STRINGS = {
       noSlotsForType: 'No slots found for {{name}}.',
       chooseApptType: 'Choose appointment type:',
     },
+    bookSpecificDate: {
+      pickDatePage: 'Pick a date (Page {{current}}/{{total}}):',
+      selectVisitType: 'Select visit type for {{date}}:',
+      noApptTypesForDate: 'No appointment types available for that date.',
+      noPractitionersForType: 'No practitioners offer {{name}} right now.',
+      choosePhysioForDate: 'Choose a physio for {{type}} on {{date}}:',
+      tryAnotherPhysio: 'Try another physio',
+      noSlotsForPhysioOnDate: 'No slots on {{date}} for {{type}} with {{physio}}.',
+      selectClinicForDate: 'Select a clinic for {{physio}} on {{date}}:',
+      noSlotsAtClinicForDate: 'No slots for {{type}} on that date at {{clinic}}.',
+    },
   },
   yue: {
     common: {
@@ -139,6 +150,17 @@ const STRINGS = {
       noSlotsForType: '揾唔到 {{name}} 嘅時段。',
       chooseApptType: '請揀預約類型：',
     },
+    bookSpecificDate: {
+      pickDatePage: '揀日期（第 {{current}}/{{total}} 頁）：',
+      selectVisitType: '請揀 {{date}} 嘅預約類型：',
+      noApptTypesForDate: '嗰日冇任何預約類型可供選擇。',
+      noPractitionersForType: '而家冇物理治療師提供 {{name}}。',
+      choosePhysioForDate: '請揀一位喺 {{date}} 睇 {{type}} 嘅物理治療師：',
+      tryAnotherPhysio: '試下另一位物理治療師',
+      noSlotsForPhysioOnDate: '{{date}} 冇 {{physio}} 嘅 {{type}} 時段。',
+      selectClinicForDate: '請揀 {{physio}} 喺 {{date}} 嘅診所：',
+      noSlotsAtClinicForDate: '嗰日喺 {{clinic}} 冇 {{type}} 嘅時段。',
+    },
   },
   zh: {
     common: {
@@ -200,6 +222,17 @@ const STRINGS = {
       noSlotsForTypeAndPhysio: '未找到 {{physio}} 的 {{type}} 时段。',
       noSlotsForType: '未找到 {{name}} 的时段。',
       chooseApptType: '请选择预约类型：',
+    },
+    bookSpecificDate: {
+      pickDatePage: '选择日期（第 {{current}}/{{total}} 页）：',
+      selectVisitType: '请选择 {{date}} 的预约类型：',
+      noApptTypesForDate: '当天没有可预约的类型。',
+      noPractitionersForType: '目前没有理疗师提供 {{name}}。',
+      choosePhysioForDate: '请选择一位在 {{date}} 看 {{type}} 的理疗师：',
+      tryAnotherPhysio: '尝试另一位理疗师',
+      noSlotsForPhysioOnDate: '{{date}} 没有 {{physio}} 的 {{type}} 时段。',
+      selectClinicForDate: '请选择 {{physio}} 在 {{date}} 的诊所：',
+      noSlotsAtClinicForDate: '当天在 {{clinic}} 没有 {{type}} 的时段。',
     },
   },
 };
