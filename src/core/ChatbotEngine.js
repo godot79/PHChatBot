@@ -804,8 +804,7 @@ class ChatbotEngine {
       menu = await this.renderMainMenu(session);
     }
     return (
-      "We encountered an unexpected error processing your request. " +
-      "You can continue using the menu below, or contact support if the issue persists.\n\n" +
+      t(this._getSessionLanguage(session), 'common.unexpectedError') + "\n\n" +
       menu +
       "\n\n" + getSupportInfo(this._getSessionRegion(session))
     );
@@ -986,6 +985,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       let session = await this.sessionManager.getOrCreateSession(phoneNumber);
       if (!session) {
         this.logger.warn(`Failed to create session for ${phoneNumber}`);
+        // No session exists yet, so no language preference to read — English is unavoidable here.
         return 'Sorry, there was an issue starting your session. Please try again.';
       }
 
@@ -1073,6 +1073,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       if (session) {
         return await this.renderErrorWithMenu(session);
       }
+      // Session lookup itself failed, so no language preference to read — English is unavoidable here.
       return (
           "We're currently experiencing a technical issue and could not start your session. " +
           "Please try again later. If the problem continues, " +
@@ -1247,7 +1248,7 @@ async handleMessageEnvelope(message, phoneNumber) {
    * @param {string} message
    */
   async handleFallbackState(session, message) {
-    return prependTextToEnvelope(`I'm sorry, I didn't understand that.`, await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.fallbackNotUnderstood'), await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1545,7 +1546,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
       return await this.handleRescheduleAppointmentState(session, '');
     }
-    return prependTextToEnvelope('Your response is not understood. Here are the options. Try again.', await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.optionsNotUnderstood'), await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1611,7 +1612,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = null;
       return await this.handleBookSpecificClinic(session, '');
     }
-    return prependTextToEnvelope('Please reply with a valid booking method (1–5).', await this.renderBookingMethodMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.invalidBookingMethod'), await this.renderBookingMethodMenu(session));
   }
 
   /**
@@ -4331,7 +4332,7 @@ if (/^p(rev)?$/i.test(text)) {
         } catch (e) {
           this.logger.error('[handleConfirmBookingState] Failed to set INTRO state after missing patient_id', e);
         }
-        return prependTextToEnvelope('Cannot proceed with booking. Please start again.', await this.renderMainMenu(session));
+        return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.cannotProceedBooking'), await this.renderMainMenu(session));
       }
 
       // Defensive: Check slot fields
