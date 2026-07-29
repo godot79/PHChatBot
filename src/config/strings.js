@@ -88,6 +88,16 @@ const STRINGS = {
       selectClinicForDate: 'Select a clinic for {{physio}} on {{date}}:',
       noSlotsAtClinicForDate: 'No slots for {{type}} on that date at {{clinic}}.',
     },
+    bookSpecificPhysio: {
+      noPractitionersAvailable: 'No practitioners are available right now.',
+      choosePhysio: 'Choose a physio:',
+      noVisitTypesForPhysio: 'No visit types found for {{name}}.',
+      selectVisitTypeForPhysio: 'Select visit type for {{name}}:',
+      tryAnotherType: 'Try another type',
+      noSlotsForPhysioAndType: 'No slots available for {{physio}} with {{type}}.',
+      selectClinicForPhysio: 'Select a clinic for {{name}}:',
+      noSlotsAtClinicForPhysio: 'No slots found for {{type}} at {{clinic}}.',
+    },
   },
   yue: {
     common: {
@@ -161,6 +171,16 @@ const STRINGS = {
       selectClinicForDate: '請揀 {{physio}} 喺 {{date}} 嘅診所：',
       noSlotsAtClinicForDate: '嗰日喺 {{clinic}} 冇 {{type}} 嘅時段。',
     },
+    bookSpecificPhysio: {
+      noPractitionersAvailable: '而家冇物理治療師可供選擇。',
+      choosePhysio: '請揀一位物理治療師：',
+      noVisitTypesForPhysio: '搵唔到 {{name}} 嘅睇症類型。',
+      selectVisitTypeForPhysio: '請揀 {{name}} 嘅睇症類型：',
+      tryAnotherType: '試下另一種類型',
+      noSlotsForPhysioAndType: '{{physio}} 冇 {{type}} 嘅時段。',
+      selectClinicForPhysio: '請揀 {{name}} 嘅診所：',
+      noSlotsAtClinicForPhysio: '{{clinic}} 冇 {{type}} 嘅時段。',
+    },
   },
   zh: {
     common: {
@@ -233,6 +253,16 @@ const STRINGS = {
       noSlotsForPhysioOnDate: '{{date}} 没有 {{physio}} 的 {{type}} 时段。',
       selectClinicForDate: '请选择 {{physio}} 在 {{date}} 的诊所：',
       noSlotsAtClinicForDate: '当天在 {{clinic}} 没有 {{type}} 的时段。',
+    },
+    bookSpecificPhysio: {
+      noPractitionersAvailable: '目前没有理疗师可供选择。',
+      choosePhysio: '请选择一位理疗师：',
+      noVisitTypesForPhysio: '未找到 {{name}} 的就诊类型。',
+      selectVisitTypeForPhysio: '请选择 {{name}} 的就诊类型：',
+      tryAnotherType: '尝试另一种类型',
+      noSlotsForPhysioAndType: '{{physio}} 没有 {{type}} 的时段。',
+      selectClinicForPhysio: '请选择 {{name}} 的诊所：',
+      noSlotsAtClinicForPhysio: '{{clinic}} 没有 {{type}} 的时段。',
     },
   },
 };
