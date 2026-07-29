@@ -4937,7 +4937,7 @@ if (/^p(rev)?$/i.test(text)) {
     const patient_id = session.patient_id;
     if (!patient_id) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY });
-      return 'You need to be a registered patient to reschedule appointments. Enter your email to verify your details first.';
+      return t(this._getSessionLanguage(session), 'rescheduleFlow.needVerification');
     }
 
     // Fetch future ACTIVE appts only; defensive local filter
@@ -4949,7 +4949,7 @@ if (/^p(rev)?$/i.test(text)) {
     const now = new Date();
     let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
-      return prependTextToEnvelope('No upcoming appointments found to reschedule.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'rescheduleFlow.noUpcomingAppointments'), await this.goToInteractiveMenu(session));
     }
 
     futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
@@ -4974,10 +4974,10 @@ if (/^p(rev)?$/i.test(text)) {
     });
 
     return buildInteractiveSelectionList({
-      header: 'Your upcoming appointments:',
+      header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
       items: futureAppts,
       rowFn: (appt) => ({
-        title: appt._practitioner_display || 'Appointment',
+        title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
         description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
       }),
       page: 0
@@ -5008,10 +5008,10 @@ if (/^p(rev)?$/i.test(text)) {
       data.reschedule_appt_page = page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return buildInteractiveSelectionList({
-        header: 'Your upcoming appointments:',
+        header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
         items: appts,
         rowFn: (appt) => ({
-          title: appt._practitioner_display || 'Appointment',
+          title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
           description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
         }),
         page
@@ -5025,7 +5025,7 @@ if (/^p(rev)?$/i.test(text)) {
     const localNum = parseInt(text, 10);
     const idx = pageStart + localNum - 1;
     if (isNaN(localNum) || localNum < 1 || localNum > Math.min(pageSize, appts.length - pageStart) || !appts[idx]) {
-      return 'Invalid selection. Please reply with the number of the appointment you want to reschedule, or "0" to go back.';
+      return t(this._getSessionLanguage(session), 'rescheduleFlow.invalidSelection');
     }
     data.selected_reschedule_appt = appts[idx];
     data.selected_reschedule_appt_idx = idx;
@@ -5038,19 +5038,20 @@ if (/^p(rev)?$/i.test(text)) {
    * Transitions to RESCHEDULE_CONFIRM_INTENT state.
    */
   async _rescheduleShowConfirm(session, data, isSingle) {
+    const language = this._getSessionLanguage(session);
     const appt = data.selected_reschedule_appt;
     if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
     data.is_single_reschedule_appt = isSingle;
 
     const intro = isSingle
-      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
-      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+      ? t(language, 'rescheduleFlow.oneUpcomingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.selectedToRescheduleIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
 
     if (this._isAppointmentChangeBlockedByPolicy(appt)) {
       data.reschedule_blocked_prompt = true;
@@ -5065,9 +5066,9 @@ if (/^p(rev)?$/i.test(text)) {
       conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
       data: JSON.stringify(data)
     });
-    return buttons(`${intro}\n\nWould you like to proceed?`, [
-      { id: 'yes', title: 'Yes, reschedule' },
-      { id: '0',   title: 'Go back' }
+    return buttons(`${intro}\n\n${t(language, 'rescheduleFlow.wouldYouLikeToProceed')}`, [
+      { id: 'yes', title: t(language, 'rescheduleFlow.yesRescheduleButton') },
+      { id: '0',   title: t(language, 'slotSelection.goBackButton') }
     ]);
   }
 
@@ -5076,13 +5077,14 @@ if (/^p(rev)?$/i.test(text)) {
    * Transitions to CONFIRM_RESCHEDULE state.
    */
   async _rescheduleFetchAndShowSlots(session, data) {
+    const language = this._getSessionLanguage(session);
     const appt = data.selected_reschedule_appt;
     if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
     const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
     const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
@@ -5093,8 +5095,7 @@ if (/^p(rev)?$/i.test(text)) {
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return (
-        'Sorry, this appointment does not have enough information to find available slots for rescheduling. ' +
-        'Please contact our clinic for assistance.\n\n' +
+        t(language, 'rescheduleFlow.notEnoughInfo') + '\n\n' +
         await this.goToInteractiveMenu(session)
       );
     }
@@ -5131,7 +5132,7 @@ if (/^p(rev)?$/i.test(text)) {
       return await this._noSlotsRetry(session, data, this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE, {
         context: 'reschedule',
         result: fetchFailed ? Object.assign([], { _partial: true }) : availableTimes,
-        confirmedMessage: 'Sorry, no available slots for rescheduling this appointment.',
+        confirmedMessage: t(language, 'rescheduleFlow.noSlotsForReschedule'),
       });
     }
     data.available_times = availableTimes;
@@ -5141,10 +5142,10 @@ if (/^p(rev)?$/i.test(text)) {
       data: JSON.stringify(data)
     });
     const intro = data.is_single_reschedule_appt
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
-    const header = intro + '\n\nPlease choose a new slot:';
-    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session), this._getSessionLanguage(session));
+      ? t(language, 'rescheduleFlow.oneUpcomingIntroPlain', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.selectedToRescheduleIntroPlain', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
+    const header = intro + '\n\n' + t(language, 'rescheduleFlow.chooseNewSlotSuffix');
+    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session), language);
   }
 
   /**
@@ -5173,20 +5174,21 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // Unknown input — re-show confirm prompt
+    const language = this._getSessionLanguage(session);
     if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
     const intro = data.is_single_reschedule_appt
-      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
-      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+      ? t(language, 'rescheduleFlow.oneUpcomingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.selectedToRescheduleIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
     return prependTextToEnvelope(
-      "Please reply 'Yes' to proceed, or '0' to go back.",
-      buttons(`${intro}\n\nWould you like to proceed?`, [
-        { id: 'yes', title: 'Yes, reschedule' },
-        { id: '0',   title: 'Go back' }
+      t(language, 'rescheduleFlow.replyYesOrBack'),
+      buttons(`${intro}\n\n${t(language, 'rescheduleFlow.wouldYouLikeToProceed')}`, [
+        { id: 'yes', title: t(language, 'rescheduleFlow.yesRescheduleButton') },
+        { id: '0',   title: t(language, 'slotSelection.goBackButton') }
       ])
     );
   }
@@ -5229,7 +5231,7 @@ if (/^p(rev)?$/i.test(text)) {
       const region = this._getSessionRegion(session);
       this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'reschedule_blocked', sessionId: session.id, region, ts: Date.now() });
       await cleanup();
-      return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'appointmentChangeBlocked.frontDeskThanks', { region }), await this.goToInteractiveMenu(session));
     }
 
     // 3 — message us (open WhatsApp with pre-filled context)
@@ -5244,14 +5246,15 @@ if (/^p(rev)?$/i.test(text)) {
         this._buildAppointmentChangeBlockedSummary(session, appt, 'reschedule')
       );
       await cleanup();
-      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.tapToMessageTeam', { region, link: waLink }), await this.goToInteractiveMenu(session));
     }
 
     // Unknown input — re-render the same blocked prompt with an error prefix
+    const language = this._getSessionLanguage(session);
     const intro = appt
-      ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : 'This appointment cannot be rescheduled here.';
-    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled', session));
+      ? t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.cannotRescheduleHereFallback');
+    return prependTextToEnvelope(t(language, 'appointmentChangeBlocked.replyWith123'), this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled', session));
   }
 
   /**
@@ -5265,6 +5268,7 @@ if (/^p(rev)?$/i.test(text)) {
    */
   async handleConfirmRescheduleState(session, message) {
     const text = (message || '').trim();
+    const language = this._getSessionLanguage(session);
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     const appt = data.selected_reschedule_appt;
     const availableTimes = data.available_times || [];
@@ -5276,9 +5280,9 @@ if (/^p(rev)?$/i.test(text)) {
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const rescheduleHeader = appt
-        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
-        : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), this._getSessionLanguage(session));
+        ? t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt }) + '\n\n' + t(language, 'rescheduleFlow.chooseNewSlotSuffix')
+        : t(language, 'rescheduleFlow.chooseNewSlotSuffix');
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), language);
     }
 
     // Pagination — previous
@@ -5287,9 +5291,9 @@ if (/^p(rev)?$/i.test(text)) {
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const rescheduleHeader = appt
-        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
-        : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), this._getSessionLanguage(session));
+        ? t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt }) + '\n\n' + t(language, 'rescheduleFlow.chooseNewSlotSuffix')
+        : t(language, 'rescheduleFlow.chooseNewSlotSuffix');
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), language);
     }
 
     // Back
@@ -5304,8 +5308,8 @@ if (/^p(rev)?$/i.test(text)) {
     const count = this._slotPageCount(slot_page);
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || idx < start || idx >= Math.min(start + count, availableTimes.length) || !availableTimes[idx]) {
-      return 'Invalid slot selection. Please reply with the number of your chosen slot, "M" for more, or "0" to go back.' +
-        (appt ? `\n\nYou are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '');
+      return t(language, 'rescheduleFlow.invalidSlotSelection') +
+        (appt ? '\n\n' + t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt }) : '');
     }
 
     const slot = availableTimes[idx];
@@ -5325,7 +5329,7 @@ if (/^p(rev)?$/i.test(text)) {
     if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
       delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.';
+      return t(language, 'rescheduleFlow.missingDetails');
     }
 
     const payload = {
@@ -5356,7 +5360,7 @@ if (/^p(rev)?$/i.test(text)) {
         appointment_id: appt.id, practitioner_id: payload.practitioner_id, business_id: payload.business_id,
         appointment_type_id: payload.appointment_type_id, starts_at: payload.starts_at, ts: Date.now()
       });
-      return prependTextToEnvelope(`✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at, this._regionTz(session))}`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'rescheduleFlow.rescheduleSuccess', { datetime: formatSlotDateTime(starts_at, this._regionTz(session)) }), await this.goToInteractiveMenu(session));
     }
 
     // Reschedule failed — send contact/failure email
@@ -5367,7 +5371,7 @@ if (/^p(rev)?$/i.test(text)) {
     } catch (e) {
       this.logger.error('[Reschedule] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
-    return prependTextToEnvelope(`❌ Could not reschedule your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(language, 'rescheduleFlow.rescheduleFailed', { message: result?.message || '' }), await this.goToInteractiveMenu(session));
   }
 
   /**
