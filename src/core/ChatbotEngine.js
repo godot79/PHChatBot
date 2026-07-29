@@ -2647,7 +2647,7 @@ if (/^p(rev)?$/i.test(text)) {
             items: data.practitioner_list,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
-            header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
+            header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: data.selected_appt_type?.name || '' })
       });
           return reply;
         }
@@ -2699,7 +2699,7 @@ if (/^p(rev)?$/i.test(text)) {
       if (!(data.funnel_catalogue || []).length) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
           context: 'soonest',
-          confirmedMessage: 'No appointment types are available right now.',
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noApptTypesAvailable'),
         });
       }
 
@@ -2710,7 +2710,7 @@ if (/^p(rev)?$/i.test(text)) {
         if (!funnelResult.resolved) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
             context: 'soonest',
-            confirmedMessage: 'No appointment types are available right now.',
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noApptTypesAvailable'),
           });
         }
         data.selected_appt_type = funnelResult.resolved;
@@ -2734,7 +2734,7 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_type',
           result: practitioners,
-          confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noPhysiosForType', { name: data.selected_appt_type.name }),
         });
       }
 
@@ -2746,7 +2746,7 @@ if (/^p(rev)?$/i.test(text)) {
           items: data.practitioner_list,
           rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
           page: 0,
-          header: `Select a practitioner for ${data.selected_appt_type.name}:`
+          header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: data.selected_appt_type.name })
       });
         return reply;
       }
@@ -2779,7 +2779,7 @@ if (/^p(rev)?$/i.test(text)) {
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, practitionerList.length - pageStart) || !practitionerList[idx]) return 'Invalid practitioner selection. Reply with a number from the list.';
+        if (localNum < 1 || localNum > Math.min(pageSize, practitionerList.length - pageStart) || !practitionerList[idx]) return t(this._getSessionLanguage(session), 'bookSoonest.invalidPhysioSelection');
         data.selected_physio = practitionerList[idx];
         data.selection_step = 'choose_clinic';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -2790,7 +2790,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: practitionerList,
         rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
         page,
-        header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
+        header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: data.selected_appt_type?.name || '' })
       });
       return reply;
     }
@@ -2844,7 +2844,7 @@ if (/^p(rev)?$/i.test(text)) {
             context: 'soonest',
             retryStep: 'choose_clinic',
             result: slotResults0,
-            confirmedMessage: `No slots found for ${data.selected_appt_type.name} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: data.selected_appt_type.name, physio: getPractitionerDisplayName(data.selected_physio) }),
           });
         }
 
@@ -2866,7 +2866,7 @@ if (/^p(rev)?$/i.test(text)) {
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, clinics.length - pageStart) || !clinics[idx]) return 'Invalid clinic selection. Reply with a number from the list.';
+        if (localNum < 1 || localNum > Math.min(pageSize, clinics.length - pageStart) || !clinics[idx]) return t(this._getSessionLanguage(session), 'bookSoonest.invalidClinicSelection');
         data.selected_clinic = clinics[idx];
         await sync();
       }
@@ -2876,7 +2876,7 @@ if (/^p(rev)?$/i.test(text)) {
           items: clinics,
           rowFn: (c) => ({ title: String(c.business_name) }),
           page,
-          header: `Clinics for ${getPractitionerDisplayName(data.selected_physio)}:`
+          header: t(this._getSessionLanguage(session), 'bookSoonest.selectClinic', { name: getPractitionerDisplayName(data.selected_physio) })
       });
         return reply;
       }
@@ -2903,7 +2903,7 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_clinic',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForType', { name: data.selected_appt_type?.name }),
         });
       }
 
@@ -2933,7 +2933,7 @@ if (/^p(rev)?$/i.test(text)) {
       items: apptTypes,
       rowFn: (a) => ({ title: String(a.name) }),
       page: apptTypePage,
-      header: 'Choose appointment type:'
+      header: t(this._getSessionLanguage(session), 'bookSoonest.chooseApptType')
     });
     return reply;
   }

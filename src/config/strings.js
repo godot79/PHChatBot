@@ -66,6 +66,17 @@ const STRINGS = {
       selectClinic: 'Select a clinic:',
       noSlotsForCombo: 'No available slots for that combination.',
     },
+    bookSoonest: {
+      selectPhysio: 'Select a practitioner for {{name}}:',
+      invalidPhysioSelection: 'Invalid practitioner selection. Reply with a number from the list.',
+      noApptTypesAvailable: 'No appointment types are available right now.',
+      noPhysiosForType: 'No practitioners have available slots for {{name}} in the next few days.',
+      invalidClinicSelection: 'Invalid clinic selection. Reply with a number from the list.',
+      selectClinic: 'Clinics for {{name}}:',
+      noSlotsForTypeAndPhysio: 'No slots found for {{type}} with {{physio}}.',
+      noSlotsForType: 'No slots found for {{name}}.',
+      chooseApptType: 'Choose appointment type:',
+    },
   },
   yue: {
     common: {
@@ -117,6 +128,17 @@ const STRINGS = {
       selectClinic: '請揀一間診所：',
       noSlotsForCombo: '呢個組合暫時冇時段。',
     },
+    bookSoonest: {
+      selectPhysio: '請揀一位物理治療師嚟睇 {{name}}：',
+      invalidPhysioSelection: '物理治療師選擇無效，請回覆列表上嘅數字。',
+      noApptTypesAvailable: '而家冇任何預約類型可供選擇。',
+      noPhysiosForType: '未來幾日冇物理治療師有 {{name}} 嘅時段。',
+      invalidClinicSelection: '診所選擇無效，請回覆列表上嘅數字。',
+      selectClinic: '{{name}} 嘅診所：',
+      noSlotsForTypeAndPhysio: '揾唔到 {{physio}} 嘅 {{type}} 時段。',
+      noSlotsForType: '揾唔到 {{name}} 嘅時段。',
+      chooseApptType: '請揀預約類型：',
+    },
   },
   zh: {
     common: {
@@ -167,6 +189,17 @@ const STRINGS = {
       invalidClinicSelection: '诊所选择无效。',
       selectClinic: '请选择一间诊所：',
       noSlotsForCombo: '该组合暂无可用时段。',
+    },
+    bookSoonest: {
+      selectPhysio: '请选择一位理疗师看诊 {{name}}：',
+      invalidPhysioSelection: '理疗师选择无效，请回复列表中的数字。',
+      noApptTypesAvailable: '目前没有可预约的类型。',
+      noPhysiosForType: '未来几天没有理疗师有 {{name}} 的时段。',
+      invalidClinicSelection: '诊所选择无效，请回复列表中的数字。',
+      selectClinic: '{{name}} 的诊所：',
+      noSlotsForTypeAndPhysio: '未找到 {{physio}} 的 {{type}} 时段。',
+      noSlotsForType: '未找到 {{name}} 的时段。',
+      chooseApptType: '请选择预约类型：',
     },
   },
 };
