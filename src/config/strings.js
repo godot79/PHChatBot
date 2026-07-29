@@ -57,6 +57,12 @@ const STRINGS = {
       selectedSummary: 'You have selected:\n\n👨‍⚕️ *{{practitioner}}*\n🏥 *{{clinic}}*\n🗓️ {{datetime}}',
       technicalErrorFallback: 'Booking failed due to a technical error.',
     },
+    viewFeesLocations: {
+      feeStructureHeader: '💰 *Fee Structure*',
+      locationsIntro: 'Here are our clinic locations:',
+      noClinicInfo: 'No clinic information is currently available.',
+      clinicSystemTrouble: "We're having trouble reaching our clinic system right now. Please try again in a moment.",
+    },
     region: {
       promptBody: 'Please select your region:',
       buttonLabel: 'Select region',
@@ -181,6 +187,12 @@ const STRINGS = {
       selectedSummary: '你揀咗：\n\n👨‍⚕️ *{{practitioner}}*\n🏥 *{{clinic}}*\n🗓️ {{datetime}}',
       technicalErrorFallback: '由於技術問題，預約失敗。',
     },
+    viewFeesLocations: {
+      feeStructureHeader: '💰 *收費表*',
+      locationsIntro: '我哋嘅診所地點：',
+      noClinicInfo: '暫時冇診所資料。',
+      clinicSystemTrouble: '而家連接診所系統有啲問題，請等一陣再試。',
+    },
     region: {
       promptBody: '請選擇你所喺嘅地區：',
       buttonLabel: '選擇地區',
@@ -304,6 +316,12 @@ const STRINGS = {
       confirmPrompt: '请回复"Yes"确认预约，或回复"0"返回。',
       selectedSummary: '您选择了：\n\n👨‍⚕️ *{{practitioner}}*\n🏥 *{{clinic}}*\n🗓️ {{datetime}}',
       technicalErrorFallback: '由于技术问题，预约失败。',
+    },
+    viewFeesLocations: {
+      feeStructureHeader: '💰 *收费标准*',
+      locationsIntro: '我们的诊所地点：',
+      noClinicInfo: '暂时没有诊所信息。',
+      clinicSystemTrouble: '目前连接诊所系统时遇到问题，请稍后再试。',
     },
     region: {
       promptBody: '请选择您所在的地区：',
