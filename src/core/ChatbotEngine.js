@@ -8,7 +8,7 @@ const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
-const { REGION_SUPPORT_INFO, REGION_FEES } = require('../config/regions');
+const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage } = require('../config/regions');
 const { LANGUAGE_LABELS } = require('../config/languages');
 const { t } = require('../config/strings');
 const {
@@ -4425,26 +4425,28 @@ if (/^p(rev)?$/i.test(text)) {
 
   async handleViewFeesState(session, message) {
     const region = this._getSessionRegion(session);
-    const feeData = REGION_FEES[region] || REGION_FEES.SG;
+    const language = this._getSessionLanguage(session);
+    const feeData = getRegionFeesForLanguage(region, language);
     const lines = feeData.items.map(item => `• ${item}`).join('\n');
-    const fees = `💰 *Fee Structure*\n\n${feeData.header}\n${lines}`;
+    const fees = `${t(language, 'viewFeesLocations.feeStructureHeader')}\n\n${feeData.header}\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
     return [fees, await this.renderMainMenu(fresh)];
   }
 
   async handleViewLocationsState(session, message) {
+    const language = this._getSessionLanguage(session);
     const clinics = await this.clinikoAPI.getClinics();
     // clinics._partial means the fetch failed (e.g. a 429) — not a confirmed
     // empty list. Don't tell the user "no clinics" when it's really "try again".
     let locationText;
     if (clinics._partial) {
-      locationText = "We're having trouble reaching our clinic system right now. Please try again in a moment.";
+      locationText = t(language, 'viewFeesLocations.clinicSystemTrouble');
     } else {
       const displayText = clinics.length
         ? clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n')
-        : 'No clinic information is currently available.';
-      locationText = `Here are our clinic locations:\n\n${displayText}`;
+        : t(language, 'viewFeesLocations.noClinicInfo');
+      locationText = `${t(language, 'viewFeesLocations.locationsIntro')}\n\n${displayText}`;
     }
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
