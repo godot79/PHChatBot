@@ -3815,7 +3815,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_list',
             result: groups,
-            confirmedMessage: 'No clinics are available right now.',
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noClinicsAvailable'),
           });
         }
       }
@@ -3849,7 +3849,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : (c.business_name || c.display_name || c.id)) }),
         page: data.clinic_page || 0,
-        header: 'Select a clinic:'
+        header: t(this._getSessionLanguage(session), 'bookSpecificClinic.selectClinic')
       });
       return reply;
     }
@@ -3903,7 +3903,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
           result: hadClinicTypeFailure ? _markPartial([]) : [],
-          confirmedMessage: `No appointment types found at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noApptTypesAtClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic' }),
         });
       }
 
@@ -3936,7 +3936,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        header: `Select visit type for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificClinic.selectVisitTypeForClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : '' })
       });
       return replyTypes;
     }
@@ -3983,7 +3983,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_physio_list',
             result: [groups, hadPhysioTypeFailure ? _markPartial([]) : []],
-            confirmedMessage: `No practitioners at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'} offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noPractitionersAtClinicForType', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic', type: data.selected_appt_type?.name || 'this visit type' }),
           });
         }
       }
@@ -4017,7 +4017,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name || p.id)) }),
         page: data.practitioner_page || 0,
-        header: `Choose a physio for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificClinic.choosePhysioForClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : '' })
       });
       return replyPhys;
     }
@@ -4052,7 +4052,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic' }),
         });
       }
 
