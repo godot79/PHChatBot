@@ -761,7 +761,7 @@ class ChatbotEngine {
   // Interactive row IDs are global 1-based numbers matching the slot index.
   // Nav rows use IDs 'prev' and 'next'. Text fallback uses the old P/M format
   // so text-mode users see global numbers and type them as before.
-  _buildSlotList(slots, page, header, tz) {
+  _buildSlotList(slots, page, header, tz, language = 'en') {
     const start = this._slotPageStart(page);
     const count = this._slotPageCount(page);
     const hasPrev = page > 0;
@@ -772,15 +772,15 @@ class ChatbotEngine {
       id: String(start + i + 1),
       title: formatSlotDateTime(slot.slot || slot.starts_at || slot.appointment_start, tz),
     }));
-    if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
-    if (hasNext) rows.push({ id: 'next', title: 'More slots →' });
-    rows.push({ id: 'back', title: '← Back' });
+    if (hasPrev) rows.push({ id: 'prev', title: t(language, 'slotSelection.previousLabel') });
+    if (hasNext) rows.push({ id: 'next', title: t(language, 'slotSelection.moreLabel') });
+    rows.push({ id: 'back', title: t(language, 'slotSelection.backLabel') });
 
     const interactive = {
       type: 'list',
       body: { text: header },
       action: {
-        button: 'Select slot',
+        button: t(language, 'slotSelection.selectButton'),
         sections: [{ rows: rows.map(r => ({ id: r.id, title: r.title })) }]
       }
     };
@@ -788,8 +788,8 @@ class ChatbotEngine {
     const textLines = pageSlots.map((slot, i) =>
       `${start + i + 1}. ${formatSlotDateTime(slot.slot || slot.starts_at || slot.appointment_start, tz)}`
     ).join('\n');
-    const navText = [hasPrev ? 'P. Previous slots' : null, hasNext ? 'M. More slots' : null].filter(Boolean).join('\n');
-    const textFallback = header + '\n\n' + textLines + (navText ? '\n' + navText : '') + '\n\nReply with the number to pick a slot, or 0️⃣ Back.';
+    const navText = [hasPrev ? t(language, 'slotSelection.prevNavText') : null, hasNext ? t(language, 'slotSelection.moreNavText') : null].filter(Boolean).join('\n');
+    const textFallback = header + '\n\n' + textLines + (navText ? '\n' + navText : '') + '\n\n' + t(language, 'slotSelection.replyToPickInstruction');
 
     return new MessageEnvelope(interactive, textFallback);
   }
@@ -2271,7 +2271,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // Fallback
@@ -2924,7 +2924,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // Fallback → show types again
@@ -3365,7 +3365,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // fallback
@@ -3705,7 +3705,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // fallback
@@ -4073,7 +4073,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.data = JSON.stringify(slotData);
 
       const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // fallback
@@ -4197,7 +4197,7 @@ if (/^p(rev)?$/i.test(text)) {
     if (!slots.length) {
       return await this._noSlotsRetry(session, data, this.STATES.SELECT_SLOT, {
         context: 'slot',
-        confirmedMessage: 'No available slots to show.',
+        confirmedMessage: t(this._getSessionLanguage(session), 'slotSelection.noSlotsToShow'),
       });
     }
 
@@ -4207,7 +4207,7 @@ if (/^p(rev)?$/i.test(text)) {
       const count = this._slotPageCount(page);
       const idx = parseInt(text, 10) - 1;
       if (isNaN(idx) || idx < start || idx >= Math.min(start + count, slots.length)) {
-        return 'Invalid slot selection. Please reply with a number from the list, or 0️⃣ to go back.';
+        return t(this._getSessionLanguage(session), 'slotSelection.invalidSlotSelection');
       }
       const selectedSlot = slots[idx];
       data.selected_slot = selectedSlot;
@@ -4228,19 +4228,19 @@ if (/^p(rev)?$/i.test(text)) {
       if (data.prev_state_data?.selected_appt_type?.name) headerParts.push(`${data.prev_state_data.selected_appt_type.name}`);
       if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) headerParts.push(`${data.prev_state_data.selected_physio.display_name || data.prev_state_data.selected_physio.first_name}`);
       if (data.prev_state_data?.selected_clinic?.business_name) headerParts.push(`${data.prev_state_data.selected_clinic.business_name}`);
-      const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || 'Appointment');
+      const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || t(this._getSessionLanguage(session), 'slotSelection.defaultApptFallback'));
 
       return buttons(
-        `You have selected:\n\n• ${header}\n• ${formatSlotDateTime(dt, this._regionTz(session))}`,
+        t(this._getSessionLanguage(session), 'slotSelection.youHaveSelected', { header, datetime: formatSlotDateTime(dt, this._regionTz(session)) }),
         [
-          { id: 'yes', title: 'Confirm booking' },
-          { id: '0',   title: 'Go back' }
+          { id: 'yes', title: t(this._getSessionLanguage(session), 'slotSelection.confirmBookingButton') },
+          { id: '0',   title: t(this._getSessionLanguage(session), 'slotSelection.goBackButton') }
         ]
       );
     }
 
     // Build a single header if context exists
-    let header = 'Available slots:';
+    let header = t(this._getSessionLanguage(session), 'slotSelection.defaultHeader');
     if (data.prev_state_data?.selected_appt_type || data.prev_state_data?.selected_physio || data.prev_state_data?.selected_clinic) {
       const parts = [];
       if (data.prev_state_data?.selected_appt_type?.name) parts.push(data.prev_state_data.selected_appt_type.name);
@@ -4251,7 +4251,7 @@ if (/^p(rev)?$/i.test(text)) {
       header = parts.join(' • ');
     }
 
-    return this._buildSlotList(slots, page, header, this._regionTz(session));
+    return this._buildSlotList(slots, page, header, this._regionTz(session), this._getSessionLanguage(session));
   }
   
   /**
@@ -4302,7 +4302,7 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
         data: null
       });
-      return "No slot was selected. Please try booking again.";
+      return t(this._getSessionLanguage(session), 'bookingConfirmation.noSlotSelected');
     }
 
     // --- Debug: Enrichment ---
@@ -4341,7 +4341,7 @@ if (/^p(rev)?$/i.test(text)) {
       // Defensive: Check slot fields
       if (!selectedSlot.practitioner_id || !selectedSlot.business_id || !selectedSlot.appointment_type_id || !selectedSlot.slot) {
         this.logger.warn('[handleConfirmBookingState] Slot missing required fields', { slot: selectedSlot });
-        return "The selected slot is missing some details. Please try booking again.";
+        return t(this._getSessionLanguage(session), 'bookingConfirmation.slotMissingDetails');
       }
 
       // --- Debug: Attempt booking ---
@@ -4359,7 +4359,7 @@ if (/^p(rev)?$/i.test(text)) {
         this.logger.debug('[handleConfirmBookingState] Book appointment result', { result });
       } catch (e) {
         this.logger.error('[handleConfirmBookingState] Error in bookAppointment', e);
-        result = { success: false, message: "Booking failed due to a technical error." };
+        result = { success: false, message: t(this._getSessionLanguage(session), 'bookingConfirmation.technicalErrorFallback') };
       }
 
       if (result.success) {
@@ -4392,29 +4392,30 @@ if (/^p(rev)?$/i.test(text)) {
           this.logger.error('[Booking] Confirmation email send failed', { error: e?.message || e, sessionId: session.id });
         }
         // --- Debug: Booking success, show enriched details ---
-        const successText =
-          `✅ Your appointment is booked for:\n` +
-          `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
-          `🏥 *${enrichedSlot._business_display || ''}*\n` +
-          `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`;
+        const successText = t(this._getSessionLanguage(session), 'bookingConfirmation.bookingSuccess', {
+          practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name,
+          clinic: enrichedSlot._business_display || '',
+          datetime: formatSlotDateTime(dt, this._regionTz(session)),
+        });
         return [successText, await this.goToInteractiveMenu(session)];
       } else {
         // --- Debug: Booking failed, show error message ---
-        return [`❌ Could not book your appointment. ${result.message || ''}`, await this.goToInteractiveMenu(session)];
+        return [t(this._getSessionLanguage(session), 'bookingConfirmation.bookingFailed', { message: result.message || '' }), await this.goToInteractiveMenu(session)];
       }
     }
 
     // Unknown input — re-show confirmation with error prefix
     return prependTextToEnvelope(
-      "Please reply 'Yes' to confirm your booking, or '0' to go back.",
+      t(this._getSessionLanguage(session), 'bookingConfirmation.confirmPrompt'),
       buttons(
-        `You have selected:\n\n` +
-        `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
-        `🏥 *${enrichedSlot._business_display || ''}*\n` +
-        `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`,
+        t(this._getSessionLanguage(session), 'bookingConfirmation.selectedSummary', {
+          practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name,
+          clinic: enrichedSlot._business_display || '',
+          datetime: formatSlotDateTime(dt, this._regionTz(session)),
+        }),
         [
-          { id: 'yes', title: 'Confirm booking' },
-          { id: '0',   title: 'Go back' }
+          { id: 'yes', title: t(this._getSessionLanguage(session), 'slotSelection.confirmBookingButton') },
+          { id: '0',   title: t(this._getSessionLanguage(session), 'slotSelection.goBackButton') }
         ]
       )
     );
@@ -5136,7 +5137,7 @@ if (/^p(rev)?$/i.test(text)) {
       ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
       : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
     const header = intro + '\n\nPlease choose a new slot:';
-    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session));
+    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session), this._getSessionLanguage(session));
   }
 
   /**
@@ -5270,7 +5271,7 @@ if (/^p(rev)?$/i.test(text)) {
       const rescheduleHeader = appt
         ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
         : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // Pagination — previous
@@ -5281,7 +5282,7 @@ if (/^p(rev)?$/i.test(text)) {
       const rescheduleHeader = appt
         ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
         : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // Back
