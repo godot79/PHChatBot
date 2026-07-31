@@ -22,10 +22,13 @@ For any non-trivial task:
 1. Briefly state understanding.
 2. State unknowns/risks.
 3. Propose the smallest next step.
-4. Show minimal diff preview.
-5. Wait for approval.
-6. Apply only approved changes.
-7. Summarize exact changes.
+4. Implement the change on a feature branch, run the Jest suite, and run feasible local live verification (local dev server / manual test harness — never against live Cliniko/production data without separate explicit approval).
+5. Show the diff preview together with the Jest and live-verification results.
+6. Wait for approval.
+7. Apply/keep only approved changes.
+8. Summarize exact changes.
+
+Post-merge staging deploy verification (confirming the `chatbot-webhook-staging` Cloud Run service) is the user's own step, done after merge to staging `main` — not part of the pre-approval loop above.
 
 ## Dev & deploy workflow
 - All dev work happens in `~/CodingProjects/PHChatBot-staging`, not in this (`PHChatBot`) directory.
