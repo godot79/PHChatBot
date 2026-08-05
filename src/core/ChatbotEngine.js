@@ -15,6 +15,7 @@ const {
   getPractitionersForTypeName,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  parseApptCategory,
   _markPartial,
 } = require('./_appointmentTypeHelpers');
 const { bulkAll } = require('./BulkContext');
@@ -2092,19 +2093,25 @@ async handleMessageEnvelope(message, phoneNumber) {
         const physioId = String(data.selected_physio?.id || data.selected_physio);
         const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physioId });
 
-        const buckets = new Map(); // norm -> { displayName, ids:Set }
+        const buckets = new Map(); // norm -> { displayName, entries: [{id, insurer}] }
         for (const t of types || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
           const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-          buckets.get(n).ids.add(String(t.id));
+          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+          const { insurer } = parseApptCategory(t.category);
+          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
         }
 
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
+          Array.from(buckets.values()).map(v => ({
+            name: v.displayName,
+            norm_name: normName(v.displayName),
+            ids: v.entries.map(e => e.id),
+            entries: v.entries,
+          }))
         );
         data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries(
@@ -2112,8 +2119,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         );
 
         const fwd = planForward(data, 'choose_type', data.appointment_type_list.length, () => {
-          data.selected_appt_type = data.appointment_type_list[0];
-          data.selection_step = 'choose_clinic';
+          this._applyTypeSelection(data, data.appointment_type_list[0]);
         });
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         if (fwd.advanced) return await this.handleBookHistory(session, '');
@@ -2136,8 +2142,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid appointment type selection.';
-        data.selected_appt_type = list[idx];
-        data.selection_step = 'choose_clinic';
+        this._applyTypeSelection(data, list[idx]);
         navPush(data, 'choose_clinic', { had_multiple_options: (list.length > 1), auto: false });
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         return await this.handleBookHistory(session, '');
@@ -2150,6 +2155,18 @@ if (/^p(rev)?$/i.test(text)) {
         header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}:`
       });
       return reply2;
+    }
+
+    // ===== choose_type_insurer: disambiguate insurer when the chosen type name
+    // covers multiple insurer/self-pay variants (same display name, different
+    // Cliniko appointment-type IDs). Not a navPush frame — Back returns to
+    // choose_type, same as Book Soonest's funnel sub-steps. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) return stepResult.reply;
+      data.selection_step = 'choose_clinic';
+      await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      return await this.handleBookHistory(session, '');
     }
 
     // ===== choose_clinic (exclude UWC; prefer last clinic used) =====
@@ -2215,6 +2232,7 @@ if (/^p(rev)?$/i.test(text)) {
       const { from, to } = normalizeDateWindow();
       const physioId = String(data.selected_physio?.id || data.selected_physio);
       const businessId = String(data.selected_clinic?.id);
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
 
       const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
@@ -2223,7 +2241,11 @@ if (/^p(rev)?$/i.test(text)) {
         from,
         to
       });
-      const filtered = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const filtered = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
 
       if (!filtered.length) {
         // retry_step defaults to 'view_slots' (the current step) — Try Again
@@ -2233,7 +2255,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_HISTORY, {
           context: 'history',
           result: raw,
-          confirmedMessage: 'No available slots for that combination.',
+          confirmedMessage: 'No available slots for that combination.' + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -2273,6 +2295,68 @@ if (/^p(rev)?$/i.test(text)) {
    * Returns { reply: MessageEnvelope } while gathering input, or
    *         { resolved: { name, ids, norm_name } | null } when done.
    */
+  /**
+   * Set data.selected_appt_type from a bucketed type-list entry ({name, norm_name,
+   * ids, entries}), routing to the choose_type_insurer sub-step to disambiguate.
+   * Copies the entry so narrowing .ids/.insurer during resolution doesn't mutate
+   * the shared appointment_type_list (needed since re-visiting choose_type must
+   * see the original, unnarrowed entries again).
+   */
+  _applyTypeSelection(data, entry) {
+    data.selected_appt_type = { ...entry };
+    data.selection_step = 'choose_type_insurer';
+  }
+
+  /**
+   * Disambiguate which insurer/self-pay variant of a same-named appointment type
+   * the user means, using data.selected_appt_type.entries ({id, insurer}[]) set by
+   * _applyTypeSelection. Shared across History/SpecificDate/SpecificPhysio/
+   * SpecificClinic — mirrors Book Soonest's funnel insurer step (_stepApptFunnel).
+   *
+   * - No insurer variants at all (self-pay only): resolves immediately, no prompt.
+   * - Durable preferred_insurer (from Change Preferences) auto-applies on first
+   *   arrival if it's actually offered for this type; falls through to prompting
+   *   otherwise, same fallback semantics as the Book Soonest funnel.
+   * - Narrows selected_appt_type.ids to just the resolved insurer's id(s) and sets
+   *   .insurer, so downstream slot-matching and no-slots messaging are insurer-scoped.
+   *
+   * @returns {{ reply?: MessageEnvelope }} reply while asking; {} once resolved.
+   */
+  _stepTypeInsurer(session, data, text) {
+    const entries = data.selected_appt_type?.entries || [];
+    const insurers = [...new Set(entries.map(e => e.insurer).filter(i => i !== null))].sort();
+
+    const resolve = (chosen) => {
+      data.selected_appt_type.ids = entries.filter(e => e.insurer === chosen).map(e => e.id);
+      data.selected_appt_type.insurer = chosen;
+    };
+
+    if (!insurers.length) {
+      resolve(null);
+      return {};
+    }
+
+    if (text === '' && data.selected_appt_type.insurer === undefined) {
+      const preferred = session.context && session.context.preferred_insurer;
+      if (preferred === '') { resolve(null); return {}; }
+      if (preferred && insurers.includes(preferred)) { resolve(preferred); return {}; }
+    }
+
+    const options = ['Self-pay', ...insurers];
+    const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
+    if (localNum >= 1 && localNum <= options.length) {
+      const picked = options[localNum - 1];
+      resolve(picked === 'Self-pay' ? null : picked);
+      return {};
+    }
+
+    const badInput = text !== '';
+    const menu = options.length <= 3
+      ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
+      : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }) });
+    return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+  }
+
   /**
    * Extra wording appended to a confirmed-empty no-slots message when the
    * resolved appointment type was scoped to a specific insurer (whether

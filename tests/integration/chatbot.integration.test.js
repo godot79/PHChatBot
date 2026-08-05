@@ -1745,7 +1745,9 @@ describe('Booking menu and flow coverage', () => {
     });
 
     test("local index '1' on page 1 selects 6th clinic", async () => {
-      engine.clinikoAPI.getAvailableSlots = jest.fn().mockResolvedValue([]);
+      // Isolate clinic-pagination from slot-matching: this test only cares that
+      // choosing clinic index 1 on page 1 resolves to the 6th clinic.
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_HISTORY', {
         ...baseData,
         selected_appt_type: { name: 'Return Visit', ids: ['AT-001'] },
