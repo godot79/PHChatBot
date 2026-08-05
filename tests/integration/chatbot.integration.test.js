@@ -2246,13 +2246,13 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
         { id: 'AT-001', name: TYPE_1.name, duration_in_minutes: 60 },
       ]);
-      const apptTypeNormIds = {};
-      apptTypeNormIds['initial 60 min visit (new clients)'] = ['AT-001'];
       const data = {
         selection_step: 'choose_physio',
         selected_clinic: CLINIC_1,
-        selected_appt_type: TYPE_1,
-        appt_type_name_to_ids_norm: apptTypeNormIds,
+        // ids drives choose_physio's practitioner filter directly (insurer-scoped
+        // by the time a real session gets here) — appt_type_name_to_ids_norm is no
+        // longer consulted for this.
+        selected_appt_type: { ...TYPE_1, ids: ['AT-001'] },
         navigation_chain: [],
       };
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', data);
