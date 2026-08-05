@@ -4020,7 +4020,7 @@ if (/^p(rev)?$/i.test(text)) {
         const inClinic = (groups || []).find(g => String(g.clinic_id) === clinicId);
         const pracList = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
 
-        const buckets = new Map(); // norm -> { display, ids:Set }
+        const buckets = new Map(); // norm -> { display, entries: [{id, insurer}] }
         // One practitioner's fetch failing must not discard every other
         // practitioner's already-fetched types — Promise.all would reject
         // the whole batch on a single rejection.
@@ -4036,19 +4036,18 @@ if (/^p(rev)?$/i.test(text)) {
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
             const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
             const n = normName(display);
-            if (!buckets.has(n)) buckets.set(n, { display, ids: new Set() });
-            buckets.get(n).ids.add(String(t.id));
+            if (!buckets.has(n)) buckets.set(n, { display, entries: [] });
+            const { insurer } = parseApptCategory(t.category);
+            buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
           }
         }
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
+          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: v.entries.map(e => e.id), entries: v.entries }))
         );
         data.appt_type_page = 0;
-        data.appt_type_name_to_ids_norm = Object.fromEntries((data.appointment_type_list || []).map(x => [x.norm_name, x.ids]));
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_type', data.appointment_type_list.length, () => {
-          data.selected_appt_type = data.appointment_type_list[0];
-          data.selection_step = 'choose_physio';
+          this._applyTypeSelection(data, data.appointment_type_list[0]);
         }) : { advanced: false };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
@@ -4079,8 +4078,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_appt_type = list[idx];
-          data.selection_step = 'choose_physio';
+          this._applyTypeSelection(data, list[idx]);
           if (typeof navPush === 'function') navPush(data, 'choose_physio', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
           return await this.handleBookSpecificClinic(session, '');
@@ -4096,6 +4094,16 @@ if (/^p(rev)?$/i.test(text)) {
       return replyTypes;
     }
 
+    // ===== choose_type_insurer: disambiguate insurer for a same-named type. Not a
+    // navPush frame — Back returns to choose_type, same as the History flow. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) return stepResult.reply;
+      data.selection_step = 'choose_physio';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      return await this.handleBookSpecificClinic(session, '');
+    }
+
     // =====================================================================
     // choose_physio — physios at selected clinic who offer selected type
     // =====================================================================
@@ -4105,7 +4113,10 @@ if (/^p(rev)?$/i.test(text)) {
         const clinicId = String(data.selected_clinic?.id || data.selected_clinic || '');
         const inClinic = (groups || []).find(g => String(g.clinic_id) === clinicId);
         const pracInClinic = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
-        const wanted = new Set((data.appt_type_name_to_ids_norm?.[normName(data.selected_appt_type?.name || '')] || []).map(String));
+        // selected_appt_type.ids is already insurer-scoped by this point (narrowed by
+        // _stepTypeInsurer when the type name had multiple insurer variants), so this
+        // correctly excludes practitioners who only offer a different insurer's id.
+        const wanted = new Set((data.selected_appt_type?.ids || []).map(String));
 
         // One practitioner's fetch failing must not discard every other
         // practitioner's already-fetched types — Promise.all would reject
@@ -4138,7 +4149,8 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_physio_list',
             result: [groups, hadPhysioTypeFailure ? _markPartial([]) : []],
-            confirmedMessage: `No practitioners at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'} offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
+            confirmedMessage: `No practitioners at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'} offer ${data.selected_appt_type?.name || 'this visit type'} right now.`
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
       }
@@ -4199,15 +4211,21 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
-      const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const slots = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
       if (!slots.length) {
         // retry_step defaults to 'view_slots' — Try Again re-runs this exact
         // fetch with selected_clinic/selected_physio intact.
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
