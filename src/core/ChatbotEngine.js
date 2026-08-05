@@ -2291,6 +2291,7 @@ if (/^p(rev)?$/i.test(text)) {
    */
   async _stepApptFunnel(session, data, text) {
     const catalogue = data.funnel_catalogue || [];
+    const language = this._getSessionLanguage(session);
     // True when text was a real user reply that failed to match — prepend error to re-shown menus.
     const badInput = text !== '' && text !== 'yes' && text !== 'change';
 
@@ -2298,12 +2299,12 @@ if (/^p(rev)?$/i.test(text)) {
     if (!data.funnel_step) {
       const pref = session.context && session.context.appt_preference;
       if (pref && text === '') {
-        const label = this._formatPrefLabel(pref);
+        const label = this._formatPrefLabel(pref, language);
         if (label) {
           data.funnel_step = 'shortcut';
-          return { reply: buttons(`Last time: ${label}\nBook the same again?`, [
-            { id: 'yes', title: 'Yes, same' },
-            { id: 'change', title: 'Change' },
+          return { reply: buttons(t(language, 'bookSoonest.funnelLastTime', { label }), [
+            { id: 'yes', title: t(language, 'bookSoonest.funnelYesSame') },
+            { id: 'change', title: t(language, 'bookSoonest.funnelChange') },
           ]) };
         }
       }
@@ -2359,9 +2360,9 @@ if (/^p(rev)?$/i.test(text)) {
         }
         {
           const menu = services.length <= 3
-            ? buttons('What type of appointment?', services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: 'What type of appointment?', items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+            ? buttons(t(language, 'bookSoonest.funnelWhatType'), services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
+            : buildInteractiveSelectionList({ header: t(language, 'bookSoonest.funnelWhatType'), items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
+          return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
 
@@ -2376,14 +2377,15 @@ if (/^p(rev)?$/i.test(text)) {
           data.appt_type_page = 0;
           continue;
         }
-        const options = ['Self-pay', ...insurers];
+        const selfPayLabel = t(language, 'bookSoonest.funnelSelfPay');
+        const options = [selfPayLabel, ...insurers];
         const page = data.appt_type_page || 0;
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, options.length - pageStart)) {
           const picked = options[pageStart + localNum - 1];
-          sel.insurer = picked === 'Self-pay' ? null : picked;
+          sel.insurer = picked === selfPayLabel ? null : picked;
           data.funnel_sel = sel;
           data.funnel_step = 'final_pick';
           data.appt_type_page = 0;
@@ -2392,9 +2394,9 @@ if (/^p(rev)?$/i.test(text)) {
         }
         {
           const menu = options.length <= 3
-            ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+            ? buttons(t(language, 'bookSoonest.funnelHowCovered'), options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
+            : buildInteractiveSelectionList({ header: t(language, 'bookSoonest.funnelHowCovered'), items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
+          return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
 
@@ -2426,17 +2428,17 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const allSameDuration   = combos.every(c => c.duration    === combos[0].duration);
         const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
-        const ptLabels = { new: 'New Patient', follow_up: 'Follow-Up' };
+        const ptLabels = { new: t(language, 'bookSoonest.patientTypeNew'), follow_up: t(language, 'bookSoonest.patientTypeFollowUp') };
         const comboLabel = (c) => {
           const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
           const durPart = !allSameDuration ? `${c.duration} min` : null;
           return [ptPart, durPart].filter(Boolean).join(' ') || `${c.duration} min`;
         };
         const bodyText = allSameDuration && !allSamePatientType
-          ? 'New or returning patient?'
+          ? t(language, 'bookSoonest.funnelNewOrReturning')
           : allSamePatientType && !allSameDuration
-            ? 'Select duration:'
-            : 'Select appointment type:';
+            ? t(language, 'bookSoonest.funnelSelectDuration')
+            : t(language, 'bookSoonest.funnelSelectApptType');
         const page = data.appt_type_page || 0;
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
@@ -2454,7 +2456,7 @@ if (/^p(rev)?$/i.test(text)) {
           const menu = combos.length <= 3
             ? buttons(bodyText, combos.map((c, i) => ({ id: String(i + 1), title: comboLabel(c).slice(0, 20) })))
             : buildInteractiveSelectionList({ header: bodyText, items: combos, rowFn: (c) => ({ title: comboLabel(c).slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+          return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
 
@@ -2463,11 +2465,11 @@ if (/^p(rev)?$/i.test(text)) {
     return { resolved: null };
   }
 
-  _formatPrefLabel(pref) {
+  _formatPrefLabel(pref, language) {
     if (!pref) return null;
     const parts = [pref.service];
-    if (pref.patientType === 'new') parts.push('New Patient');
-    else if (pref.patientType === 'follow_up') parts.push('Follow-Up');
+    if (pref.patientType === 'new') parts.push(t(language, 'bookSoonest.patientTypeNew'));
+    else if (pref.patientType === 'follow_up') parts.push(t(language, 'bookSoonest.patientTypeFollowUp'));
     if (pref.insurer) parts.push(pref.insurer);
     if (pref.duration) parts.push(`${pref.duration} min`);
     return parts.filter(Boolean).join(' · ');
