@@ -705,6 +705,7 @@ class ChatbotEngine {
       VIEW_FEES: 'VIEW_FEES',
       VIEW_LOCATIONS: 'VIEW_LOCATIONS',
       REGISTER_PATIENT: 'REGISTER_PATIENT',
+      SELECT_PREFERRED_INSURER: 'SELECT_PREFERRED_INSURER',
       FALLBACK: 'FALLBACK',
     };
     this.stateHandlers = {};
@@ -836,6 +837,7 @@ class ChatbotEngine {
       [this.STATES.VIEW_FEES]: this.handleViewFeesState.bind(this),
       [this.STATES.VIEW_LOCATIONS]: this.handleViewLocationsState.bind(this),
       [this.STATES.REGISTER_PATIENT]: this.handleRegisterPatientState.bind(this),
+      [this.STATES.SELECT_PREFERRED_INSURER]: this.handleSelectPreferredInsurerState.bind(this),
       [this.STATES.FALLBACK]: this.handleFallbackState.bind(this),
     };
   }
@@ -913,11 +915,12 @@ class ChatbotEngine {
     if (session.verified) {
       const body = `${region}What would you like to do?`;
       return list(body, 'Select option', [
-        { id: '1',      title: 'Book Appointment' },
-        { id: '2',      title: 'Cancel Appointment' },
-        { id: '3',      title: 'Reschedule' },
-        { id: 'region', title: 'Change Country' },
-        { id: '9',      title: 'Logout & Delete My Data' },
+        { id: '1',           title: 'Book Appointment' },
+        { id: '2',           title: 'Cancel Appointment' },
+        { id: '3',           title: 'Reschedule' },
+        { id: 'preferences', title: 'Change Preferences' },
+        { id: 'region',      title: 'Change Country' },
+        { id: '9',           title: 'Logout & Delete My Data' },
       ]);
     } else {
       const body = `👋 *Welcome to Prohealth Asia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
@@ -1416,6 +1419,9 @@ async handleMessageEnvelope(message, phoneNumber) {
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updatedSession);
     }
+    if (text === 'preferences' || text.includes('preference')) {
+      return await this.renderPreferredInsurerMenu(session);
+    }
     if (text === '9' || text.includes('logout')) {
       try {
         await this.sessionManager.deleteSessionAndData(session.id);
@@ -1450,6 +1456,97 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleRescheduleAppointmentState(session, '');
     }
     return prependTextToEnvelope('Your response is not understood. Here are the options. Try again.', await this.goToInteractiveMenu(session));
+  }
+
+  /**
+   * Build and show the live insurer list for the preferences menu. Non-destructive —
+   * unlike "region", this does not log the user out. List is built the same way as
+   * Book Soonest's funnel (buildFunnelCatalogue), so choices always match real Cliniko data.
+   */
+  async renderPreferredInsurerMenu(session) {
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch { context = {}; }
+    }
+    const current = (context && context.preferred_insurer) || null;
+
+    const groups = await this.clinikoAPI.getPractitionersByClinic();
+    const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+    const catalogue = buildFunnelCatalogue(allTypes);
+    const insurers = [...new Set(catalogue.map(t => t.insurer).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+    const rows = [
+      { id: 'none', title: 'No preference / Self-pay' },
+      ...insurers.slice(0, 8).map((name, i) => ({ id: String(i + 1), title: name })),
+    ];
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_PREFERRED_INSURER,
+      data: JSON.stringify({ insurer_options: insurers.slice(0, 8) })
+    });
+
+    const currentLine = current ? `Current preference: *${current}*\n\n` : '';
+    return list(`${currentLine}Select your insurer (or self-pay):`, 'Select insurer', rows);
+  }
+
+  /**
+   * Handle the preferred-insurer selection made from renderPreferredInsurerMenu.
+   * Persists durably to patient_state.preferred_insurer (survives logout, unlike
+   * appt_preference) and updates the live session context immediately.
+   */
+  async handleSelectPreferredInsurerState(session, message) {
+    const text = (message || '').trim().toLowerCase();
+    if (['0', 'back', 'menu'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+      return await this.renderMainMenu(await this.sessionManager.getSession(session.id));
+    }
+
+    let data = session.data;
+    if (data && typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { data = {}; }
+    }
+    const options = (data && data.insurer_options) || [];
+
+    let chosen; // undefined = invalid selection, null = explicit self-pay
+    if (text === 'none') {
+      chosen = null;
+    } else {
+      const idx = parseInt(text, 10);
+      if (!Number.isNaN(idx) && idx >= 1 && idx <= options.length) {
+        chosen = options[idx - 1];
+      }
+    }
+
+    if (chosen === undefined) {
+      return prependTextToEnvelope(
+        'Please select a valid option from the list.',
+        await this.renderPreferredInsurerMenu(session)
+      );
+    }
+
+    const phone = session.phone_number || session.phoneNumber;
+    // Empty string (not null) explicitly means "self-pay chosen" — upsertPatientState
+    // uses COALESCE, so a null/undefined value would leave the prior preference untouched.
+    const storedValue = chosen === null ? '' : chosen;
+    if (phone) {
+      await this.sessionManager.db.upsertPatientState(phone, { preferred_insurer: storedValue }).catch(() => {});
+    }
+
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch { context = {}; }
+    }
+    context = context || {};
+    context.preferred_insurer = storedValue;
+
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+      context
+    });
+    const updated = await this.sessionManager.getSession(session.id);
+    const confirmMsg = chosen === null
+      ? '✅ Preference set to self-pay.'
+      : `✅ Preference set to *${chosen}*.`;
+    return prependTextToEnvelope(confirmMsg, await this.renderMainMenu(updated));
   }
 
   /**
