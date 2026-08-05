@@ -2273,6 +2273,19 @@ if (/^p(rev)?$/i.test(text)) {
    * Returns { reply: MessageEnvelope } while gathering input, or
    *         { resolved: { name, ids, norm_name } | null } when done.
    */
+  /**
+   * Extra wording appended to a confirmed-empty no-slots message when the
+   * resolved appointment type was scoped to a specific insurer (whether
+   * picked manually or auto-applied from the durable preferred_insurer).
+   * Makes it clear the shortage is insurer-specific, not a hard "fully
+   * booked" — and points at where to change it without hunting for it.
+   */
+  _insurerNoMatchSuffix(selectedApptType) {
+    const insurer = selectedApptType && selectedApptType.insurer;
+    if (!insurer) return '';
+    return ` No slots matched your *${insurer}* preference specifically — you can change or clear it anytime from Change Preferences in the main menu.`;
+  }
+
   async _stepApptFunnel(session, data, text) {
     const catalogue = data.funnel_catalogue || [];
     // True when text was a real user reply that failed to match — prepend error to re-shown menus.
@@ -2359,6 +2372,27 @@ if (/^p(rev)?$/i.test(text)) {
           data.funnel_step = 'final_pick';
           data.appt_type_page = 0;
           continue;
+        }
+        // Durable preference (patient_state.preferred_insurer, set via the main-menu
+        // Change Preferences flow) auto-applies on first arrival at this step, so the
+        // user isn't re-asked every booking. Only applies if it's actually offered for
+        // this service — otherwise falls through to the normal manual prompt below.
+        if (text === '' && sel.insurer === undefined) {
+          const preferred = session.context && session.context.preferred_insurer;
+          if (preferred === '') {
+            sel.insurer = null;
+            data.funnel_sel = sel;
+            data.funnel_step = 'final_pick';
+            data.appt_type_page = 0;
+            continue;
+          }
+          if (preferred && insurers.includes(preferred)) {
+            sel.insurer = preferred;
+            data.funnel_sel = sel;
+            data.funnel_step = 'final_pick';
+            data.appt_type_page = 0;
+            continue;
+          }
         }
         const options = ['Self-pay', ...insurers];
         const page = data.appt_type_page || 0;
@@ -2719,7 +2753,8 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_type',
           result: practitioners,
-          confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`,
+          confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -2829,7 +2864,8 @@ if (/^p(rev)?$/i.test(text)) {
             context: 'soonest',
             retryStep: 'choose_clinic',
             result: slotResults0,
-            confirmedMessage: `No slots found for ${data.selected_appt_type.name} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+            confirmedMessage: `No slots found for ${data.selected_appt_type.name} with ${getPractitionerDisplayName(data.selected_physio)}.`
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
 
@@ -2896,7 +2932,8 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_clinic',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name}.`,
+          confirmedMessage: `No slots found for ${data.selected_appt_type?.name}.`
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 

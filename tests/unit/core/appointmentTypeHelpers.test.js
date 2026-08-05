@@ -484,6 +484,7 @@ describe('resolveApptFromFunnel()', () => {
       name: 'New Patient 60 Min',
       ids: ['1', '5'],
       norm_name: 'new patient 60 min',
+      insurer: null,
     });
   });
 
