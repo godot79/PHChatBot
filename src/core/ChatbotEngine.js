@@ -2778,8 +2778,16 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      // Match by appointment_type_id when the funnel resolved specific ids (insurer-aware),
+      // falling back to name match otherwise — see Phase 0c: name-only matching let a slot
+      // under a different insurer/self-pay id silently win the same-time dedup.
+      const resolvedIds = data.selected_appt_type.ids;
       const targetNorm = normName(data.selected_appt_type.name);
-      const filtered = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === targetNorm));
+      const filtered = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === targetNorm
+      ));
 
       if (!filtered.length) {
         // Extremely unlikely since clinics are prefiltered, but handle defensively.
