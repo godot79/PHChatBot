@@ -86,7 +86,11 @@ class DatabaseManager {
           }
         };
         this.db.run(`ALTER TABLE patient_state ADD COLUMN patient_id TEXT`, ignoreDuplicateColumn);
-        this.db.run(`ALTER TABLE patient_state ADD COLUMN verified BOOLEAN DEFAULT 0`, (err) => {
+        this.db.run(`ALTER TABLE patient_state ADD COLUMN verified BOOLEAN DEFAULT 0`, ignoreDuplicateColumn);
+        // preferred_insurer is a durable, cross-visit setting (unlike appt_preference,
+        // which is a "last booking" shortcut cleared on logout) — deliberately not
+        // touched by deleteSessionAndData's clear, same treatment as region.
+        this.db.run(`ALTER TABLE patient_state ADD COLUMN preferred_insurer TEXT`, (err) => {
           ignoreDuplicateColumn(err);
           this.isInitialized = true;
           this.logger.info('Database manager initialized successfully');
@@ -327,21 +331,22 @@ class DatabaseManager {
   }
 
   async upsertPatientState(phone, updates) {
-    const { region, appt_preference, patient_id, verified } = updates;
+    const { region, appt_preference, patient_id, verified, preferred_insurer } = updates;
     const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
     return new Promise((resolve, reject) => {
       this.db.run(
-        `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, updated_at)
-         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, preferred_insurer, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(phone_number) DO UPDATE SET
            region = COALESCE(?, region),
            appt_preference = COALESCE(?, appt_preference),
            patient_id = COALESCE(?, patient_id),
            verified = COALESCE(?, verified),
+           preferred_insurer = COALESCE(?, preferred_insurer),
            updated_at = CURRENT_TIMESTAMP`,
         [
-          phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
-          region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
+          phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, preferred_insurer ?? null,
+          region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, preferred_insurer ?? null,
         ],
         (err) => err ? reject(err) : resolve()
       );
