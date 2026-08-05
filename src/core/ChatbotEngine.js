@@ -3171,11 +3171,12 @@ if (/^p(rev)?$/i.test(text)) {
               if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
               const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
               const n = normName(display);
-              if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-              buckets.get(n).ids.add(String(t.id));
+              if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+              const { insurer } = parseApptCategory(t.category);
+              buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
             }
             data.appointment_type_list = Array.from(buckets.values())
-              .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+              .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
               data.appointment_type_list = sortAppointmentTypes(data.appointment_type_list);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           }
@@ -3241,11 +3242,12 @@ if (/^p(rev)?$/i.test(text)) {
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-          buckets.get(n).ids.add(String(t.id));
+          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+          const { insurer } = parseApptCategory(t.category);
+          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
         }
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
         );
         data.appt_type_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3276,8 +3278,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_appt_type = list[idx];
-          data.selection_step = 'choose_physio';
+          this._applyTypeSelection(data, list[idx]);
           if (typeof navPush === 'function') navPush(data, 'choose_physio', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           return await this.handleBookSpecificDate(session, '');
@@ -3292,6 +3293,16 @@ if (/^p(rev)?$/i.test(text)) {
         header: `Select visit type for ${headerDate}:`
       });
       return reply;
+    }
+
+    // ===== choose_type_insurer: disambiguate insurer for a same-named type. Not a
+    // navPush frame — Back returns to choose_type, same as the History flow. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) return stepResult.reply;
+      data.selection_step = 'choose_physio';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      return await this.handleBookSpecificDate(session, '');
     }
 
     // =====================================================================
@@ -3368,6 +3379,7 @@ if (/^p(rev)?$/i.test(text)) {
           if ((g.practitioners || []).some(p => `${p.id}` === physId))
             allClinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
+        const resolvedIds = data.selected_appt_type?.ids;
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow(data.selected_date, data.selected_date, 1);
         const slotResults1 = await Promise.all(
@@ -3376,7 +3388,9 @@ if (/^p(rev)?$/i.test(text)) {
           }))
         );
         const withSlots = allClinics.filter((c, i) =>
-          (slotResults1[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
+          (slotResults1[i] || []).some(s => resolvedIds && resolvedIds.length
+            ? resolvedIds.includes(String(s.appointment_type_id))
+            : normName(s.appointment_type_name) === typeNorm)
         );
         data.clinic_list = withSlots;
         data.clinic_page = 0;
@@ -3392,7 +3406,8 @@ if (/^p(rev)?$/i.test(text)) {
             retryStep: 'choose_physio',
             retryLabel: 'Try another physio',
             result: slotResults1,
-            confirmedMessage: `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`,
+            confirmedMessage: `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
 
@@ -3448,8 +3463,13 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
-      const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const slots = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
       if (!slots.length) {
         // retry_step defaults to 'view_slots' (the current step) — Try Again
         // re-runs this exact fetch with selected_clinic/selected_physio intact,
@@ -3458,7 +3478,8 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
           context: 'date',
           result: raw,
-          confirmedMessage: `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`,
+          confirmedMessage: `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 

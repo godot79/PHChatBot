@@ -1857,9 +1857,12 @@ describe('Booking menu and flow coverage', () => {
     });
 
     test("local index '1' on page 1 selects 6th physio", async () => {
+      // Isolate physio-pagination from downstream clinic/slot matching: this test
+      // only cares that choosing physio index 1 on page 1 resolves to the 6th physio.
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: SIX_PHYSIOS },
       ]);
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', { ...baseData, practitioner_page: 1 });
       await callHandler(engine, ['handleBookSpecificDate'], session, '1');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
