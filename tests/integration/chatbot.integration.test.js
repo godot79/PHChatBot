@@ -4142,6 +4142,96 @@ describe('Booking menu and flow coverage', () => {
       });
     });
 
+    // Phase 6c: parametrized cross-flow proof that all 5 flows behave identically
+    // for the same insurer-selection inputs now that they share one implementation.
+    // History/Specific Date/Specific Physio/Specific Clinic have an identical entry
+    // mechanic (choose_type -> pick a type -> choose_type_insurer), so they run as
+    // one test.each table below using the same 5-insurer fixture, same pick sequence,
+    // same expected resolution. Book Soonest's funnel entry mechanic differs (service
+    // must be picked first, catalogue-shaped not entries-shaped) so it isn't in this
+    // table, but the "Book Soonest funnel insurer stage" describe above runs the exact
+    // same 5-insurer-names/pagination/pick-page-1-item-1 scenario and resolves to the
+    // same insurer (Cigna International) — that test is this table's Soonest sibling.
+    describe('Cross-flow parametrized: identical insurer-selection inputs -> identical outcomes', () => {
+      const PARAM_MANY_INSURERS_ENTRY = {
+        name: 'Follow Up Appointment',
+        norm_name: 'follow up appointment',
+        ids: ['AT-040', 'AT-041', 'AT-042', 'AT-043', 'AT-044'],
+        entries: [
+          { id: 'AT-040', insurer: 'AXA PPP' },
+          { id: 'AT-041', insurer: 'April International' },
+          { id: 'AT-042', insurer: 'Bupa Global' },
+          { id: 'AT-043', insurer: 'Bupa HealthNet' },
+          { id: 'AT-044', insurer: 'Cigna International' },
+        ],
+      };
+      const flows = [
+        {
+          name: 'History', handler: 'handleBookHistory', state: 'BOOK_HISTORY',
+          seed: {
+            selection_step: 'choose_type', selected_physio: PHYSIO_1,
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+          },
+        },
+        {
+          name: 'Specific Date', handler: 'handleBookSpecificDate', state: 'BOOK_SPECIFIC_DATE',
+          seed: {
+            selection_step: 'choose_type', selected_date: '2026-08-01',
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+          },
+        },
+        {
+          name: 'Specific Physio', handler: 'handleBookSpecificPhysio', state: 'BOOK_SPECIFIC_PHYSIO',
+          seed: {
+            selection_step: 'choose_type', selected_physio: PHYSIO_1,
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+          },
+        },
+        {
+          name: 'Specific Clinic', handler: 'handleBookSpecificClinic', state: 'BOOK_SPECIFIC_CLINIC',
+          seed: {
+            selection_step: 'choose_type', selected_clinic: CLINIC_1,
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+          },
+        },
+      ];
+
+      test.each(flows)('$name: pick type -> page 0 shows 4 insurers + self-pay + More, page 1 shows the 5th, pick resolves it', async ({ handler, state, seed }) => {
+        const session = await seedAt(state, seed);
+        const page0 = String(await callHandler(engine, [handler], session, '1'));
+        expect(page0).toMatch(/how is this covered/i);
+        expect(page0).toMatch(/self-pay/i);
+        expect(page0).toMatch(/axa ppp/i);
+        expect(page0).toMatch(/more/i);
+        expect(page0).not.toMatch(/cigna international/i);
+
+        const page1 = String(await callHandler(engine, [handler], await db.getSession(session.id), 'next'));
+        expect(page1).toMatch(/cigna international/i);
+        expect(page1).not.toMatch(/axa ppp/i);
+
+        await callHandler(engine, [handler], await db.getSession(session.id), '1');
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.selected_appt_type.insurer).toBe('Cigna International');
+        expect(d.selected_appt_type.ids).toEqual(['AT-044']);
+      });
+
+      test.each(flows)('$name: preferred_insurer auto-applies without prompting', async ({ handler, state, seed }) => {
+        const session = await seedAt(state, seed);
+        session.context = { region: 'SG', preferred_insurer: 'Bupa Global' };
+        const reply = String(await callHandler(engine, [handler], session, '1'));
+        expect(reply).not.toMatch(/how is this covered/i);
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.selected_appt_type.insurer).toBe('Bupa Global');
+        expect(d.selected_appt_type.ids).toEqual(['AT-042']);
+      });
+    });
+
     // 6. Change Preferences reset regression — stores '' not null, and a
     //    subsequent booking in a DIFFERENT flow picks up the new preference.
     test('Change Preferences: selecting self-pay stores "" (not null) and a later History booking auto-resolves self-pay', async () => {
