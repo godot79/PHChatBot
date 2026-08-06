@@ -167,7 +167,7 @@ function planForward(data, selection_step, optionsCount, onAuto) {
  */
 const CLEAR_FIELDS_BY_STEP = {
   choose_date: ['selected_date', 'appointment_type_list', 'appt_type_page', 'selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
-  choose_type: ['selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
+  choose_type: ['selected_appt_type', 'insurer_page', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
   choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_clinic: ['selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_appt_type: ['selected_appt_type']
@@ -2163,7 +2163,12 @@ if (/^p(rev)?$/i.test(text)) {
     // choose_type, same as Book Soonest's funnel sub-steps. =====
     if (data.selection_step === 'choose_type_insurer') {
       const stepResult = this._stepTypeInsurer(session, data, text);
-      if (stepResult.reply) return stepResult.reply;
+      if (stepResult.reply) {
+        // Persist mutations from _stepTypeInsurer (e.g. insurer_page changes)
+        // even while still prompting — otherwise paging never advances.
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+        return stepResult.reply;
+      }
       data.selection_step = 'choose_clinic';
       await sync({ conversation_state: this.STATES.BOOK_HISTORY });
       return await this.handleBookHistory(session, '');
@@ -2305,6 +2310,7 @@ if (/^p(rev)?$/i.test(text)) {
   _applyTypeSelection(data, entry) {
     data.selected_appt_type = { ...entry };
     data.selection_step = 'choose_type_insurer';
+    data.insurer_page = 0;
   }
 
   /**
@@ -2329,6 +2335,7 @@ if (/^p(rev)?$/i.test(text)) {
     const resolve = (chosen) => {
       data.selected_appt_type.ids = entries.filter(e => e.insurer === chosen).map(e => e.id);
       data.selected_appt_type.insurer = chosen;
+      delete data.insurer_page;
     };
 
     if (!insurers.length) {
@@ -2343,9 +2350,24 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     const options = ['Self-pay', ...insurers];
+
+    // Same paging convention as _stepApptFunnel's insurer stage — a list beyond
+    // a handful of insurers must page like every other interactive list here
+    // (2026-07-19 incident: an unpaginated 6+ row list pushed Send off-screen).
+    if (/^p(rev)?$/i.test(text)) {
+      data.insurer_page = Math.max(0, (data.insurer_page || 0) - 1);
+      text = '';
+    } else if (/^m(ore)?$|^next$/i.test(text)) {
+      data.insurer_page = (data.insurer_page || 0) + 1;
+      text = '';
+    }
+
+    const page = data.insurer_page || 0;
+    const pageStart = interactivePageStart(page);
+    const pageSize = interactivePageSize(page);
     const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
-    if (localNum >= 1 && localNum <= options.length) {
-      const picked = options[localNum - 1];
+    if (localNum >= 1 && localNum <= Math.min(pageSize, options.length - pageStart)) {
+      const picked = options[pageStart + localNum - 1];
       resolve(picked === 'Self-pay' ? null : picked);
       return {};
     }
@@ -2353,7 +2375,7 @@ if (/^p(rev)?$/i.test(text)) {
     const badInput = text !== '';
     const menu = options.length <= 3
       ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-      : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }) });
+      : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
     return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
   }
 
@@ -3299,7 +3321,10 @@ if (/^p(rev)?$/i.test(text)) {
     // navPush frame — Back returns to choose_type, same as the History flow. =====
     if (data.selection_step === 'choose_type_insurer') {
       const stepResult = this._stepTypeInsurer(session, data, text);
-      if (stepResult.reply) return stepResult.reply;
+      if (stepResult.reply) {
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        return stepResult.reply;
+      }
       data.selection_step = 'choose_physio';
       await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       return await this.handleBookSpecificDate(session, '');
@@ -3719,7 +3744,10 @@ if (/^p(rev)?$/i.test(text)) {
     // navPush frame — Back returns to choose_type, same as the History flow. =====
     if (data.selection_step === 'choose_type_insurer') {
       const stepResult = this._stepTypeInsurer(session, data, text);
-      if (stepResult.reply) return stepResult.reply;
+      if (stepResult.reply) {
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+        return stepResult.reply;
+      }
       data.selection_step = 'choose_clinic';
       await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       return await this.handleBookSpecificPhysio(session, '');
@@ -4098,7 +4126,10 @@ if (/^p(rev)?$/i.test(text)) {
     // navPush frame — Back returns to choose_type, same as the History flow. =====
     if (data.selection_step === 'choose_type_insurer') {
       const stepResult = this._stepTypeInsurer(session, data, text);
-      if (stepResult.reply) return stepResult.reply;
+      if (stepResult.reply) {
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+        return stepResult.reply;
+      }
       data.selection_step = 'choose_physio';
       await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       return await this.handleBookSpecificClinic(session, '');

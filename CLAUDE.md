@@ -81,6 +81,10 @@ Prefer:
 - Comments must sound human.
 - Remove robotic, redundant, or obvious comments.
 
+## Known bug classes — check on every relevant audit
+- **Unpaginated interactive lists.** WhatsApp interactive lists/buttons must page (5 items page 0, 4 items page 1+, or the buttons/list ≤3-vs-paginated threshold already used in `ChatbotEngine.js`) — an unpaginated list of more than a handful of rows pushes the Send button off-screen (incident 2026-07-19, recurred in `_stepTypeInsurer`'s insurer menu, fixed 2026-08-06). Any audit of a menu-rendering code path (new or existing) must check it pages correctly, not just that it renders.
+- **Insurer selection is being centralized in `_stepTypeInsurer`** (`ChatbotEngine.js`) — the canonical implementation, called by History/Specific Date/Specific Physio/Specific Clinic. Book Soonest currently still has its own independent copy inline in `_stepApptFunnel` (unification in progress, see the insurance-handling Phase 6 tracker); once wired, all 5 flows will call the one function. Any change to insurer-selection behavior (auto-apply, self-pay reset, pagination, prompt copy) belongs in `_stepTypeInsurer`, not duplicated per-flow. If a future change touches insurer logic in only one flow's handler, that is itself a red flag to investigate.
+
 ## Cliniko policy
 - If Cliniko behavior is not clear from the repo, say so.
 - If needed, consult Cliniko public API docs before proposing implementation or test changes.

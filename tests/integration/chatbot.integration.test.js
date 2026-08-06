@@ -3863,6 +3863,55 @@ describe('Booking menu and flow coverage', () => {
     };
     const INSURER_SLOT_SELFPAY = { ...SOONEST_SLOT, appointment_type_id: 'AT-010', appointment_type_name: 'Follow Up Appointment' };
     const INSURER_SLOT_BUPA    = { ...SOONEST_SLOT, appointment_type_id: 'AT-011', appointment_type_name: 'Follow Up Appointment' };
+    // 5 insurers + self-pay = 6 options — enough to overflow the ≤3-buttons
+    // threshold and exercise real pagination (page 0 holds 5, page 1+ holds 4).
+    const MANY_INSURERS_TYPE_ENTRY = {
+      name: 'Follow Up Appointment',
+      norm_name: 'follow up appointment',
+      ids: ['AT-020', 'AT-021', 'AT-022', 'AT-023', 'AT-024'],
+      entries: [
+        { id: 'AT-020', insurer: 'AXA PPP' },
+        { id: 'AT-021', insurer: 'April International' },
+        { id: 'AT-022', insurer: 'Bupa Global' },
+        { id: 'AT-023', insurer: 'Bupa HealthNet' },
+        { id: 'AT-024', insurer: 'Cigna International' },
+      ],
+    };
+
+    // Regression: _stepTypeInsurer used to render every insurer option in one
+    // unpaginated list — same bug class as the 2026-07-19 Book Soonest funnel
+    // pagination incident. Real HK data has 5+ insurers per practitioner
+    // (Phase 0 findings), so this is a live overflow risk, not theoretical.
+    test('choose_type_insurer pages when there are more than 3 insurer options (matches Book Soonest funnel pagination)', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [MANY_INSURERS_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      });
+      const page0 = String(await callHandler(engine, ['handleBookHistory'], session, '1'));
+      expect(page0).toMatch(/how is this covered/i);
+      // Page 0 shows Self-pay + first 4 insurers (5 rows), plus "More" — not all 6 at once.
+      expect(page0).toMatch(/self-pay/i);
+      expect(page0).toMatch(/axa ppp/i);
+      expect(page0).toMatch(/more/i);
+      expect(page0).not.toMatch(/cigna international/i);
+
+      const page1 = String(await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), 'next'));
+      expect(page1).toMatch(/cigna international/i);
+
+      const backToPage0 = String(await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), 'prev'));
+      expect(backToPage0).toMatch(/axa ppp/i);
+      expect(backToPage0).not.toMatch(/cigna international/i);
+
+      // Picking an item on page 1 resolves to the correct insurer (not page 0's item 1).
+      await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), 'next');
+      await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), '1');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type.insurer).toBe('Cigna International');
+    });
 
     // 1. Shared insurer-resolution deep test (History): prompt → pick → id narrowed
     //    → slot filtered by id → booked with that id.
