@@ -4073,6 +4073,75 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/bupa global/i);
     });
 
+    // Phase 6b: Book Soonest's insurer stage now delegates to the shared
+    // _stepTypeInsurer instead of its own independent copy — lock in that the
+    // auto-apply/self-pay-reset/pagination behavior it used to implement itself
+    // is unchanged now that it's borrowed.
+    describe('Book Soonest funnel insurer stage — unified with _stepTypeInsurer', () => {
+      const FUNNEL_CAT_SELFPAY = { id: 'AT-010', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 30 };
+      const FUNNEL_CAT_BUPA    = { id: 'AT-011', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'follow_up', duration: 30 };
+      const soonestInsurerData = () => ({
+        selection_step: 'choose_type',
+        funnel_step: 'insurer',
+        funnel_catalogue: [FUNNEL_CAT_SELFPAY, FUNNEL_CAT_BUPA],
+        funnel_sel: { service: 'Physiotherapy' },
+        appt_type_page: 0,
+      });
+
+      test('preferred_insurer auto-applies without prompting, resolves straight to final_pick', async () => {
+        const session = await seedAt('BOOK_SOONEST', soonestInsurerData());
+        session.context = { region: 'SG', preferred_insurer: 'Bupa Global' };
+        const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+        expect(reply).not.toMatch(/how is this covered/i);
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.funnel_sel.insurer).toBe('Bupa Global');
+        expect(d.funnel_step).toBe('final_pick');
+      });
+
+      test("preferred_insurer === '' resolves to self-pay without prompting", async () => {
+        const session = await seedAt('BOOK_SOONEST', soonestInsurerData());
+        session.context = { region: 'SG', preferred_insurer: '' };
+        const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+        expect(reply).not.toMatch(/how is this covered/i);
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.funnel_sel.insurer).toBe(null);
+        expect(d.funnel_step).toBe('final_pick');
+      });
+
+      test('insurer list pages via the shared insurer_page, not the outer appt_type_page interception', async () => {
+        const manyInsurers = [
+          { id: 'AT-030', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'AXA PPP', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-031', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'April International', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-032', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-033', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa HealthNet', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-034', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Cigna International', patientType: 'follow_up', duration: 30 },
+        ];
+        const session = await seedAt('BOOK_SOONEST', {
+          selection_step: 'choose_type', funnel_step: 'insurer',
+          funnel_catalogue: manyInsurers, funnel_sel: { service: 'Physiotherapy' }, appt_type_page: 0,
+        });
+        const page0 = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+        expect(page0).toMatch(/self-pay/i);
+        expect(page0).toMatch(/more/i);
+        expect(page0).not.toMatch(/cigna international/i);
+
+        const page1 = String(await callHandler(engine, ['handleBookSoonest'], await db.getSession(session.id), 'next'));
+        expect(page1).toMatch(/cigna international/i);
+
+        await callHandler(engine, ['handleBookSoonest'], await db.getSession(session.id), '1');
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        // Once the insurer choice resolves, the funnel continues straight through
+        // final_pick (single patientType/duration combo here) to a real, fully
+        // resolved selected_appt_type — the insurer-step scratch object is gone,
+        // replaced by the genuine funnel result, not leaked alongside it.
+        expect(d.selected_appt_type.insurer).toBe('Cigna International');
+        expect(d.selected_appt_type.ids).toEqual(['AT-034']);
+      });
+    });
+
     // 6. Change Preferences reset regression — stores '' not null, and a
     //    subsequent booking in a DIFFERENT flow picks up the new preference.
     test('Change Preferences: selecting self-pay stores "" (not null) and a later History booking auto-resolves self-pay', async () => {

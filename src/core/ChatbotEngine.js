@@ -2469,57 +2469,30 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       // ── insurer ──
+      // Delegates to _stepTypeInsurer, the canonical insurer-selection implementation
+      // also used by History/Specific Date/Specific Physio/Specific Clinic (see the
+      // CLAUDE.md note on centralizing insurer logic there). data.selected_appt_type
+      // is used as scratch space for the call — Book Soonest doesn't set its real
+      // selected_appt_type until final_pick resolves, so this is safe as long as it's
+      // always cleared before returning to the caller, on every exit path.
       if (step === 'insurer') {
         const filtered = catalogue.filter(t => t.service === sel.service);
-        const insurers = [...new Set(filtered.map(t => t.insurer).filter(i => i !== null))].sort();
-        if (!insurers.length) {
-          sel.insurer = null;
-          data.funnel_sel = sel;
-          data.funnel_step = 'final_pick';
-          data.appt_type_page = 0;
-          continue;
+        // _stepTypeInsurer handles the zero-insurer-variants case itself (resolves
+        // to self-pay immediately, no prompt) — no need to duplicate that check here.
+        data.selected_appt_type = { entries: filtered.map(t => ({ id: String(t.id), insurer: t.insurer || null })) };
+        // _stepTypeInsurer computes and applies its own bad-input prefix — don't
+        // double-wrap with this loop's outer `badInput`.
+        const stepResult = this._stepTypeInsurer(session, data, text);
+        if (stepResult.reply) {
+          delete data.selected_appt_type;
+          return { reply: stepResult.reply };
         }
-        // Durable preference (patient_state.preferred_insurer, set via the main-menu
-        // Change Preferences flow) auto-applies on first arrival at this step, so the
-        // user isn't re-asked every booking. Only applies if it's actually offered for
-        // this service — otherwise falls through to the normal manual prompt below.
-        if (text === '' && sel.insurer === undefined) {
-          const preferred = session.context && session.context.preferred_insurer;
-          if (preferred === '') {
-            sel.insurer = null;
-            data.funnel_sel = sel;
-            data.funnel_step = 'final_pick';
-            data.appt_type_page = 0;
-            continue;
-          }
-          if (preferred && insurers.includes(preferred)) {
-            sel.insurer = preferred;
-            data.funnel_sel = sel;
-            data.funnel_step = 'final_pick';
-            data.appt_type_page = 0;
-            continue;
-          }
-        }
-        const options = ['Self-pay', ...insurers];
-        const page = data.appt_type_page || 0;
-        const pageStart = interactivePageStart(page);
-        const pageSize = interactivePageSize(page);
-        const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
-        if (localNum >= 1 && localNum <= Math.min(pageSize, options.length - pageStart)) {
-          const picked = options[pageStart + localNum - 1];
-          sel.insurer = picked === 'Self-pay' ? null : picked;
-          data.funnel_sel = sel;
-          data.funnel_step = 'final_pick';
-          data.appt_type_page = 0;
-          text = '';
-          continue;
-        }
-        {
-          const menu = options.length <= 3
-            ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
-        }
+        sel.insurer = data.selected_appt_type.insurer;
+        delete data.selected_appt_type;
+        data.funnel_sel = sel;
+        data.funnel_step = 'final_pick';
+        data.appt_type_page = 0;
+        continue;
       }
 
       // ── final_pick: combined patientType + duration selection ──
@@ -2802,12 +2775,14 @@ if (/^p(rev)?$/i.test(text)) {
       await sync();
     }
 
-    // Paging in choose_type
-    if (data.selection_step === 'choose_type' && /^p(rev)?$/i.test(text)) {
+    // Paging in choose_type — the insurer sub-step pages itself via the shared
+    // _stepTypeInsurer's own data.insurer_page, so this generic appt_type_page
+    // interception must not swallow p/m/next while the funnel is at that stage.
+    if (data.selection_step === 'choose_type' && data.funnel_step !== 'insurer' && /^p(rev)?$/i.test(text)) {
       data.appt_type_page = Math.max(0, (data.appt_type_page || 0) - 1);
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
     }
-    if (data.selection_step === 'choose_type' && (text === 'm' || text === 'more' || text === 'next')) {
+    if (data.selection_step === 'choose_type' && data.funnel_step !== 'insurer' && (text === 'm' || text === 'more' || text === 'next')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
       return await this.handleBookSoonest(session, '');
