@@ -177,7 +177,7 @@ function resolveApptFromFunnel(catalogue, { service, patientType, insurer, durat
     .replace(/-/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return { name, ids, norm_name };
+  return { name, ids, norm_name, insurer: insurer || null };
 }
 
 module.exports = {

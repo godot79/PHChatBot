@@ -17,6 +17,7 @@ const {
   getPractitionersForTypeName,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
+  parseApptCategory,
   _markPartial,
 } = require('./_appointmentTypeHelpers');
 const { bulkAll } = require('./BulkContext');
@@ -168,7 +169,7 @@ function planForward(data, selection_step, optionsCount, onAuto) {
  */
 const CLEAR_FIELDS_BY_STEP = {
   choose_date: ['selected_date', 'appointment_type_list', 'appt_type_page', 'selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
-  choose_type: ['selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
+  choose_type: ['selected_appt_type', 'insurer_page', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
   choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_clinic: ['selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_appt_type: ['selected_appt_type']
@@ -707,6 +708,7 @@ class ChatbotEngine {
       VIEW_FEES: 'VIEW_FEES',
       VIEW_LOCATIONS: 'VIEW_LOCATIONS',
       REGISTER_PATIENT: 'REGISTER_PATIENT',
+      SELECT_PREFERRED_INSURER: 'SELECT_PREFERRED_INSURER',
       FALLBACK: 'FALLBACK',
     };
     this.stateHandlers = {};
@@ -850,6 +852,7 @@ class ChatbotEngine {
       [this.STATES.VIEW_FEES]: this.handleViewFeesState.bind(this),
       [this.STATES.VIEW_LOCATIONS]: this.handleViewLocationsState.bind(this),
       [this.STATES.REGISTER_PATIENT]: this.handleRegisterPatientState.bind(this),
+      [this.STATES.SELECT_PREFERRED_INSURER]: this.handleSelectPreferredInsurerState.bind(this),
       [this.STATES.FALLBACK]: this.handleFallbackState.bind(this),
     };
   }
@@ -930,12 +933,13 @@ class ChatbotEngine {
     if (session.verified) {
       const body = `${region}${t(language, 'mainMenu.verifiedBody')}`;
       return list(body, 'Select option', [
-        { id: '1',        title: t(language, 'mainMenu.book') },
-        { id: '2',        title: t(language, 'mainMenu.cancel') },
-        { id: '3',        title: t(language, 'mainMenu.reschedule') },
-        { id: 'region',   title: t(language, 'mainMenu.changeCountry') },
-        { id: 'language', title: t(language, 'mainMenu.changeLanguage') },
-        { id: '9',        title: t(language, 'mainMenu.logout') },
+        { id: '1',           title: t(language, 'mainMenu.book') },
+        { id: '2',           title: t(language, 'mainMenu.cancel') },
+        { id: '3',           title: t(language, 'mainMenu.reschedule') },
+        { id: 'preferences', title: t(language, 'mainMenu.changePreferences') },
+        { id: 'region',      title: t(language, 'mainMenu.changeCountry') },
+        { id: 'language',    title: t(language, 'mainMenu.changeLanguage') },
+        { id: '9',           title: t(language, 'mainMenu.logout') },
       ]);
     } else {
       const body = `${t(language, 'mainMenu.welcomeHeader')}${region}${t(language, 'mainMenu.unverifiedPrompt')}`;
@@ -1514,6 +1518,9 @@ async handleMessageEnvelope(message, phoneNumber) {
       const updatedSession = await this.sessionManager.getSession(session.id);
       return await this.renderMainMenu(updatedSession);
     }
+    if (text === 'preferences' || text.includes('preference')) {
+      return await this.renderPreferredInsurerMenu(session);
+    }
     if (text === '9' || text.includes('logout')) {
       try {
         await this.sessionManager.deleteSessionAndData(session.id);
@@ -1548,6 +1555,97 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleRescheduleAppointmentState(session, '');
     }
     return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.optionsNotUnderstood'), await this.goToInteractiveMenu(session));
+  }
+
+  /**
+   * Build and show the live insurer list for the preferences menu. Non-destructive —
+   * unlike "region", this does not log the user out. List is built the same way as
+   * Book Soonest's funnel (buildFunnelCatalogue), so choices always match real Cliniko data.
+   */
+  async renderPreferredInsurerMenu(session) {
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch { context = {}; }
+    }
+    const current = (context && context.preferred_insurer) || null;
+
+    const groups = await this.clinikoAPI.getPractitionersByClinic();
+    const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+    const catalogue = buildFunnelCatalogue(allTypes);
+    const insurers = [...new Set(catalogue.map(t => t.insurer).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+    const rows = [
+      { id: 'none', title: 'No preference / Self-pay' },
+      ...insurers.slice(0, 8).map((name, i) => ({ id: String(i + 1), title: name })),
+    ];
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.SELECT_PREFERRED_INSURER,
+      data: JSON.stringify({ insurer_options: insurers.slice(0, 8) })
+    });
+
+    const currentLine = current ? `Current preference: *${current}*\n\n` : '';
+    return list(`${currentLine}Select your insurer (or self-pay):`, 'Select insurer', rows);
+  }
+
+  /**
+   * Handle the preferred-insurer selection made from renderPreferredInsurerMenu.
+   * Persists durably to patient_state.preferred_insurer (survives logout, unlike
+   * appt_preference) and updates the live session context immediately.
+   */
+  async handleSelectPreferredInsurerState(session, message) {
+    const text = (message || '').trim().toLowerCase();
+    if (['0', 'back', 'menu'].includes(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
+      return await this.renderMainMenu(await this.sessionManager.getSession(session.id));
+    }
+
+    let data = session.data;
+    if (data && typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { data = {}; }
+    }
+    const options = (data && data.insurer_options) || [];
+
+    let chosen; // undefined = invalid selection, null = explicit self-pay
+    if (text === 'none') {
+      chosen = null;
+    } else {
+      const idx = parseInt(text, 10);
+      if (!Number.isNaN(idx) && idx >= 1 && idx <= options.length) {
+        chosen = options[idx - 1];
+      }
+    }
+
+    if (chosen === undefined) {
+      return prependTextToEnvelope(
+        'Please select a valid option from the list.',
+        await this.renderPreferredInsurerMenu(session)
+      );
+    }
+
+    const phone = session.phone_number || session.phoneNumber;
+    // Empty string (not null) explicitly means "self-pay chosen" — upsertPatientState
+    // uses COALESCE, so a null/undefined value would leave the prior preference untouched.
+    const storedValue = chosen === null ? '' : chosen;
+    if (phone) {
+      await this.sessionManager.db.upsertPatientState(phone, { preferred_insurer: storedValue }).catch(() => {});
+    }
+
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch { context = {}; }
+    }
+    context = context || {};
+    context.preferred_insurer = storedValue;
+
+    await this.sessionManager.updateSession(session.id, {
+      conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
+      context
+    });
+    const updated = await this.sessionManager.getSession(session.id);
+    const confirmMsg = chosen === null
+      ? '✅ Preference set to self-pay.'
+      : `✅ Preference set to *${chosen}*.`;
+    return prependTextToEnvelope(confirmMsg, await this.renderMainMenu(updated));
   }
 
   /**
@@ -2108,19 +2206,25 @@ async handleMessageEnvelope(message, phoneNumber) {
         const physioId = String(data.selected_physio?.id || data.selected_physio);
         const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physioId });
 
-        const buckets = new Map(); // norm -> { displayName, ids:Set }
+        const buckets = new Map(); // norm -> { displayName, entries: [{id, insurer}] }
         for (const t of types || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
           const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-          buckets.get(n).ids.add(String(t.id));
+          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+          const { insurer } = parseApptCategory(t.category);
+          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
         }
 
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, norm_name: normName(v.displayName), ids: Array.from(v.ids) }))
+          Array.from(buckets.values()).map(v => ({
+            name: v.displayName,
+            norm_name: normName(v.displayName),
+            ids: v.entries.map(e => e.id),
+            entries: v.entries,
+          }))
         );
         data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries(
@@ -2128,8 +2232,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         );
 
         const fwd = planForward(data, 'choose_type', data.appointment_type_list.length, () => {
-          data.selected_appt_type = data.appointment_type_list[0];
-          data.selection_step = 'choose_clinic';
+          this._applyTypeSelection(data, data.appointment_type_list[0]);
         });
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         if (fwd.advanced) return await this.handleBookHistory(session, '');
@@ -2152,8 +2255,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidApptTypeSelection');
-        data.selected_appt_type = list[idx];
-        data.selection_step = 'choose_clinic';
+        this._applyTypeSelection(data, list[idx]);
         navPush(data, 'choose_clinic', { had_multiple_options: (list.length > 1), auto: false });
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         return await this.handleBookHistory(session, '');
@@ -2166,6 +2268,23 @@ if (/^p(rev)?$/i.test(text)) {
         header: t(this._getSessionLanguage(session), 'bookHistory.chooseApptType', { name: getPractitionerDisplayName(data.selected_physio) })
       });
       return reply2;
+    }
+
+    // ===== choose_type_insurer: disambiguate insurer when the chosen type name
+    // covers multiple insurer/self-pay variants (same display name, different
+    // Cliniko appointment-type IDs). Not a navPush frame — Back returns to
+    // choose_type, same as Book Soonest's funnel sub-steps. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) {
+        // Persist mutations from _stepTypeInsurer (e.g. insurer_page changes)
+        // even while still prompting — otherwise paging never advances.
+        await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+        return stepResult.reply;
+      }
+      data.selection_step = 'choose_clinic';
+      await sync({ conversation_state: this.STATES.BOOK_HISTORY });
+      return await this.handleBookHistory(session, '');
     }
 
     // ===== choose_clinic (exclude UWC; prefer last clinic used) =====
@@ -2231,6 +2350,7 @@ if (/^p(rev)?$/i.test(text)) {
       const { from, to } = normalizeDateWindow();
       const physioId = String(data.selected_physio?.id || data.selected_physio);
       const businessId = String(data.selected_clinic?.id);
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
 
       const raw = await this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
@@ -2239,7 +2359,11 @@ if (/^p(rev)?$/i.test(text)) {
         from,
         to
       });
-      const filtered = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const filtered = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
 
       if (!filtered.length) {
         // retry_step defaults to 'view_slots' (the current step) — Try Again
@@ -2249,7 +2373,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_HISTORY, {
           context: 'history',
           result: raw,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookHistory.noSlotsForCombo'),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookHistory.noSlotsForCombo') + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -2289,6 +2413,98 @@ if (/^p(rev)?$/i.test(text)) {
    * Returns { reply: MessageEnvelope } while gathering input, or
    *         { resolved: { name, ids, norm_name } | null } when done.
    */
+  /**
+   * Set data.selected_appt_type from a bucketed type-list entry ({name, norm_name,
+   * ids, entries}), routing to the choose_type_insurer sub-step to disambiguate.
+   * Copies the entry so narrowing .ids/.insurer during resolution doesn't mutate
+   * the shared appointment_type_list (needed since re-visiting choose_type must
+   * see the original, unnarrowed entries again).
+   */
+  _applyTypeSelection(data, entry) {
+    data.selected_appt_type = { ...entry };
+    data.selection_step = 'choose_type_insurer';
+    data.insurer_page = 0;
+  }
+
+  /**
+   * Disambiguate which insurer/self-pay variant of a same-named appointment type
+   * the user means, using data.selected_appt_type.entries ({id, insurer}[]) set by
+   * _applyTypeSelection. Shared across History/SpecificDate/SpecificPhysio/
+   * SpecificClinic — mirrors Book Soonest's funnel insurer step (_stepApptFunnel).
+   *
+   * - No insurer variants at all (self-pay only): resolves immediately, no prompt.
+   * - Durable preferred_insurer (from Change Preferences) auto-applies on first
+   *   arrival if it's actually offered for this type; falls through to prompting
+   *   otherwise, same fallback semantics as the Book Soonest funnel.
+   * - Narrows selected_appt_type.ids to just the resolved insurer's id(s) and sets
+   *   .insurer, so downstream slot-matching and no-slots messaging are insurer-scoped.
+   *
+   * @returns {{ reply?: MessageEnvelope }} reply while asking; {} once resolved.
+   */
+  _stepTypeInsurer(session, data, text) {
+    const entries = data.selected_appt_type?.entries || [];
+    const insurers = [...new Set(entries.map(e => e.insurer).filter(i => i !== null))].sort();
+
+    const resolve = (chosen) => {
+      data.selected_appt_type.ids = entries.filter(e => e.insurer === chosen).map(e => e.id);
+      data.selected_appt_type.insurer = chosen;
+      delete data.insurer_page;
+    };
+
+    if (!insurers.length) {
+      resolve(null);
+      return {};
+    }
+
+    if (text === '' && data.selected_appt_type.insurer === undefined) {
+      const preferred = session.context && session.context.preferred_insurer;
+      if (preferred === '') { resolve(null); return {}; }
+      if (preferred && insurers.includes(preferred)) { resolve(preferred); return {}; }
+    }
+
+    const options = ['Self-pay', ...insurers];
+
+    // Same paging convention as _stepApptFunnel's insurer stage — a list beyond
+    // a handful of insurers must page like every other interactive list here
+    // (2026-07-19 incident: an unpaginated 6+ row list pushed Send off-screen).
+    if (/^p(rev)?$/i.test(text)) {
+      data.insurer_page = Math.max(0, (data.insurer_page || 0) - 1);
+      text = '';
+    } else if (/^m(ore)?$|^next$/i.test(text)) {
+      data.insurer_page = (data.insurer_page || 0) + 1;
+      text = '';
+    }
+
+    const page = data.insurer_page || 0;
+    const pageStart = interactivePageStart(page);
+    const pageSize = interactivePageSize(page);
+    const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
+    if (localNum >= 1 && localNum <= Math.min(pageSize, options.length - pageStart)) {
+      const picked = options[pageStart + localNum - 1];
+      resolve(picked === 'Self-pay' ? null : picked);
+      return {};
+    }
+
+    const badInput = text !== '';
+    const menu = options.length <= 3
+      ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
+      : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
+    return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+  }
+
+  /**
+   * Extra wording appended to a confirmed-empty no-slots message when the
+   * resolved appointment type was scoped to a specific insurer (whether
+   * picked manually or auto-applied from the durable preferred_insurer).
+   * Makes it clear the shortage is insurer-specific, not a hard "fully
+   * booked" — and points at where to change it without hunting for it.
+   */
+  _insurerNoMatchSuffix(selectedApptType) {
+    const insurer = selectedApptType && selectedApptType.insurer;
+    if (!insurer) return '';
+    return ` No slots matched your *${insurer}* preference specifically — you can change or clear it anytime from Change Preferences in the main menu.`;
+  }
+
   async _stepApptFunnel(session, data, text) {
     const catalogue = data.funnel_catalogue || [];
     const language = this._getSessionLanguage(session);
@@ -2367,37 +2583,33 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       // ── insurer ──
+      // Delegates to _stepTypeInsurer, the canonical insurer-selection implementation
+      // also used by History/Specific Date/Specific Physio/Specific Clinic (see the
+      // CLAUDE.md note on centralizing insurer logic there). data.selected_appt_type
+      // is used as scratch space for the call — Book Soonest doesn't set its real
+      // selected_appt_type until final_pick resolves, so this is safe as long as it's
+      // always cleared before returning to the caller, on every exit path.
       if (step === 'insurer') {
         const filtered = catalogue.filter(t => t.service === sel.service);
-        const insurers = [...new Set(filtered.map(t => t.insurer).filter(i => i !== null))].sort();
-        if (!insurers.length) {
-          sel.insurer = null;
-          data.funnel_sel = sel;
-          data.funnel_step = 'final_pick';
-          data.appt_type_page = 0;
-          continue;
+        // _stepTypeInsurer handles the zero-insurer-variants case itself (resolves
+        // to self-pay immediately, no prompt) — no need to duplicate that check here.
+        // NOTE (i18n merge, not yet translated): _stepTypeInsurer is currently
+        // hardcoded English ("How is this covered?", "Self-pay", etc.) across all
+        // 5 flows that call it. Flagged as a self-audit gap, not fixed in this merge.
+        data.selected_appt_type = { entries: filtered.map(t => ({ id: String(t.id), insurer: t.insurer || null })) };
+        // _stepTypeInsurer computes and applies its own bad-input prefix — don't
+        // double-wrap with this loop's outer `badInput`.
+        const stepResult = this._stepTypeInsurer(session, data, text);
+        if (stepResult.reply) {
+          delete data.selected_appt_type;
+          return { reply: stepResult.reply };
         }
-        const selfPayLabel = t(language, 'bookSoonest.funnelSelfPay');
-        const options = [selfPayLabel, ...insurers];
-        const page = data.appt_type_page || 0;
-        const pageStart = interactivePageStart(page);
-        const pageSize = interactivePageSize(page);
-        const localNum = /^\d+$/.test(text) ? parseInt(text, 10) : -1;
-        if (localNum >= 1 && localNum <= Math.min(pageSize, options.length - pageStart)) {
-          const picked = options[pageStart + localNum - 1];
-          sel.insurer = picked === selfPayLabel ? null : picked;
-          data.funnel_sel = sel;
-          data.funnel_step = 'final_pick';
-          data.appt_type_page = 0;
-          text = '';
-          continue;
-        }
-        {
-          const menu = options.length <= 3
-            ? buttons(t(language, 'bookSoonest.funnelHowCovered'), options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: t(language, 'bookSoonest.funnelHowCovered'), items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
-        }
+        sel.insurer = data.selected_appt_type.insurer;
+        delete data.selected_appt_type;
+        data.funnel_sel = sel;
+        data.funnel_step = 'final_pick';
+        data.appt_type_page = 0;
+        continue;
       }
 
       // ── final_pick: combined patientType + duration selection ──
@@ -2680,12 +2892,14 @@ if (/^p(rev)?$/i.test(text)) {
       await sync();
     }
 
-    // Paging in choose_type
-    if (data.selection_step === 'choose_type' && /^p(rev)?$/i.test(text)) {
+    // Paging in choose_type — the insurer sub-step pages itself via the shared
+    // _stepTypeInsurer's own data.insurer_page, so this generic appt_type_page
+    // interception must not swallow p/m/next while the funnel is at that stage.
+    if (data.selection_step === 'choose_type' && data.funnel_step !== 'insurer' && /^p(rev)?$/i.test(text)) {
       data.appt_type_page = Math.max(0, (data.appt_type_page || 0) - 1);
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
     }
-    if (data.selection_step === 'choose_type' && (text === 'm' || text === 'more' || text === 'next')) {
+    if (data.selection_step === 'choose_type' && data.funnel_step !== 'insurer' && (text === 'm' || text === 'more' || text === 'next')) {
       data.appt_type_page = (data.appt_type_page || 0) + 1;
       await sync({ conversation_state: this.STATES.BOOK_SOONEST });
       return await this.handleBookSoonest(session, '');
@@ -2737,7 +2951,8 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_type',
           result: practitioners,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noPhysiosForType', { name: data.selected_appt_type.name }),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noPhysiosForType', { name: data.selected_appt_type.name })
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -2847,7 +3062,8 @@ if (/^p(rev)?$/i.test(text)) {
             context: 'soonest',
             retryStep: 'choose_clinic',
             result: slotResults0,
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: data.selected_appt_type.name, physio: getPractitionerDisplayName(data.selected_physio) }),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: data.selected_appt_type.name, physio: getPractitionerDisplayName(data.selected_physio) })
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
 
@@ -2893,8 +3109,16 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      // Match by appointment_type_id when the funnel resolved specific ids (insurer-aware),
+      // falling back to name match otherwise — see Phase 0c: name-only matching let a slot
+      // under a different insurer/self-pay id silently win the same-time dedup.
+      const resolvedIds = data.selected_appt_type.ids;
       const targetNorm = normName(data.selected_appt_type.name);
-      const filtered = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === targetNorm));
+      const filtered = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === targetNorm
+      ));
 
       if (!filtered.length) {
         // Extremely unlikely since clinics are prefiltered, but handle defensively.
@@ -2906,7 +3130,8 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_clinic',
           result: raw,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForType', { name: data.selected_appt_type?.name }),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForType', { name: data.selected_appt_type?.name })
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -3060,11 +3285,12 @@ if (/^p(rev)?$/i.test(text)) {
               if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
               const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
               const n = normName(display);
-              if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-              buckets.get(n).ids.add(String(t.id));
+              if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+              const { insurer } = parseApptCategory(t.category);
+              buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
             }
             data.appointment_type_list = Array.from(buckets.values())
-              .map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+              .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
               data.appointment_type_list = sortAppointmentTypes(data.appointment_type_list);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           }
@@ -3130,11 +3356,12 @@ if (/^p(rev)?$/i.test(text)) {
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-          buckets.get(n).ids.add(String(t.id));
+          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+          const { insurer } = parseApptCategory(t.category);
+          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
         }
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
         );
         data.appt_type_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3165,8 +3392,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_appt_type = list[idx];
-          data.selection_step = 'choose_physio';
+          this._applyTypeSelection(data, list[idx]);
           if (typeof navPush === 'function') navPush(data, 'choose_physio', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           return await this.handleBookSpecificDate(session, '');
@@ -3181,6 +3407,19 @@ if (/^p(rev)?$/i.test(text)) {
         header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectVisitType', { date: headerDate })
       });
       return reply;
+    }
+
+    // ===== choose_type_insurer: disambiguate insurer for a same-named type. Not a
+    // navPush frame — Back returns to choose_type, same as the History flow. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) {
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        return stepResult.reply;
+      }
+      data.selection_step = 'choose_physio';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      return await this.handleBookSpecificDate(session, '');
     }
 
     // =====================================================================
@@ -3257,6 +3496,7 @@ if (/^p(rev)?$/i.test(text)) {
           if ((g.practitioners || []).some(p => `${p.id}` === physId))
             allClinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
+        const resolvedIds = data.selected_appt_type?.ids;
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow(data.selected_date, data.selected_date, 1);
         const slotResults1 = await Promise.all(
@@ -3265,7 +3505,9 @@ if (/^p(rev)?$/i.test(text)) {
           }))
         );
         const withSlots = allClinics.filter((c, i) =>
-          (slotResults1[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
+          (slotResults1[i] || []).some(s => resolvedIds && resolvedIds.length
+            ? resolvedIds.includes(String(s.appointment_type_id))
+            : normName(s.appointment_type_name) === typeNorm)
         );
         data.clinic_list = withSlots;
         data.clinic_page = 0;
@@ -3281,7 +3523,8 @@ if (/^p(rev)?$/i.test(text)) {
             retryStep: 'choose_physio',
             retryLabel: t(this._getSessionLanguage(session), 'bookSpecificDate.tryAnotherPhysio'),
             result: slotResults1,
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: data.selected_appt_type?.name || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio) }),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: data.selected_appt_type?.name || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio) })
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
 
@@ -3337,8 +3580,13 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
-      const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const slots = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
       if (!slots.length) {
         // retry_step defaults to 'view_slots' (the current step) — Try Again
         // re-runs this exact fetch with selected_clinic/selected_physio intact,
@@ -3347,7 +3595,8 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
           context: 'date',
           result: raw,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsAtClinicForDate', { type: data.selected_appt_type?.name, clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' }),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsAtClinicForDate', { type: data.selected_appt_type?.name, clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' })
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -3532,11 +3781,12 @@ if (/^p(rev)?$/i.test(text)) {
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-          buckets.get(n).ids.add(String(t.id));
+          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
+          const { insurer } = parseApptCategory(t.category);
+          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
         }
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: Array.from(v.ids), norm: normName(v.displayName) }))
+          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
         );
         data.appt_type_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
@@ -3566,8 +3816,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_appt_type = list[idx];
-          data.selection_step = 'choose_clinic';
+          this._applyTypeSelection(data, list[idx]);
           if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
           return await this.handleBookSpecificPhysio(session, '');
@@ -3581,6 +3830,19 @@ if (/^p(rev)?$/i.test(text)) {
         header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectVisitTypeForPhysio', { name: getPractitionerDisplayName(data.selected_physio) })
       });
       return reply;
+    }
+
+    // ===== choose_type_insurer: disambiguate insurer for a same-named type. Not a
+    // navPush frame — Back returns to choose_type, same as the History flow. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) {
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+        return stepResult.reply;
+      }
+      data.selection_step = 'choose_clinic';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      return await this.handleBookSpecificPhysio(session, '');
     }
 
     // =====================================================================
@@ -3597,6 +3859,7 @@ if (/^p(rev)?$/i.test(text)) {
           if ((g.practitioners || []).some(p => `${p.id}` === physId))
             allClinics.push({ id: String(g.clinic_id), business_name: g.clinic_name });
         }
+        const resolvedIds = data.selected_appt_type?.ids;
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow();
         const slotResults2 = await Promise.all(
@@ -3605,7 +3868,9 @@ if (/^p(rev)?$/i.test(text)) {
           }))
         );
         const withSlots = allClinics.filter((c, i) =>
-          (slotResults2[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
+          (slotResults2[i] || []).some(s => resolvedIds && resolvedIds.length
+            ? resolvedIds.includes(String(s.appointment_type_id))
+            : normName(s.appointment_type_name) === typeNorm)
         );
         data.clinic_list = withSlots;
         data.clinic_page = 0;
@@ -3620,7 +3885,8 @@ if (/^p(rev)?$/i.test(text)) {
             retryStep: 'choose_type',
             retryLabel: t(this._getSessionLanguage(session), 'bookSpecificPhysio.tryAnotherType'),
             result: slotResults2,
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio), type: data.selected_appt_type?.name || 'that visit type' }),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio), type: data.selected_appt_type?.name || 'that visit type' })
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
 
@@ -3680,15 +3946,21 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
-      const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const slots = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
       if (!slots.length) {
         // retry_step defaults to 'view_slots' — Try Again re-runs this exact
         // fetch with selected_clinic/selected_physio intact.
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
           context: 'physio',
           result: raw,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' }),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' })
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
@@ -3868,7 +4140,7 @@ if (/^p(rev)?$/i.test(text)) {
         const inClinic = (groups || []).find(g => String(g.clinic_id) === clinicId);
         const pracList = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
 
-        const buckets = new Map(); // norm -> { display, ids:Set }
+        const buckets = new Map(); // norm -> { display, entries: [{id, insurer}] }
         // One practitioner's fetch failing must not discard every other
         // practitioner's already-fetched types — Promise.all would reject
         // the whole batch on a single rejection.
@@ -3884,19 +4156,18 @@ if (/^p(rev)?$/i.test(text)) {
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
             const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
             const n = normName(display);
-            if (!buckets.has(n)) buckets.set(n, { display, ids: new Set() });
-            buckets.get(n).ids.add(String(t.id));
+            if (!buckets.has(n)) buckets.set(n, { display, entries: [] });
+            const { insurer } = parseApptCategory(t.category);
+            buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
           }
         }
         data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: Array.from(v.ids) }))
+          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: v.entries.map(e => e.id), entries: v.entries }))
         );
         data.appt_type_page = 0;
-        data.appt_type_name_to_ids_norm = Object.fromEntries((data.appointment_type_list || []).map(x => [x.norm_name, x.ids]));
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_type', data.appointment_type_list.length, () => {
-          data.selected_appt_type = data.appointment_type_list[0];
-          data.selection_step = 'choose_physio';
+          this._applyTypeSelection(data, data.appointment_type_list[0]);
         }) : { advanced: false };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
         if (fwd.advanced) return await this.handleBookSpecificClinic(session, '');
@@ -3927,8 +4198,7 @@ if (/^p(rev)?$/i.test(text)) {
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_appt_type = list[idx];
-          data.selection_step = 'choose_physio';
+          this._applyTypeSelection(data, list[idx]);
           if (typeof navPush === 'function') navPush(data, 'choose_physio', { had_multiple_options: list.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
           return await this.handleBookSpecificClinic(session, '');
@@ -3944,6 +4214,19 @@ if (/^p(rev)?$/i.test(text)) {
       return replyTypes;
     }
 
+    // ===== choose_type_insurer: disambiguate insurer for a same-named type. Not a
+    // navPush frame — Back returns to choose_type, same as the History flow. =====
+    if (data.selection_step === 'choose_type_insurer') {
+      const stepResult = this._stepTypeInsurer(session, data, text);
+      if (stepResult.reply) {
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+        return stepResult.reply;
+      }
+      data.selection_step = 'choose_physio';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      return await this.handleBookSpecificClinic(session, '');
+    }
+
     // =====================================================================
     // choose_physio — physios at selected clinic who offer selected type
     // =====================================================================
@@ -3953,7 +4236,10 @@ if (/^p(rev)?$/i.test(text)) {
         const clinicId = String(data.selected_clinic?.id || data.selected_clinic || '');
         const inClinic = (groups || []).find(g => String(g.clinic_id) === clinicId);
         const pracInClinic = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
-        const wanted = new Set((data.appt_type_name_to_ids_norm?.[normName(data.selected_appt_type?.name || '')] || []).map(String));
+        // selected_appt_type.ids is already insurer-scoped by this point (narrowed by
+        // _stepTypeInsurer when the type name had multiple insurer variants), so this
+        // correctly excludes practitioners who only offer a different insurer's id.
+        const wanted = new Set((data.selected_appt_type?.ids || []).map(String));
 
         // One practitioner's fetch failing must not discard every other
         // practitioner's already-fetched types — Promise.all would reject
@@ -3986,7 +4272,8 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_physio_list',
             result: [groups, hadPhysioTypeFailure ? _markPartial([]) : []],
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noPractitionersAtClinicForType', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic', type: data.selected_appt_type?.name || 'this visit type' }),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noPractitionersAtClinicForType', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic', type: data.selected_appt_type?.name || 'this visit type' })
+              + this._insurerNoMatchSuffix(data.selected_appt_type),
           });
         }
       }
@@ -4047,22 +4334,28 @@ if (/^p(rev)?$/i.test(text)) {
         to
       });
 
+      const resolvedIds = data.selected_appt_type?.ids;
       const typeNorm = normName(data.selected_appt_type?.name || '');
-      const slots = deduplicateSlots((raw || []).filter(s => normName(s.appointment_type_name) === typeNorm));
+      const slots = deduplicateSlots((raw || []).filter(s =>
+        resolvedIds && resolvedIds.length
+          ? resolvedIds.includes(String(s.appointment_type_id))
+          : normName(s.appointment_type_name) === typeNorm
+      ));
       if (!slots.length) {
         // retry_step defaults to 'view_slots' — Try Again re-runs this exact
         // fetch with selected_clinic/selected_physio intact.
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
           result: raw,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic' }),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic' })
+            + this._insurerNoMatchSuffix(data.selected_appt_type),
         });
       }
 
       const slotData = {
         slot_list: slots,
         slot_page: 0,
-        last_selection_flow: 'specific_clinic',
+        last_selection_flow: 'clinic',
         prev_state_data: {
           selected_physio: data.selected_physio,
           selected_clinic: data.selected_clinic,

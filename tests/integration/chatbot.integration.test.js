@@ -1747,7 +1747,9 @@ describe('Booking menu and flow coverage', () => {
     });
 
     test("local index '1' on page 1 selects 6th clinic", async () => {
-      engine.clinikoAPI.getAvailableSlots = jest.fn().mockResolvedValue([]);
+      // Isolate clinic-pagination from slot-matching: this test only cares that
+      // choosing clinic index 1 on page 1 resolves to the 6th clinic.
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_HISTORY', {
         ...baseData,
         selected_appt_type: { name: 'Return Visit', ids: ['AT-001'] },
@@ -1857,9 +1859,12 @@ describe('Booking menu and flow coverage', () => {
     });
 
     test("local index '1' on page 1 selects 6th physio", async () => {
+      // Isolate physio-pagination from downstream clinic/slot matching: this test
+      // only cares that choosing physio index 1 on page 1 resolves to the 6th physio.
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: SIX_PHYSIOS },
       ]);
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', { ...baseData, practitioner_page: 1 });
       await callHandler(engine, ['handleBookSpecificDate'], session, '1');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
@@ -2243,13 +2248,13 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
         { id: 'AT-001', name: TYPE_1.name, duration_in_minutes: 60 },
       ]);
-      const apptTypeNormIds = {};
-      apptTypeNormIds['initial 60 min visit (new clients)'] = ['AT-001'];
       const data = {
         selection_step: 'choose_physio',
         selected_clinic: CLINIC_1,
-        selected_appt_type: TYPE_1,
-        appt_type_name_to_ids_norm: apptTypeNormIds,
+        // ids drives choose_physio's practitioner filter directly (insurer-scoped
+        // by the time a real session gets here) — appt_type_name_to_ids_norm is no
+        // longer consulted for this.
+        selected_appt_type: { ...TYPE_1, ids: ['AT-001'] },
         navigation_chain: [],
       };
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', data);
@@ -3842,6 +3847,473 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data || '{}');
       expect(d.no_slots_prompt?.context).toBe('clinic');
+    });
+  });
+
+  // ─── Phase 5b — insurer-awareness regression coverage ────────────────────────
+  // Locks in the choose_type_insurer mechanism shared by History/SpecificDate/
+  // SpecificPhysio/SpecificClinic (_stepTypeInsurer) and Book Soonest's parallel
+  // funnel insurer step, plus the durable preferred_insurer preference and the
+  // Specific Clinic last_selection_flow fix (5a). No production logic changed here.
+  describe('Insurer-awareness regression coverage', () => {
+    // Same appointment-type name, two Cliniko ids: one self-pay, one Bupa Global.
+    const INSURER_TYPE_ENTRY = {
+      name: 'Follow Up Appointment',
+      norm_name: 'follow up appointment',
+      ids: ['AT-010', 'AT-011'],
+      entries: [{ id: 'AT-010', insurer: null }, { id: 'AT-011', insurer: 'Bupa Global' }],
+    };
+    const INSURER_SLOT_SELFPAY = { ...SOONEST_SLOT, appointment_type_id: 'AT-010', appointment_type_name: 'Follow Up Appointment' };
+    const INSURER_SLOT_BUPA    = { ...SOONEST_SLOT, appointment_type_id: 'AT-011', appointment_type_name: 'Follow Up Appointment' };
+    // 5 insurers + self-pay = 6 options — enough to overflow the ≤3-buttons
+    // threshold and exercise real pagination (page 0 holds 5, page 1+ holds 4).
+    const MANY_INSURERS_TYPE_ENTRY = {
+      name: 'Follow Up Appointment',
+      norm_name: 'follow up appointment',
+      ids: ['AT-020', 'AT-021', 'AT-022', 'AT-023', 'AT-024'],
+      entries: [
+        { id: 'AT-020', insurer: 'AXA PPP' },
+        { id: 'AT-021', insurer: 'April International' },
+        { id: 'AT-022', insurer: 'Bupa Global' },
+        { id: 'AT-023', insurer: 'Bupa HealthNet' },
+        { id: 'AT-024', insurer: 'Cigna International' },
+      ],
+    };
+
+    // Regression: _stepTypeInsurer used to render every insurer option in one
+    // unpaginated list — same bug class as the 2026-07-19 Book Soonest funnel
+    // pagination incident. Real HK data has 5+ insurers per practitioner
+    // (Phase 0 findings), so this is a live overflow risk, not theoretical.
+    test('choose_type_insurer pages when there are more than 3 insurer options (matches Book Soonest funnel pagination)', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [MANY_INSURERS_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      });
+      const page0 = String(await callHandler(engine, ['handleBookHistory'], session, '1'));
+      expect(page0).toMatch(/how is this covered/i);
+      // Page 0 shows Self-pay + first 4 insurers (5 rows), plus "More" — not all 6 at once.
+      expect(page0).toMatch(/self-pay/i);
+      expect(page0).toMatch(/axa ppp/i);
+      expect(page0).toMatch(/more/i);
+      expect(page0).not.toMatch(/cigna international/i);
+
+      const page1 = String(await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), 'next'));
+      expect(page1).toMatch(/cigna international/i);
+
+      const backToPage0 = String(await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), 'prev'));
+      expect(backToPage0).toMatch(/axa ppp/i);
+      expect(backToPage0).not.toMatch(/cigna international/i);
+
+      // Picking an item on page 1 resolves to the correct insurer (not page 0's item 1).
+      await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), 'next');
+      await callHandler(engine, ['handleBookHistory'], await db.getSession(session.id), '1');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type.insurer).toBe('Cigna International');
+    });
+
+    // 1. Shared insurer-resolution deep test (History): prompt → pick → id narrowed
+    //    → slot filtered by id → booked with that id.
+    test('History: choose_type_insurer prompts, narrows ids on pick, and only the matching insurer slot survives filtering', async () => {
+      const listSession = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      });
+      const promptReply = String(await callHandler(engine, ['handleBookHistory'], listSession, '1'));
+      expect(promptReply).toMatch(/how is this covered/i);
+      expect(promptReply).toMatch(/bupa global/i);
+
+      let updated = await db.getSession(listSession.id);
+      let d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type_insurer');
+
+      // Pick option 2 = Bupa Global (option 1 is always "Self-pay")
+      const insurerStepSession = await db.getSession(listSession.id);
+      await callHandler(engine, ['handleBookHistory'], insurerStepSession, '2');
+      updated = await db.getSession(listSession.id);
+      d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type.ids).toEqual(['AT-011']);
+      expect(d.selected_appt_type.insurer).toBe('Bupa Global');
+
+      // Advance through choose_clinic to view_slots with both a self-pay and a
+      // Bupa Global slot on offer — only the resolved id's slot should survive.
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([INSURER_SLOT_SELFPAY, INSURER_SLOT_BUPA]);
+      const sess = await db.getSession(listSession.id);
+      const slotReply = String(await callHandler(engine, ['handleBookHistory'], sess, ''));
+      expect(slotReply).not.toMatch(/no available slots/i);
+
+      // Book it — bookAppointment must be called with the Bupa Global id, not self-pay.
+      const bookMock = jest.spyOn(engine.clinikoAPI, 'bookAppointment').mockResolvedValue({ success: true, id: 'NEW-APPT' });
+      const finalSession = await db.getSession(listSession.id);
+      await callHandler(engine, ['handleSelectSlotState'], finalSession, '1');
+      const confirmSession = await db.getSession(listSession.id);
+      await callHandler(engine, ['handleConfirmBookingState'], confirmSession, 'yes');
+      expect(bookMock).toHaveBeenCalled();
+      const bookedArg = bookMock.mock.calls[0][0];
+      expect(String(bookedArg.appointment_type_id ?? bookedArg.appointmentTypeId)).toBe('AT-011');
+    });
+
+    // 2. Auto-apply from preferred_insurer — no prompt shown when it applies.
+    test('preferred_insurer auto-applies at choose_type_insurer without prompting', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      });
+      session.context = { region: 'SG', preferred_insurer: 'Bupa Global' };
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, '1'));
+      expect(reply).not.toMatch(/how is this covered/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type.ids).toEqual(['AT-011']);
+      expect(d.selected_appt_type.insurer).toBe('Bupa Global');
+    });
+
+    // 3. Self-pay reset resolution (preferred_insurer === '') resolves to self-pay,
+    //    no prompt — mirrors "No preference / Self-pay" storing '' not null.
+    test("preferred_insurer === '' (explicit self-pay reset) resolves to self-pay without prompting", async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      });
+      session.context = { region: 'SG', preferred_insurer: '' };
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, '1'));
+      expect(reply).not.toMatch(/how is this covered/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type.ids).toEqual(['AT-010']);
+      expect(d.selected_appt_type.insurer).toBe(null);
+    });
+
+    // 4. No-match suffix message — confirmed-empty no-slots message names the insurer.
+    test('confirmed-empty no-slots message names the resolved insurer and points to Change Preferences', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([]);
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'view_slots',
+        selected_physio: PHYSIO_1,
+        selected_clinic: CLINIC_1,
+        selected_appt_type: { name: 'Follow Up Appointment', ids: ['AT-011'], insurer: 'Bupa Global' },
+      });
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toMatch(/bupa global/i);
+      expect(reply).toMatch(/change preferences/i);
+    });
+
+    // 5. Per-flow insurer-wiring smoke test — each flow reaches choose_type_insurer
+    //    and prompts when an insurer-tagged type is selected.
+    test('Specific Date: choose_type_insurer prompts for an insurer-tagged type', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        selected_date: '2026-08-01',
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, '1'));
+      expect(reply).toMatch(/how is this covered/i);
+    });
+
+    test('Specific Physio: choose_type_insurer prompts for an insurer-tagged type', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, '1'));
+      expect(reply).toMatch(/how is this covered/i);
+    });
+
+    test('Specific Clinic: choose_type_insurer prompts for an insurer-tagged type', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, '1'));
+      expect(reply).toMatch(/how is this covered/i);
+    });
+
+    test('Book Soonest: funnel insurer step prompts for an insurer-tagged service', async () => {
+      const FUNNEL_CAT_SELFPAY = { id: 'AT-010', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 30 };
+      const FUNNEL_CAT_BUPA    = { id: 'AT-011', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'follow_up', duration: 30 };
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type',
+        funnel_step: 'insurer',
+        funnel_catalogue: [FUNNEL_CAT_SELFPAY, FUNNEL_CAT_BUPA],
+        funnel_sel: { service: 'Physiotherapy' },
+        appt_type_page: 0,
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/how is this covered/i);
+      expect(reply).toMatch(/bupa global/i);
+    });
+
+    // Phase 6b: Book Soonest's insurer stage now delegates to the shared
+    // _stepTypeInsurer instead of its own independent copy — lock in that the
+    // auto-apply/self-pay-reset/pagination behavior it used to implement itself
+    // is unchanged now that it's borrowed.
+    describe('Book Soonest funnel insurer stage — unified with _stepTypeInsurer', () => {
+      const FUNNEL_CAT_SELFPAY = { id: 'AT-010', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: null, patientType: 'follow_up', duration: 30 };
+      const FUNNEL_CAT_BUPA    = { id: 'AT-011', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'follow_up', duration: 30 };
+      const soonestInsurerData = () => ({
+        selection_step: 'choose_type',
+        funnel_step: 'insurer',
+        funnel_catalogue: [FUNNEL_CAT_SELFPAY, FUNNEL_CAT_BUPA],
+        funnel_sel: { service: 'Physiotherapy' },
+        appt_type_page: 0,
+      });
+
+      test('preferred_insurer auto-applies without prompting, resolves straight to final_pick', async () => {
+        const session = await seedAt('BOOK_SOONEST', soonestInsurerData());
+        session.context = { region: 'SG', preferred_insurer: 'Bupa Global' };
+        const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+        expect(reply).not.toMatch(/how is this covered/i);
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.funnel_sel.insurer).toBe('Bupa Global');
+        expect(d.funnel_step).toBe('final_pick');
+      });
+
+      test("preferred_insurer === '' resolves to self-pay without prompting", async () => {
+        const session = await seedAt('BOOK_SOONEST', soonestInsurerData());
+        session.context = { region: 'SG', preferred_insurer: '' };
+        const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+        expect(reply).not.toMatch(/how is this covered/i);
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.funnel_sel.insurer).toBe(null);
+        expect(d.funnel_step).toBe('final_pick');
+      });
+
+      test('insurer list pages via the shared insurer_page, not the outer appt_type_page interception', async () => {
+        const manyInsurers = [
+          { id: 'AT-030', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'AXA PPP', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-031', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'April International', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-032', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-033', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Bupa HealthNet', patientType: 'follow_up', duration: 30 },
+          { id: 'AT-034', name: 'Follow Up Appointment', service: 'Physiotherapy', insurer: 'Cigna International', patientType: 'follow_up', duration: 30 },
+        ];
+        const session = await seedAt('BOOK_SOONEST', {
+          selection_step: 'choose_type', funnel_step: 'insurer',
+          funnel_catalogue: manyInsurers, funnel_sel: { service: 'Physiotherapy' }, appt_type_page: 0,
+        });
+        const page0 = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+        expect(page0).toMatch(/self-pay/i);
+        expect(page0).toMatch(/more/i);
+        expect(page0).not.toMatch(/cigna international/i);
+
+        const page1 = String(await callHandler(engine, ['handleBookSoonest'], await db.getSession(session.id), 'next'));
+        expect(page1).toMatch(/cigna international/i);
+
+        await callHandler(engine, ['handleBookSoonest'], await db.getSession(session.id), '1');
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        // Once the insurer choice resolves, the funnel continues straight through
+        // final_pick (single patientType/duration combo here) to a real, fully
+        // resolved selected_appt_type — the insurer-step scratch object is gone,
+        // replaced by the genuine funnel result, not leaked alongside it.
+        expect(d.selected_appt_type.insurer).toBe('Cigna International');
+        expect(d.selected_appt_type.ids).toEqual(['AT-034']);
+      });
+    });
+
+    // Phase 6c: parametrized cross-flow proof that all 5 flows behave identically
+    // for the same insurer-selection inputs now that they share one implementation.
+    // History/Specific Date/Specific Physio/Specific Clinic have an identical entry
+    // mechanic (choose_type -> pick a type -> choose_type_insurer), so they run as
+    // one test.each table below using the same 5-insurer fixture, same pick sequence,
+    // same expected resolution. Book Soonest's funnel entry mechanic differs (service
+    // must be picked first, catalogue-shaped not entries-shaped) so it isn't in this
+    // table, but the "Book Soonest funnel insurer stage" describe above runs the exact
+    // same 5-insurer-names/pagination/pick-page-1-item-1 scenario and resolves to the
+    // same insurer (Cigna International) — that test is this table's Soonest sibling.
+    describe('Cross-flow parametrized: identical insurer-selection inputs -> identical outcomes', () => {
+      const PARAM_MANY_INSURERS_ENTRY = {
+        name: 'Follow Up Appointment',
+        norm_name: 'follow up appointment',
+        ids: ['AT-040', 'AT-041', 'AT-042', 'AT-043', 'AT-044'],
+        entries: [
+          { id: 'AT-040', insurer: 'AXA PPP' },
+          { id: 'AT-041', insurer: 'April International' },
+          { id: 'AT-042', insurer: 'Bupa Global' },
+          { id: 'AT-043', insurer: 'Bupa HealthNet' },
+          { id: 'AT-044', insurer: 'Cigna International' },
+        ],
+      };
+      const flows = [
+        {
+          name: 'History', handler: 'handleBookHistory', state: 'BOOK_HISTORY',
+          seed: {
+            selection_step: 'choose_type', selected_physio: PHYSIO_1,
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+          },
+        },
+        {
+          name: 'Specific Date', handler: 'handleBookSpecificDate', state: 'BOOK_SPECIFIC_DATE',
+          seed: {
+            selection_step: 'choose_type', selected_date: '2026-08-01',
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+          },
+        },
+        {
+          name: 'Specific Physio', handler: 'handleBookSpecificPhysio', state: 'BOOK_SPECIFIC_PHYSIO',
+          seed: {
+            selection_step: 'choose_type', selected_physio: PHYSIO_1,
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+          },
+        },
+        {
+          name: 'Specific Clinic', handler: 'handleBookSpecificClinic', state: 'BOOK_SPECIFIC_CLINIC',
+          seed: {
+            selection_step: 'choose_type', selected_clinic: CLINIC_1,
+            appointment_type_list: [PARAM_MANY_INSURERS_ENTRY], appt_type_page: 0,
+            navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+          },
+        },
+      ];
+
+      test.each(flows)('$name: pick type -> page 0 shows 4 insurers + self-pay + More, page 1 shows the 5th, pick resolves it', async ({ handler, state, seed }) => {
+        const session = await seedAt(state, seed);
+        const page0 = String(await callHandler(engine, [handler], session, '1'));
+        expect(page0).toMatch(/how is this covered/i);
+        expect(page0).toMatch(/self-pay/i);
+        expect(page0).toMatch(/axa ppp/i);
+        expect(page0).toMatch(/more/i);
+        expect(page0).not.toMatch(/cigna international/i);
+
+        const page1 = String(await callHandler(engine, [handler], await db.getSession(session.id), 'next'));
+        expect(page1).toMatch(/cigna international/i);
+        expect(page1).not.toMatch(/axa ppp/i);
+
+        await callHandler(engine, [handler], await db.getSession(session.id), '1');
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.selected_appt_type.insurer).toBe('Cigna International');
+        expect(d.selected_appt_type.ids).toEqual(['AT-044']);
+      });
+
+      test.each(flows)('$name: preferred_insurer auto-applies without prompting', async ({ handler, state, seed }) => {
+        const session = await seedAt(state, seed);
+        session.context = { region: 'SG', preferred_insurer: 'Bupa Global' };
+        const reply = String(await callHandler(engine, [handler], session, '1'));
+        expect(reply).not.toMatch(/how is this covered/i);
+        const updated = await db.getSession(session.id);
+        const d = JSON.parse(updated.data || '{}');
+        expect(d.selected_appt_type.insurer).toBe('Bupa Global');
+        expect(d.selected_appt_type.ids).toEqual(['AT-042']);
+      });
+    });
+
+    // 6. Change Preferences reset regression — stores '' not null, and a
+    //    subsequent booking in a DIFFERENT flow picks up the new preference.
+    test('Change Preferences: selecting self-pay stores "" (not null) and a later History booking auto-resolves self-pay', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-010', name: 'Follow Up Appointment', category: 'Physiotherapy' },
+        { id: 'AT-011', name: 'Follow Up Appointment', category: 'Bupa Global : Physiotherapy' },
+      ]);
+      const prefSession = await seedAt('SELECT_PREFERRED_INSURER', { insurer_options: ['Bupa Global'] });
+      await callHandler(engine, ['handleSelectPreferredInsurerState'], prefSession, 'none');
+      const afterPref = await db.getSession(prefSession.id);
+      const ctx = typeof afterPref.context === 'string' ? JSON.parse(afterPref.context) : afterPref.context;
+      expect(ctx.preferred_insurer).toBe('');
+
+      // Simulate the "different flow, later message" hop: a fresh History session
+      // seeded with the just-updated context, exactly as a real reload would carry it.
+      const historySession = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [INSURER_TYPE_ENTRY],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio_from_history', had_multiple_options: true, auto: false }],
+      });
+      historySession.context = ctx;
+      const reply = String(await callHandler(engine, ['handleBookHistory'], historySession, '1'));
+      expect(reply).not.toMatch(/how is this covered/i);
+      const updated = await db.getSession(historySession.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type.insurer).toBe(null);
+    });
+
+    // 7. Back/no-slots resumption regression, all 5 flows. History/Date/Physio/Soonest
+    //    assert already-correct behavior (lock in against regressions); Specific Clinic
+    //    asserts the 5a fix — this case would fail on pre-5a code ('specific_clinic'
+    //    mismatched the 'clinic' check and fell through to the main menu).
+    describe('SELECT_SLOT back-navigation resumes the originating flow (all 5 flows)', () => {
+      // Book Soonest's funnel auto-resolves through single-option steps (one physio,
+      // one clinic, one slot in these fixtures), so "back" can legitimately land
+      // straight back at SELECT_SLOT with a freshly rebuilt list rather than pausing
+      // at BOOK_SOONEST — both outcomes mean the flow resumed, not the main menu.
+      const cases = [
+        { flow: 'history', states: ['BOOK_HISTORY'] },
+        { flow: 'date',    states: ['BOOK_SPECIFIC_DATE'] },
+        { flow: 'physio',  states: ['BOOK_SPECIFIC_PHYSIO'] },
+        { flow: 'clinic',  states: ['BOOK_SPECIFIC_CLINIC'] },
+        { flow: 'soonest', states: ['BOOK_SOONEST', 'SELECT_SLOT'] },
+      ];
+      test.each(cases)('last_selection_flow=$flow → back resumes its own flow (not the main menu)', async ({ flow, states }) => {
+        // History's INIT branch (no data.selection_step) re-derives everything from
+        // Cliniko from scratch — needs the instance-level mocks set explicitly, since
+        // (per this describe's beforeEach comment) resetCliniko() only restores the
+        // prototype, not instance overrides left by earlier tests in the file.
+        if (flow === 'history') {
+          engine.clinikoAPI.getBookingsByPatientId.mockResolvedValue([FUTURE_APPT, PAST_APPT]);
+          engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+            { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+          ]);
+          engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+            { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy' },
+            { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy' },
+          ]);
+        }
+        const session = await seedAt('SELECT_SLOT', {
+          slot_list: [SOONEST_SLOT],
+          slot_page: 0,
+          last_selection_flow: flow,
+          prev_state_data: {
+            selected_physio: PHYSIO_1,
+            selected_clinic: CLINIC_1,
+            selected_appt_type: TYPE_1,
+            selected_date: '2026-08-01',
+          },
+        });
+        await callHandler(engine, ['handleSelectSlotState'], session, 'back');
+        const updated = await db.getSession(session.id);
+        expect(states).toContain(updated.conversation_state);
+        expect(updated.conversation_state).not.toBe('BOOKING_METHOD_OPTIONS');
+      });
     });
   });
 });

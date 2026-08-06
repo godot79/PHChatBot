@@ -174,6 +174,7 @@ class SessionManager {
             if (ps.appt_preference) {
               try { psContext.appt_preference = JSON.parse(ps.appt_preference); } catch {}
             }
+            if (ps.preferred_insurer) psContext.preferred_insurer = ps.preferred_insurer;
 
             const psUpdates = {};
             if (Object.keys(psContext).length > 0) {

@@ -124,8 +124,18 @@ let cachedClinics = null;
 let cachedPractitioners = null;
 let cachedRawTypes = null; // getAllAppointmentTypesForAllPractitioners() result — ~30 live GETs, reused across describe blocks to avoid Cliniko rate limiting
 
-beforeAll(() => {
+const { acquireLiveLock, releaseLiveLock } = require('./_liveTestLock');
+
+beforeAll(async () => {
+  // Cross-process mutex — this file and reschedule_type_preservation.write.test.js
+  // both hit live Cliniko; running in parallel Jest workers causes real 429s that
+  // look like flaky assertion failures but are actually cross-file contention.
+  if (LIVE) await acquireLiveLock();
   api = new ClinikoAPI();
+}, 65_000);
+
+afterAll(() => {
+  if (LIVE) releaseLiveLock();
 });
 
 // Helper: run fn inside HK region context
@@ -719,16 +729,35 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
       .slice(0, 3);
     if (!candidateNames.length) { console.warn('[live] no appointment types found — skipping'); return; }
 
+    // Walks every page (not just page 0) so this actually proves the row-order
+    // invariant across the whole list, not just whatever happens to fit on the
+    // first page — a candidate type busy enough to have >5 physios previously
+    // produced a false failure here: page 0's 5 rendered names were compared
+    // against the full stored list instead of just page 0's slice (2026-08-06).
     let displayedNames = [];
     let session = null;
     let triedName = null;
     for (const name of candidateNames) {
       session = await seedSoonestAtType(name);
-      const reply = await tryLive(() => hk(() => engine.handleBookSoonest(session, '')));
-      if (reply === undefined) { console.warn('[live] rate-limited during physio sweep — skipping'); return; }
-      displayedNames = [...String(reply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+      const firstReply = await tryLive(() => hk(() => engine.handleBookSoonest(session, '')));
+      if (firstReply === undefined) { console.warn('[live] rate-limited during physio sweep — skipping'); return; }
+      const firstPageNames = [...String(firstReply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
       triedName = name;
-      if (displayedNames.length > 1) break; // found a live multi-physio list
+      if (firstPageNames.length <= 1) continue; // not a multi-physio list, try the next candidate
+
+      // Found a live multi-physio list — page through the rest with 'next'.
+      const allPageNames = [...firstPageNames];
+      let hasMore = /\bMore\b|\bnext\b/i.test(String(firstReply));
+      let guard = 0;
+      while (hasMore && guard++ < 20) {
+        const nextReply = await tryLive(() => hk(async () => engine.handleBookSoonest(await db.getSession(session.id), 'next')));
+        if (nextReply === undefined) { console.warn('[live] rate-limited while paging — skipping'); return; }
+        const pageNames = [...String(nextReply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+        allPageNames.push(...pageNames);
+        hasMore = /\bMore\b|\bnext\b/i.test(String(nextReply));
+      }
+      displayedNames = allPageNames;
+      break;
     }
 
     if (displayedNames.length < 2) {
@@ -743,7 +772,7 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
     );
 
     expect(displayedNames).toEqual(storedNames);
-  }, 90000);
+  }, 120000);
 
   // Reproduces the 2026-07-19 13:35 production incident: after choose_physio
   // finds 0 available practitioners for the selected type (real "no slots" or
@@ -1016,10 +1045,17 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
   let getSpy;
   let realGet;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!LIVE) return;
+    // The preceding "concurrent-load 429s" describe block deliberately hammers
+    // Cliniko to trigger real 429s, and leaves the account rate-limited right as
+    // this block starts. A "second call was a real fetch, not a cache hit"
+    // assertion here is a false failure if that first call 429s (caught inside
+    // ClinikoAPI, cache never set, so the "cached" second call is a real miss
+    // too) -- same 429 backoff convention as tryLive() above, not a caching bug.
+    await new Promise(r => setTimeout(r, 5000));
     ClinikoAPI._clearGroupsCache();
-  });
+  }, 15000);
 
   beforeEach(() => {
     if (!LIVE) return;

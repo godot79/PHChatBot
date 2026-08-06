@@ -10,7 +10,19 @@ const BulkContext = require("../core/BulkContext.js");
 // 15s timeouts (confirmed live 2026-07-21). Regular single calls never touch
 // this queue — only bulk-flagged callers do, so one heavy fan-out can't slow
 // down an unrelated single-call request from a different user/flow.
-const BULK_CONCURRENCY_LIMIT = 15;
+//
+// Was 15, lowered to 8 (2026-08-06) after calibrating directly against the
+// live HK account: a real concurrency=15 fan-out reliably hit a Cliniko 429
+// at ~33 req/s (tripped at request #204, 6.3s in), which then locks the
+// account out of ALL requests for ~45-50s regardless of pacing afterward —
+// this is a real production risk (any live Book Soonest catalogue build can
+// trigger it), not just test flakiness. concurrency=8 (~18 req/s sustained,
+// 180 requests over 10s) produced zero failures in the same live calibration.
+// If this ever needs raising again, recalibrate against live Cliniko first
+// (fixed concurrency, sustained for 10+ seconds, watch for a real 429) rather
+// than picking a number — see the "engineer skill" example in this repo's
+// CLAUDE.md for the expected investigation shape.
+const BULK_CONCURRENCY_LIMIT = 8;
 let _activeBulk = 0;
 const _bulkQueue = [];
 
