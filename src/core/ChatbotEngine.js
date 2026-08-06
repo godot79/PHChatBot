@@ -1140,8 +1140,59 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
     }
 
-    // Show language selection if needed (asked before region)
-    if (!context.language || text === 'language' || text === 'change language' || context.awaiting_language_selection) {
+    // Show region selection if needed — must resolve before language, since Cantonese/Mandarin
+    // are only offered for HK (see below); every other region skips the language prompt entirely.
+    if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
+      context.awaiting_region_selection = true;
+      if (/^\d+$/.test(text)) {
+        const idx = parseInt(text, 10) - 1;
+        if (idx >= 0 && idx < regionCodes.length) {
+          context.region = regionCodes[idx];
+          delete context.awaiting_region_selection;
+          if (context.region !== 'HK' && context.language !== 'en') {
+            context.language = 'en';
+            delete context.awaiting_language_selection;
+          }
+          await this.sessionManager.updateSession(session.id, { context });
+          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region, language: context.language }).catch(() => {});
+          // Re-enter (rather than jump to the main menu) so the HK language gate below still runs if needed
+          return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+        }
+      } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
+        const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
+        context.region = found;
+        delete context.awaiting_region_selection;
+        if (context.region !== 'HK' && context.language !== 'en') {
+          context.language = 'en';
+          delete context.awaiting_language_selection;
+        }
+        await this.sessionManager.updateSession(session.id, { context });
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region, language: context.language }).catch(() => {});
+        return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+      }
+
+      await this.sessionManager.updateSession(session.id, { context });
+      return list(t(context.language || 'en', 'region.promptBody'), t(context.language || 'en', 'region.buttonLabel'),
+        regionCodes.map((code, i) => ({ id: String(i + 1), title: regionLabels[code] }))
+      );
+    }
+
+    // Non-HK regions never offer language selection — silently force English if not already,
+    // and ignore any stray language-change command instead of falling through to unmatched-text handling.
+    if (context.region !== 'HK') {
+      if (context.language !== 'en' || context.awaiting_language_selection) {
+        context.language = 'en';
+        delete context.awaiting_language_selection;
+        await this.sessionManager.updateSession(session.id, { context });
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: 'en' }).catch(() => {});
+      }
+      if (text === 'language' || text === 'change language') {
+        return await renderMenuFresh();
+      }
+    }
+
+    // Show language selection if needed — HK only.
+    if (context.region === 'HK' && (!context.language || text === 'language' || text === 'change language' || context.awaiting_language_selection)) {
       context.awaiting_language_selection = true;
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
@@ -1150,8 +1201,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           delete context.awaiting_language_selection;
           await this.sessionManager.updateSession(session.id, { context });
           this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
-          // Re-enter (rather than jump to the main menu) so the region gate below still runs if needed
-          return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+          return await renderMenuFresh();
         }
       } else if (languageCodes.some(code => text.includes(LANGUAGE_LABELS[code].toLowerCase()))) {
         const found = languageCodes.find(code => text.includes(LANGUAGE_LABELS[code].toLowerCase()));
@@ -1159,7 +1209,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         delete context.awaiting_language_selection;
         await this.sessionManager.updateSession(session.id, { context });
         this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
-        return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+        return await renderMenuFresh();
       }
 
       await this.sessionManager.updateSession(session.id, { context });
@@ -1181,33 +1231,6 @@ async handleMessageEnvelope(message, phoneNumber) {
     }
 
     const language = context.language || 'en';
-
-    // Show region selection if needed
-    if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
-      context.awaiting_region_selection = true;
-      if (/^\d+$/.test(text)) {
-        const idx = parseInt(text, 10) - 1;
-        if (idx >= 0 && idx < regionCodes.length) {
-          context.region = regionCodes[idx];
-          delete context.awaiting_region_selection;
-          await this.sessionManager.updateSession(session.id, { context });
-          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
-          return await renderMenuFresh();
-        }
-      } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
-        const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
-        context.region = found;
-        delete context.awaiting_region_selection;
-        await this.sessionManager.updateSession(session.id, { context });
-        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
-        return await renderMenuFresh();
-      }
-
-      await this.sessionManager.updateSession(session.id, { context });
-      return list(t(language, 'region.promptBody'), t(language, 'region.buttonLabel'),
-        regionCodes.map((code, i) => ({ id: String(i + 1), title: regionLabels[code] }))
-      );
-    }
 
     // Region is set → show Intro main menu for non-verified user
     if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {

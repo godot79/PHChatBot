@@ -4586,32 +4586,48 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
     await engine.sessionManager.updateSession(s.id, {
       conversation_state: 'INTRO',
       verified: false,
-      context: JSON.stringify({ region: 'SG', ...extra }),
+      context: JSON.stringify({ region: 'HK', ...extra }),
     });
     return engine.sessionManager.getSession(s.id);
   }
 
-  test('brand-new session: first prompt is the trilingual language selector, before region', async () => {
-    const reply = await engine.handleMessage('hi', '+6592000001');
+  // Language selection is HK-only (Phase 3e region gate) — these tests use +852 numbers
+  // so region auto-detects to HK and the language prompt is actually offered.
+  test('brand-new HK session: first prompt is the trilingual language selector, after auto-detected region', async () => {
+    const reply = await engine.handleMessage('hi', '+85292000001');
     expect(String(reply)).toMatch(/select your language/i);
     expect(String(reply)).toMatch(/廣東話/);
     expect(String(reply)).toMatch(/普通话/);
   });
 
-  test('brand-new session: first-contact ack is not swallowed by the language gate on free-text input', async () => {
-    const reply = String(await engine.handleMessage('I need to book an appointment for Tuesday', '+6592000009'));
+  test('brand-new HK session: first-contact ack is not swallowed by the language gate on free-text input', async () => {
+    const reply = String(await engine.handleMessage('I need to book an appointment for Tuesday', '+85292000009'));
     expect(reply).toMatch(/thanks for reaching out/i);
     expect(reply).toMatch(/select your language/i);
   });
 
-  test('brand-new session: a plain greeting still gets no ack prefix (language gate)', async () => {
-    const reply = String(await engine.handleMessage('hi', '+6592000010'));
+  test('brand-new HK session: a plain greeting still gets no ack prefix (language gate)', async () => {
+    const reply = String(await engine.handleMessage('hi', '+85292000010'));
     expect(reply).not.toMatch(/thanks for reaching out/i);
     expect(reply).toMatch(/select your language/i);
   });
 
+  test('brand-new SG session: no language prompt at all — goes straight to main menu in English', async () => {
+    // Note: getRegionFromPhoneNumber treats any bare 10-digit number as India before checking
+    // the SG '65' prefix, so a real SG-shaped number needs 11 digits to auto-detect as SG here —
+    // pre-existing behavior in SessionManager.getRegionFromPhoneNumber, not touched by this change.
+    const phone = '+65921100011';
+    const reply = String(await engine.handleMessage('hi', phone));
+    expect(reply).not.toMatch(/select your language/i);
+    expect(reply).toMatch(/register as new patient/i);
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.region).toBe('SG');
+    expect(ctx.language).toBe('en');
+  });
+
   test('numeric selection "2" sets Cantonese (yue) and persists on the session', async () => {
-    const phone = '+6592000002';
+    const phone = '+85292000002';
     await seedUnverifiedNoLanguage(phone);
     await engine.handleMessage('hi', phone); // language prompt
     await engine.handleMessage('2', phone);  // pick Cantonese
@@ -4622,7 +4638,7 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
   });
 
   test('substring selection ("mandarin"-style match) also works', async () => {
-    const phone = '+6592000003';
+    const phone = '+85292000003';
     await seedUnverifiedNoLanguage(phone);
     await engine.handleMessage('hi', phone);
     const reply = await engine.handleMessage('普通话', phone);
@@ -4633,7 +4649,7 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
   });
 
   test('language selection also persists to patient_state (durable store)', async () => {
-    const phone = '+6592000004';
+    const phone = '+85292000004';
     await seedUnverifiedNoLanguage(phone);
     await engine.handleMessage('hi', phone);
     await engine.handleMessage('2', phone); // Cantonese
@@ -4657,22 +4673,36 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
     expect(String(reply)).toMatch(/請選擇你所喺嘅地區/);
   });
 
-  test('goToInteractiveMenu routes to intro when region is set but language is not (pre-existing session)', async () => {
-    const phone = '+6592000006';
-    const session = await seedUnverifiedNoLanguage(phone); // region: 'SG', no language key at all
+  test('goToInteractiveMenu routes to intro when region is HK and language is not set (pre-existing session)', async () => {
+    const phone = '+85292000006';
+    const session = await seedUnverifiedNoLanguage(phone); // region: 'HK', no language key at all
     const reply = String(await engine.goToInteractiveMenu(session));
     expect(reply).toMatch(/select your language/i);
     expect(reply).not.toMatch(/register as new patient/i);
   });
 
-  test('soft "change language" from the verified main menu does not reset the session', async () => {
-    const phone = '+6592000007';
+  test('goToInteractiveMenu with SG region and no language → goes straight to main menu (no language prompt)', async () => {
+    const phone = '+6592000006';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'SG' }), // no language key at all
+    });
+    const session = await engine.sessionManager.getSession(s.id);
+    const reply = String(await engine.goToInteractiveMenu(session));
+    expect(reply).not.toMatch(/select your language/i);
+    expect(reply).toMatch(/register as new patient/i);
+  });
+
+  test('soft "change language" from the verified HK main menu does not reset the session', async () => {
+    const phone = '+85292000007';
     const s = await engine.sessionManager.getOrCreateSession(phone, true);
     await engine.sessionManager.updateSession(s.id, {
       conversation_state: 'BOOK_MANAGE_OPTIONS',
       verification_status: 'verified',
       verified: 1,
-      context: { region: 'SG', language: 'en' },
+      context: { region: 'HK', language: 'en' },
       data: JSON.stringify({ email: 'p@test.com' }),
     });
     const reply = await engine.handleMessage('language', phone);
@@ -4682,14 +4712,14 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
     expect(session.id).toBe(s.id);
   });
 
-  test('global "change language" from a non-INTRO state does not reset the session (unlike region)', async () => {
-    const phone = '+6592000008';
+  test('global "change language" from a non-INTRO state does not reset the session (unlike region), HK only', async () => {
+    const phone = '+85292000008';
     const s = await engine.sessionManager.getOrCreateSession(phone, true);
     await engine.sessionManager.updateSession(s.id, {
       conversation_state: 'SELECT_SLOT',
       verification_status: 'verified',
       verified: 1,
-      context: { region: 'SG', language: 'en' },
+      context: { region: 'HK', language: 'en' },
       data: JSON.stringify({ email: 'p@test.com' }),
     });
     const reply = await engine.handleMessage('change language', phone);
@@ -4698,18 +4728,51 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
     expect(session.id).toBe(s.id);
   });
 
+  test('"change language" is a no-op for a non-HK region (no language menu to change into)', async () => {
+    const phone = '+6592000012';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'SELECT_SLOT',
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'SG', language: 'en' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    const reply = String(await engine.handleMessage('change language', phone));
+    expect(reply).not.toMatch(/select your language/i);
+  });
+
   test('"Change Language" row appears in the verified main menu', async () => {
-    const phone = '+6592000009';
+    const phone = '+85292000009';
     const s = await engine.sessionManager.getOrCreateSession(phone, true);
     await engine.sessionManager.updateSession(s.id, {
       conversation_state: 'INTRO',
       verification_status: 'verified',
       verified: 1,
-      context: JSON.stringify({ region: 'SG', language: 'en' }),
+      context: JSON.stringify({ region: 'HK', language: 'en' }),
     });
     const fresh = await engine.sessionManager.getSession(s.id);
     const reply = await engine.renderMainMenu(fresh);
     expect(String(reply)).toMatch(/change language/i);
+  });
+
+  test('region switch from HK (yue) to SG force-resets language to English', async () => {
+    const phone = '+85292000013';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'HK', language: 'yue', awaiting_region_selection: true }),
+    });
+    const fresh = await engine.sessionManager.getSession(s.id);
+    await engine.handleIntroState(fresh, '2'); // regionCodes: [HK, SG, IN, PH] → '2' = SG
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.region).toBe('SG');
+    expect(ctx.language).toBe('en');
+    await new Promise((r) => setImmediate(r));
+    const patientState = await db.getPatientState(phone);
+    expect(patientState.language).toBe('en');
   });
 });
 
@@ -7548,23 +7611,45 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('SG number sends "hello" then picks language → main menu shown (region auto-detected, no extra region step)', async () => {
-    const r0 = await engine.handleMessage('hello', '+6562000001');
+  test('SG number sends "hello" → main menu shown directly (region auto-detected as non-HK, no language prompt)', async () => {
+    // See note above: needs 11 digits to auto-detect as SG rather than the bare-10-digit India fallback.
+    const reply = await engine.handleMessage('hello', '+65621100001');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/welcome|register|book/i);
+    // Neither region nor language selection should appear for a known non-HK region number
+    expect(reply).not.toMatch(/please select your region/i);
+    expect(reply).not.toMatch(/select your language/i);
+  });
+
+  test('HK number sends "hello" then picks language → main menu shown (region auto-detected, no extra region step)', async () => {
+    const r0 = await engine.handleMessage('hello', '+85262000001');
     expect(String(r0)).toMatch(/select your language/i);
-    const reply = await engine.handleMessage('1', '+6562000001'); // pick English
+    const reply = await engine.handleMessage('1', '+85262000001'); // pick English
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/welcome|register|book/i);
     // Region selection prompt must not appear for a known-region number
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('unknown-region number sends "hello" then picks language → region selection shown (not main menu)', async () => {
-    const r0 = await engine.handleMessage('hello', '+447700900001');
-    expect(String(r0)).toMatch(/select your language/i);
-    const reply = await engine.handleMessage('1', '+447700900001'); // pick English
+  test('unknown-region number sends "hello" → region selection shown first (not language, not main menu)', async () => {
+    const reply = await engine.handleMessage('hello', '+447700900001');
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/region|hong kong|singapore|india|philippines/i);
+    expect(reply).not.toMatch(/select your language/i);
     expect(reply).not.toMatch(/register as new patient/i);
+  });
+
+  test('unknown-region number picks HK → language selection shown next', async () => {
+    await engine.handleMessage('hello', '+447700900003');
+    const reply = await engine.handleMessage('1', '+447700900003'); // pick HK (first region option)
+    expect(String(reply)).toMatch(/select your language/i);
+  });
+
+  test('unknown-region number picks SG → main menu shown directly (no language prompt)', async () => {
+    await engine.handleMessage('hello', '+447700900004');
+    const reply = await engine.handleMessage('2', '+447700900004'); // pick SG (second region option)
+    expect(String(reply)).toMatch(/register as new patient/i);
+    expect(String(reply)).not.toMatch(/select your language/i);
   });
 
   test('verified user sends "hi" → bypasses region entirely, sees verified menu', async () => {
@@ -7582,17 +7667,17 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('unknown-region multi-turn: hello → pick language → pick region → pick Register → first name (4 steps, not 5)', async () => {
+  test('unknown-region multi-turn (HK): hello → pick region → pick language → pick Register → first name (4 steps, not 5)', async () => {
     const phone = '+447700900002';
-    // Step 1: "hello" → should show language selection (asked before region)
+    // Step 1: "hello" → should show region selection (asked before language)
     const r1 = await engine.handleMessage('hello', phone);
-    expect(String(r1)).toMatch(/select your language/i);
+    expect(String(r1)).toMatch(/region|hong kong|singapore/i);
 
-    // Step 2: "1" → picks English → should show region selection
+    // Step 2: "1" → picks first region (HK) → should show language selection
     const r2 = await engine.handleMessage('1', phone);
-    expect(String(r2)).toMatch(/region|hong kong|singapore/i);
+    expect(String(r2)).toMatch(/select your language/i);
 
-    // Step 3: "1" → picks first region (HK) → should show main unverified menu
+    // Step 3: "1" → picks English → should show main unverified menu
     const r3 = await engine.handleMessage('1', phone);
     expect(String(r3)).toMatch(/register as new patient/i);
 
@@ -7601,6 +7686,19 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(String(r4)).toMatch(/first name/i);
     expect(String(r4)).not.toMatch(/register as new patient/i);
     expect(String(r4)).not.toMatch(/region|hong kong/i);
+  });
+
+  test('unknown-region multi-turn (SG): hello → pick region → straight to Register → first name (no language step)', async () => {
+    const phone = '+447700900005';
+    const r1 = await engine.handleMessage('hello', phone);
+    expect(String(r1)).toMatch(/region|hong kong|singapore/i);
+
+    const r2 = await engine.handleMessage('2', phone); // pick SG (second region option)
+    expect(String(r2)).toMatch(/register as new patient/i);
+    expect(String(r2)).not.toMatch(/select your language/i);
+
+    const r3 = await engine.handleMessage('1', phone); // pick Register
+    expect(String(r3)).toMatch(/first name/i);
   });
 });
 
