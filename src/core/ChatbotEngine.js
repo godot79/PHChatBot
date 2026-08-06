@@ -4232,7 +4232,7 @@ if (/^p(rev)?$/i.test(text)) {
       const slotData = {
         slot_list: slots,
         slot_page: 0,
-        last_selection_flow: 'specific_clinic',
+        last_selection_flow: 'clinic',
         prev_state_data: {
           selected_physio: data.selected_physio,
           selected_clinic: data.selected_clinic,
