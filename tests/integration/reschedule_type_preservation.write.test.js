@@ -52,9 +52,15 @@ let chosenPracId    = null;
 let firstSlot       = null; // raw slot from getAvailableTimes (has appointment_start + appointment_end)
 let bookedApptId    = null; // set in write test, used for cleanup
 
-beforeAll(() => {
+const { acquireLiveLock, releaseLiveLock } = require('./_liveTestLock');
+
+beforeAll(async () => {
+  // Cross-process mutex — this file and cliniko.live.test.js both hit live
+  // Cliniko; running in parallel Jest workers causes real 429s that look like
+  // flaky assertion failures elsewhere but are actually cross-file contention.
+  if (LIVE) await acquireLiveLock();
   api = new ClinikoAPI();
-});
+}, 65_000);
 
 afterAll(async () => {
   // Safety net: cancel any appointment we created, even if a test failed mid-way.
@@ -66,6 +72,7 @@ afterAll(async () => {
       console.error(`[cleanup] Failed to cancel ${bookedApptId}:`, e?.message || e);
     }
   }
+  if (LIVE) releaseLiveLock();
 });
 
 // =============================================================================
