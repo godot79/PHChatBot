@@ -17,6 +17,19 @@ Production repo: Cloud Run WhatsApp booking bot with Meta webhooks and Cliniko i
 - When the user has already answered prior uncertainty questions, do not re-ask them. Convert confirmed answers into the smallest concrete next action.
 - At the start of each session working in this repo, check the `project-deferred-items` memory for open/known-but-deferred issues before starting new work — surface anything relevant rather than waiting to be asked.
 
+## How to investigate a suspected bug (do not guess)
+Never diagnose from a symptom alone ("tests are flaky," "this looks like network flakiness," "add a retry"). Measure the actual behavior first, form a hypothesis from the data, calibrate a fix against real numbers, then verify the fix with the same measurement method that found the problem. Guessing-then-patching is not acceptable even if the patch happens to help.
+
+**Worked example (2026-08-06, live-Cliniko test flakiness):**
+1. Initial (wrong) move: assumed "network flakiness," added a blind retry-once-on-429 and a test-file lock without measuring anything. This helped a little but didn't explain or fix the real problem — called out as guessing, not engineering.
+2. Corrected approach: instrumented every real `SendMessage.get()` call with timestamp + worker PID + outcome, ran the actual failing suite, and analyzed the resulting log (concurrency-over-time sweep, request-rate-over-time buckets) instead of theorizing.
+3. Found the real pattern from the data: a 5-second burst of ~149 real requests (~30 req/s) was immediately followed by ~45-50 seconds of total lockout — every request failed regardless of pacing, not a soft throttle recovering gradually.
+4. Calibrated a safe threshold empirically against the live account (not guessed): concurrency 3/5/8 sustained for 10s each — zero failures up to ~18 req/s (concurrency 8, 180 requests). Concurrency 15 (the actual production `BULK_CONCURRENCY_LIMIT` at the time) reliably tripped the lockout within ~6 seconds.
+5. This pinpointed the actual root cause: `BULK_CONCURRENCY_LIMIT = 15` (set for a *different*, earlier problem — gateway timeouts) was high enough to trip Cliniko's real rate limit on its own, from ordinary production traffic (Book Soonest's catalogue build fans out to ~30-40 practitioners) — a real production risk, not just test noise.
+6. Fix was the calibrated value (8, the highest empirically-zero-failure point), with the calibration numbers written into the code comment and a pinned regression test, plus a live verification re-running the actual production fan-out function (not a synthetic script) against every real practitioner to confirm zero failures.
+
+Apply this shape to any "flaky," "sometimes fails," "seems slow," or "network issue" report in this repo: instrument and measure the real system first (logs, counters, timing), form a hypothesis only from that data, calibrate any threshold/limit/timeout against real behavior rather than picking a number, and verify the fix the same way the problem was found — not just "tests pass now."
+
 ## Change protocol
 For any non-trivial task:
 1. Briefly state understanding.
