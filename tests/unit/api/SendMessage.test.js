@@ -90,4 +90,17 @@ describe('SendMessage — bulk concurrency gate', () => {
     bulkResolvers.splice(0).forEach((r) => r());
     await bulkPromise;
   });
+
+  // Regression: BULK_CONCURRENCY_LIMIT was 15, calibrated down to 8 (2026-08-06)
+  // after live testing showed concurrency=15 (~33 req/s) reliably trips a real
+  // Cliniko 429 within ~6s, then locks the account out of ALL requests for
+  // ~45-50s -- a real production risk (any live catalogue-build fan-out could
+  // trigger it), not just test flakiness. concurrency=8 (~18 req/s sustained,
+  // 180 requests over 10s) produced zero failures in the same live calibration.
+  // This value must not be raised without a fresh live calibration first --
+  // pins the value so an uncalibrated bump doesn't silently reintroduce the
+  // lockout risk.
+  test('BULK_CONCURRENCY_LIMIT is 8 (live-calibrated 2026-08-06, do not raise without recalibrating)', () => {
+    expect(SendMessage.BULK_CONCURRENCY_LIMIT).toBe(8);
+  });
 });

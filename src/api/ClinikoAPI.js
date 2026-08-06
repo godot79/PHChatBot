@@ -61,6 +61,27 @@ class ClinikoAPI {
   }
 
   /**
+   * GET with a single retry on a 429, after a short delay. Scoped to the
+   * cacheable lookups below (getAppointmentTypes, getPractitionersForClinic,
+   * getBusinessById, getAvailableTimes) where a bounded ~1.5s added latency on
+   * the rare rate-limited case is low-risk. Every other Cliniko fetch in this
+   * class keeps its existing fail-fast + _markPartial convention unchanged —
+   * this does not become a blanket retry layer.
+   * @param {string} url
+   * @param {object} [params]
+   * @returns {Promise<any>}
+   */
+  async _get429Retry(url, params = {}) {
+    try {
+      return await new SendMessage(url, params).get();
+    } catch (err) {
+      if (err?.status !== 429) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+      return await new SendMessage(url, params).get();
+    }
+  }
+
+  /**
    * Check if the Cliniko API is healthy.
    * @returns {Promise<{status: string, error?: any}>}
    */
@@ -84,7 +105,7 @@ class ClinikoAPI {
   async _getClinicsRaw() {
     const params = new URLSearchParams();
     params.append('q[]', 'show_in_online_bookings:=T');
-    const data = await new SendMessage(`/businesses?${params.toString()}`, {}).get();
+    const data = await this._get429Retry(`/businesses?${params.toString()}`);
     const clinics = data.businesses;
     const main_clinics = clinics.filter(item => !EXCLUDED_CLINIC_PATTERN.test(item.business_name));
     return main_clinics || [];
@@ -120,7 +141,7 @@ class ClinikoAPI {
     try {
       const url = `/businesses/${business_id}/practitioners?${params.toString()}`;
       console.debug(`Fetching physios : ${url}`);
-      const practitioners = await new SendMessage(url, {}).get();
+      const practitioners = await this._get429Retry(url);
       const result = practitioners.practitioners || [];
       _cacheSet(_practitionersForClinicCache, cacheKey, result, GROUPS_CACHE_TTL_MS);
       return result;
@@ -141,7 +162,7 @@ class ClinikoAPI {
     try {
       const params = new URLSearchParams();
       params.append('q[]', `email:=${email}`);
-      const data = await new SendMessage(`/patients?${params.toString()}`, {}).get();
+      const data = await this._get429Retry(`/patients?${params.toString()}`);
       return data.patients?.[0] || null;
     } catch (error) {
       this.logger.error(`verifyPatientByEmail failed for ${email}`);
@@ -298,7 +319,7 @@ class ClinikoAPI {
     if (cached) return cached;
 
     try {
-      const result = await new SendMessage(url, {}).get();
+      const result = await this._get429Retry(url);
       console.info(`Total slots : ${result.total_entries}`);
       console.info(result.available_times?.[0]);
       const output = result.available_times || [];
@@ -340,7 +361,7 @@ class ClinikoAPI {
     console.debug(`Fetching appointment types: ${url}`);
 
     try {
-      const result = await new SendMessage(url, {}).get();
+      const result = await this._get429Retry(url);
       const allTypes = result.appointment_types;
       const onlineBookingTypes = allTypes.filter(type => type.show_in_online_bookings === true);
       console.log(`Filtered to ${onlineBookingTypes.length} types that show in online bookings`);
@@ -890,7 +911,7 @@ class ClinikoAPI {
 
     try {
       const url = `/businesses/${businessId}`;
-      const result = await new SendMessage(url, {}).get();
+      const result = await this._get429Retry(url);
       // The response IS the business object, NOT { business: ... }
       if (result && result.id) {
         _cacheSet(_businessByIdCache, cacheKey, result, GROUPS_CACHE_TTL_MS);

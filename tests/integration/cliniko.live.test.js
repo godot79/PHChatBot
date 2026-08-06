@@ -729,16 +729,35 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
       .slice(0, 3);
     if (!candidateNames.length) { console.warn('[live] no appointment types found — skipping'); return; }
 
+    // Walks every page (not just page 0) so this actually proves the row-order
+    // invariant across the whole list, not just whatever happens to fit on the
+    // first page — a candidate type busy enough to have >5 physios previously
+    // produced a false failure here: page 0's 5 rendered names were compared
+    // against the full stored list instead of just page 0's slice (2026-08-06).
     let displayedNames = [];
     let session = null;
     let triedName = null;
     for (const name of candidateNames) {
       session = await seedSoonestAtType(name);
-      const reply = await tryLive(() => hk(() => engine.handleBookSoonest(session, '')));
-      if (reply === undefined) { console.warn('[live] rate-limited during physio sweep — skipping'); return; }
-      displayedNames = [...String(reply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+      const firstReply = await tryLive(() => hk(() => engine.handleBookSoonest(session, '')));
+      if (firstReply === undefined) { console.warn('[live] rate-limited during physio sweep — skipping'); return; }
+      const firstPageNames = [...String(firstReply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
       triedName = name;
-      if (displayedNames.length > 1) break; // found a live multi-physio list
+      if (firstPageNames.length <= 1) continue; // not a multi-physio list, try the next candidate
+
+      // Found a live multi-physio list — page through the rest with 'next'.
+      const allPageNames = [...firstPageNames];
+      let hasMore = /\bMore\b|\bnext\b/i.test(String(firstReply));
+      let guard = 0;
+      while (hasMore && guard++ < 20) {
+        const nextReply = await tryLive(() => hk(async () => engine.handleBookSoonest(await db.getSession(session.id), 'next')));
+        if (nextReply === undefined) { console.warn('[live] rate-limited while paging — skipping'); return; }
+        const pageNames = [...String(nextReply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+        allPageNames.push(...pageNames);
+        hasMore = /\bMore\b|\bnext\b/i.test(String(nextReply));
+      }
+      displayedNames = allPageNames;
+      break;
     }
 
     if (displayedNames.length < 2) {
@@ -753,7 +772,7 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
     );
 
     expect(displayedNames).toEqual(storedNames);
-  }, 90000);
+  }, 120000);
 
   // Reproduces the 2026-07-19 13:35 production incident: after choose_physio
   // finds 0 available practitioners for the selected type (real "no slots" or
