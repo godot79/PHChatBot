@@ -124,8 +124,18 @@ let cachedClinics = null;
 let cachedPractitioners = null;
 let cachedRawTypes = null; // getAllAppointmentTypesForAllPractitioners() result — ~30 live GETs, reused across describe blocks to avoid Cliniko rate limiting
 
-beforeAll(() => {
+const { acquireLiveLock, releaseLiveLock } = require('./_liveTestLock');
+
+beforeAll(async () => {
+  // Cross-process mutex — this file and reschedule_type_preservation.write.test.js
+  // both hit live Cliniko; running in parallel Jest workers causes real 429s that
+  // look like flaky assertion failures but are actually cross-file contention.
+  if (LIVE) await acquireLiveLock();
   api = new ClinikoAPI();
+}, 65_000);
+
+afterAll(() => {
+  if (LIVE) releaseLiveLock();
 });
 
 // Helper: run fn inside HK region context
@@ -1016,10 +1026,17 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
   let getSpy;
   let realGet;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     if (!LIVE) return;
+    // The preceding "concurrent-load 429s" describe block deliberately hammers
+    // Cliniko to trigger real 429s, and leaves the account rate-limited right as
+    // this block starts. A "second call was a real fetch, not a cache hit"
+    // assertion here is a false failure if that first call 429s (caught inside
+    // ClinikoAPI, cache never set, so the "cached" second call is a real miss
+    // too) -- same 429 backoff convention as tryLive() above, not a caching bug.
+    await new Promise(r => setTimeout(r, 5000));
     ClinikoAPI._clearGroupsCache();
-  });
+  }, 15000);
 
   beforeEach(() => {
     if (!LIVE) return;
