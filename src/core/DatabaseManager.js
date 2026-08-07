@@ -218,6 +218,23 @@ class DatabaseManager {
     });
   }
 
+  // Delete all session rows for a phone number
+  async deleteSessionsByPhone(phoneNumber) {
+    return new Promise((resolve, reject) => {
+      this.db.run(
+        `DELETE FROM sessions WHERE phone_number = ?`,
+        [phoneNumber],
+        function(err) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(this.changes);
+          }
+        }
+      );
+    });
+  }
+
   // Clean up expired sessions
   async cleanupExpiredSessions() {
     return new Promise((resolve, reject) => {
