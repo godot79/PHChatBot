@@ -204,6 +204,9 @@ const STRINGS = {
       noPractitionersAtClinicForType: 'No practitioners at {{clinic}} offer {{type}} right now.',
       choosePhysioForClinic: 'Choose a physio for {{clinic}}:',
     },
+    insurerNoMatch: {
+      suffix: 'No slots matched your *{{insurer}}* preference specifically — you can change or clear it anytime from Change Preferences in the main menu.',
+    },
   },
   yue: {
     common: {
@@ -393,6 +396,9 @@ const STRINGS = {
       noPractitionersAtClinicForType: '而家 {{clinic}} 冇物理治療師提供 {{type}}。',
       choosePhysioForClinic: '請揀一位喺 {{clinic}} 嘅物理治療師：',
     },
+    insurerNoMatch: {
+      suffix: '暫時搵唔到符合你 *{{insurer}}* 偏好嘅時段 — 你可以隨時喺主選單嘅「Change Preferences」度更改或者清除呢個偏好。',
+    },
   },
   zh: {
     common: {
@@ -581,6 +587,9 @@ const STRINGS = {
       selectVisitTypeForClinic: '请选择 {{clinic}} 的就诊类型：',
       noPractitionersAtClinicForType: '目前 {{clinic}} 没有理疗师提供 {{type}}。',
       choosePhysioForClinic: '请选择一位在 {{clinic}} 的理疗师：',
+    },
+    insurerNoMatch: {
+      suffix: '暂时没有符合你 *{{insurer}}* 偏好的时段 — 你可以随时在主菜单的“Change Preferences”中更改或清除这个偏好。',
     },
   },
 };
