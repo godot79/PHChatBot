@@ -62,3 +62,28 @@ describe('SessionManager.normalizePhoneNumber', () => {
     expect(sm.normalizePhoneNumber(input)).toBe(expected);
   });
 });
+
+describe('SessionManager.getRegionFromPhoneNumber', () => {
+  let sm;
+
+  beforeAll(() => {
+    sm = new SessionManager({ on: () => {} });
+  });
+
+  const cases = [
+    // Singapore: CC 65 + 8-digit local = 10 bare digits — must NOT become India
+    ['+6592000001', 'SG'],
+    ['6592000001', 'SG'],
+    // India: bare 10-digit not starting with 65
+    ['9100000001', 'IN'],
+    ['+919100000001', 'IN'],
+    // Philippines
+    ['+639123456789', 'PH'],
+    // Hong Kong local 8-digit (starts 5-7, distinct from SG's 8/9-prefix range)
+    ['61234567', 'HK'],
+  ];
+
+  test.each(cases)('getRegionFromPhoneNumber(%s).region === %s', (input, expectedRegion) => {
+    expect(sm.getRegionFromPhoneNumber(input).region).toBe(expectedRegion);
+  });
+});

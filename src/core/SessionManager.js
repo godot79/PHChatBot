@@ -1083,7 +1083,10 @@ class SessionManager {
       if (/^0\d{10}$/.test(digits)) {
         return { region: 'IN', countryCode: '91', nationalNumber: digits.slice(-10) };
       }
-      if (/^\d{10}$/.test(digits)) {
+      // Bare 10-digit fallback to India — but not if it's actually a Singapore
+      // number (CC 65 + 8-digit local also totals 10 digits), matching the
+      // ordering already used by normalizePhoneNumber().
+      if (/^\d{10}$/.test(digits) && !normalized.startsWith('65')) {
         return { region: 'IN', countryCode: '91', nationalNumber: digits };
       }
 
