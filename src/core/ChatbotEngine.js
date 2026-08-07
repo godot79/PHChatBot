@@ -11,6 +11,7 @@ const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointment
 const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage } = require('../config/regions');
 const { LANGUAGE_LABELS } = require('../config/languages');
 const { t } = require('../config/strings');
+const { translateInsurerName } = require('../config/insurerTranslations');
 const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
@@ -2396,7 +2397,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_HISTORY, {
           context: 'history',
           result: raw,
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookHistory.noSlotsForCombo') + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookHistory.noSlotsForCombo') + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -2465,6 +2466,7 @@ if (/^p(rev)?$/i.test(text)) {
    * @returns {{ reply?: MessageEnvelope }} reply while asking; {} once resolved.
    */
   _stepTypeInsurer(session, data, text) {
+    const language = this._getSessionLanguage(session);
     const entries = data.selected_appt_type?.entries || [];
     const insurers = [...new Set(entries.map(e => e.insurer).filter(i => i !== null))].sort();
 
@@ -2486,6 +2488,9 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     const options = ['Self-pay', ...insurers];
+    const translatedOptions = options.map(o => o === 'Self-pay'
+      ? t(language, 'bookSoonest.funnelSelfPay')
+      : translateInsurerName(o, language, this.logger));
 
     // Same paging convention as _stepApptFunnel's insurer stage — a list beyond
     // a handful of insurers must page like every other interactive list here
@@ -2510,9 +2515,9 @@ if (/^p(rev)?$/i.test(text)) {
 
     const badInput = text !== '';
     const menu = options.length <= 3
-      ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-      : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
-    return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+      ? buttons(t(language, 'bookSoonest.funnelHowCovered'), translatedOptions.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
+      : buildInteractiveSelectionList({ header: t(language, 'bookSoonest.funnelHowCovered'), items: translatedOptions, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
+    return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
   }
 
   /**
@@ -2522,10 +2527,11 @@ if (/^p(rev)?$/i.test(text)) {
    * Makes it clear the shortage is insurer-specific, not a hard "fully
    * booked" — and points at where to change it without hunting for it.
    */
-  _insurerNoMatchSuffix(selectedApptType) {
+  _insurerNoMatchSuffix(selectedApptType, language) {
     const insurer = selectedApptType && selectedApptType.insurer;
     if (!insurer) return '';
-    return ` No slots matched your *${insurer}* preference specifically — you can change or clear it anytime from Change Preferences in the main menu.`;
+    const displayInsurer = translateInsurerName(insurer, language || 'en', this.logger);
+    return ` ${t(language || 'en', 'insurerNoMatch.suffix', { insurer: displayInsurer })}`;
   }
 
   async _stepApptFunnel(session, data, text) {
@@ -2975,7 +2981,7 @@ if (/^p(rev)?$/i.test(text)) {
           retryStep: 'choose_type',
           result: practitioners,
           confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noPhysiosForType', { name: data.selected_appt_type.name })
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -3086,7 +3092,7 @@ if (/^p(rev)?$/i.test(text)) {
             retryStep: 'choose_clinic',
             result: slotResults0,
             confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: data.selected_appt_type.name, physio: getPractitionerDisplayName(data.selected_physio) })
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
 
@@ -3154,7 +3160,7 @@ if (/^p(rev)?$/i.test(text)) {
           retryStep: 'choose_clinic',
           result: raw,
           confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForType', { name: data.selected_appt_type?.name })
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -3547,7 +3553,7 @@ if (/^p(rev)?$/i.test(text)) {
             retryLabel: t(this._getSessionLanguage(session), 'bookSpecificDate.tryAnotherPhysio'),
             result: slotResults1,
             confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: data.selected_appt_type?.name || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio) })
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
 
@@ -3619,7 +3625,7 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'date',
           result: raw,
           confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsAtClinicForDate', { type: data.selected_appt_type?.name, clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' })
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -3909,7 +3915,7 @@ if (/^p(rev)?$/i.test(text)) {
             retryLabel: t(this._getSessionLanguage(session), 'bookSpecificPhysio.tryAnotherType'),
             result: slotResults2,
             confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio), type: data.selected_appt_type?.name || 'that visit type' })
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
 
@@ -3983,7 +3989,7 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'physio',
           result: raw,
           confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName(data.selected_clinic) || 'this clinic' })
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -4296,7 +4302,7 @@ if (/^p(rev)?$/i.test(text)) {
             context: 'clinic_physio_list',
             result: [groups, hadPhysioTypeFailure ? _markPartial([]) : []],
             confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noPractitionersAtClinicForType', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic', type: data.selected_appt_type?.name || 'this visit type' })
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
       }
@@ -4371,7 +4377,7 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'clinic',
           result: raw,
           confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: data.selected_appt_type?.name || 'this appointment type', clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic' })
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
