@@ -91,6 +91,27 @@ describe('Verified-user carryover survives session expiry + cleanup', () => {
     expect(s2.verified).toBeFalsy();
   });
 
+  test('logout is not undone by an older, still-verified session row left over from a natural expiry (2026-08-07 UK-tester region-switch loop)', async () => {
+    // s1: verified session, then goes idle and expires naturally (row NOT deleted,
+    // matching production — the cleanup job only runs every 10 min).
+    const s1 = await sm.getOrCreateSession(phone);
+    await sm.updateSession(s1.id, { verified: true, patient_id: 'PAT-123', conversation_state: 'BOOK_MANAGE_OPTIONS' });
+    await db.upsertPatientState(phone, { patient_id: 'PAT-123', verified: true });
+    await db.query(`UPDATE sessions SET expires_at = datetime('now', '-1 minutes') WHERE id = ?`, [s1.id]);
+
+    // Next message creates s2, which (correctly) carries the verified state forward.
+    const s2 = await sm.getOrCreateSession(phone);
+    expect(s2.conversation_state).toBe('BOOK_MANAGE_OPTIONS');
+
+    // User explicitly logs out (or triggers the "region" global-interception logout) —
+    // this must not be undone by s1, which is still sitting in the table, still verified=1.
+    await sm.deleteSessionAndData(s2.id);
+
+    const s3 = await sm.getOrCreateSession(phone, true);
+    expect(s3.conversation_state).toBe('INTRO');
+    expect(s3.verified).toBeFalsy();
+  });
+
   test('unverified prior session does not get promoted to BOOK_MANAGE_OPTIONS', async () => {
     const s1 = await sm.getOrCreateSession(phone);
     await db.query(`UPDATE sessions SET expires_at = datetime('now', '-1 minutes') WHERE id = ?`, [s1.id]);
