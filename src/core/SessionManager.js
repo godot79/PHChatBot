@@ -1098,16 +1098,16 @@ class SessionManager {
       if (normalized.startsWith('91') && normalized.length >= 12) {
         return { region: 'IN', countryCode: '91', nationalNumber: normalized.slice(-10) };
       }
-      // 0XXXXXXXXXX (11 digits, local)
-      if (/^0\d{10}$/.test(digits)) {
-        return { region: 'IN', countryCode: '91', nationalNumber: digits.slice(-10) };
-      }
-      // Bare 10-digit fallback to India — but not if it's actually a Singapore
-      // number (CC 65 + 8-digit local also totals 10 digits), matching the
-      // ordering already used by normalizePhoneNumber().
-      if (/^\d{10}$/.test(digits) && !normalized.startsWith('65')) {
-        return { region: 'IN', countryCode: '91', nationalNumber: digits };
-      }
+      // NOTE: a bare 10-digit number or an 11-digit "0XXXXXXXXXX" local-format
+      // number used to be assumed Indian here. That guess is genuinely ambiguous —
+      // a UK domestic mobile ("07863464276") or a US local number without a
+      // country code look identical to Indian domestic format, and there's no way
+      // to tell them apart from digits alone. Real WhatsApp traffic never hits this
+      // branch anyway (Meta's wa_id always includes the full country code, e.g.
+      // "917863464276" for India, which the check above already handles), so this
+      // only ever fired for manually-typed test numbers via /test-message. Removed
+      // rather than guessed — falls through to the "unrecognized" return below,
+      // same as any other unsupported country, prompting manual region selection.
 
       // ---- Philippines 🇵🇭 ----
       if (normalized.startsWith('63') && (normalized.length === 12 || normalized.length === 11)) {
