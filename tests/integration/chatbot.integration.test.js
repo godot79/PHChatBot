@@ -4777,6 +4777,114 @@ describe('Language selection (English/Cantonese/Mandarin)', () => {
 });
 
 // =============================================================================
+// SUITE — Phase 3b: clinic name translation (yue/zh)
+// =============================================================================
+describe('Clinic name translation (Phase 3b, yue/zh)', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+8529${String(++phoneSeq).padStart(6, '0')}`;
+
+  // A clinic that IS in the translation table (src/config/clinicTranslations.js)
+  const TRANSLATED_CLINIC = { id: 'BIZ-WS', business_name: 'Wellington Street, Central' };
+  const TRANSLATED_CLINIC_ZH = '中環威靈頓街';
+  // A clinic that is NOT in the table — must fall back to English, never crash.
+  const UNKNOWN_CLINIC = { id: 'BIZ-XX', business_name: 'Some Future Clinic' };
+  const PHYSIO = { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' };
+  const APPT_TYPE = { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'] };
+  const SLOT = { practitioner_id: 'PRAC-001', business_id: 'BIZ-WS', appointment_type_id: 'AT-001', slot: '2026-08-20T02:00:00Z' };
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedAt(state, extraData = {}, language = 'yue') {
+    const phone = nextPhone();
+    const session = await seedVerified(db, phone, extraData);
+    await db.updateSession(session.id, { conversation_state: state, context: JSON.stringify({ region: 'HK', language }) });
+    return db.getSession(session.id);
+  }
+
+  describe('BOOK_SPECIFIC_CLINIC — clinic list', () => {
+    test('yue session sees the translated Chinese clinic name in the clinic list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-WS', clinic_name: 'Wellington Street, Central', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+      expect(reply).not.toContain('Wellington Street, Central');
+    });
+
+    test('zh session sees the same translated Chinese clinic name (yue/zh share one table)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-WS', clinic_name: 'Wellington Street, Central', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'zh');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+    });
+
+    test('en session still sees the English clinic name (no regression)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-WS', clinic_name: 'Wellington Street, Central', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'en');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain('Wellington Street, Central');
+      expect(reply).not.toContain(TRANSLATED_CLINIC_ZH);
+    });
+
+    test('a clinic name not in the translation table falls back to English for a yue session (never blocks booking)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-XX', clinic_name: 'Some Future Clinic', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain('Some Future Clinic');
+    });
+  });
+
+  describe('BOOK_SPECIFIC_CLINIC — slot list header carries the translated clinic name', () => {
+    test('yue session: view_slots header shows the translated clinic name, not English', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SLOT]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'view_slots',
+        selected_clinic: TRANSLATED_CLINIC,
+        selected_physio: PHYSIO,
+        selected_appt_type: APPT_TYPE,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+    });
+  });
+
+  describe('Slot-selection confirmation summary carries the translated clinic name', () => {
+    test('yue session: "you have selected" header shows the translated clinic name', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT],
+        slot_page: 0,
+        prev_state_data: {
+          selected_appt_type: APPT_TYPE,
+          selected_physio: PHYSIO,
+          selected_clinic: TRANSLATED_CLINIC,
+        },
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, '1'));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+    });
+  });
+});
+
+// =============================================================================
 // SUITE — Dead-end standardization
 // =============================================================================
 describe('Dead-end standardization', () => {
