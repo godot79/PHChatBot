@@ -13,6 +13,7 @@ const { LANGUAGE_LABELS } = require('../config/languages');
 const { t } = require('../config/strings');
 const { translateInsurerName } = require('../config/insurerTranslations');
 const { translateClinicName } = require('../config/clinicTranslations');
+const { translatePractitionerName } = require('../config/practitionerTranslations');
 const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
@@ -410,14 +411,17 @@ function deduplicateSlots(slots) {
 /**
  * Returns a displayable practitioner name from a practitioner object.
  * @param {Object|null|undefined} practitioner
+ * @param {string} [language] - defaults to 'en'; translated via practitionerTranslations when yue/zh
+ * @param {Object} [logger]
  * @returns {string}
  */
-function getPractitionerDisplayName(practitioner) {
+function getPractitionerDisplayName(practitioner, language, logger) {
   if (!practitioner) return 'Practitioner';
-  if (practitioner.display_name) return practitioner.display_name;
-  if (practitioner.first_name || practitioner.last_name)
-    return [practitioner.first_name, practitioner.last_name].filter(Boolean).join(' ');
-  return 'Practitioner';
+  const name = practitioner.display_name
+    || (practitioner.first_name || practitioner.last_name
+        ? [practitioner.first_name, practitioner.last_name].filter(Boolean).join(' ')
+        : 'Practitioner');
+  return translatePractitionerName(name, language || 'en', logger);
 }
 
 /**
@@ -509,7 +513,7 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz, langua
     const apptTypeObj = apptTypeMap[apptTypeId] || null;
     const businessObj = businessMap[businessId] || null;
 
-    appt._practitioner_display = getPractitionerDisplayName(practitionerObj);
+    appt._practitioner_display = getPractitionerDisplayName(practitionerObj, language);
     appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj);
     appt._business_display = getBusinessDisplayName(businessObj, language);
     appt._display_dt = formatSlotDateTime(appt.starts_at, tz);
@@ -1793,7 +1797,7 @@ async handleMessageEnvelope(message, phoneNumber) {
   _buildNoSlotsSummary(session, data) {
     const src = (key) => data[key] || data.prev_state_data?.[key];
     const apptName = src('selected_appt_type')?.name || '';
-    const physio   = getPractitionerDisplayName(src('selected_physio'));
+    const physio   = getPractitionerDisplayName(src('selected_physio'), this._getSessionLanguage(session), this.logger);
     const clinicObj = src('selected_clinic');
     const clinic   = clinicObj?.business_name || (typeof clinicObj === 'string' ? clinicObj : '');
     const userPhone = session.phone_number || session.phoneNumber || '';
@@ -2219,7 +2223,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const reply = buildInteractiveSelectionList({
         items: list,
         rowFn: (p) => ({
-          title: getPractitionerDisplayName(p.practitioner) || '',
+          title: getPractitionerDisplayName(p.practitioner, this._getSessionLanguage(session), this.logger) || '',
           description: t(language, 'bookHistory.lastSeen', { date: formatSlotDateTime(p.last_seen, this._regionTz(session)) })
         }),
         page: data.history_physio_page || 0,
@@ -2293,7 +2297,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        header: t(this._getSessionLanguage(session), 'bookHistory.chooseApptType', { name: getPractitionerDisplayName(data.selected_physio) })
+        header: t(this._getSessionLanguage(session), 'bookHistory.chooseApptType', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
       return reply2;
     }
@@ -2422,7 +2426,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
+      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
       return this._buildSlotList(filtered, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
@@ -2893,7 +2897,7 @@ if (/^p(rev)?$/i.test(text)) {
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
           const reply = buildInteractiveSelectionList({
             items: data.practitioner_list,
-            rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
+            rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
             header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: data.selected_appt_type?.name || '' })
       });
@@ -2995,7 +2999,7 @@ if (/^p(rev)?$/i.test(text)) {
       if (practitioners.length > 1) {
         const reply = buildInteractiveSelectionList({
           items: data.practitioner_list,
-          rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
+          rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
           page: 0,
           header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: data.selected_appt_type.name })
       });
@@ -3039,7 +3043,7 @@ if (/^p(rev)?$/i.test(text)) {
 
       const reply = buildInteractiveSelectionList({
         items: practitionerList,
-        rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
+        rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
         page,
         header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: data.selected_appt_type?.name || '' })
       });
@@ -3095,7 +3099,7 @@ if (/^p(rev)?$/i.test(text)) {
             context: 'soonest',
             retryStep: 'choose_clinic',
             result: slotResults0,
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: data.selected_appt_type.name, physio: getPractitionerDisplayName(data.selected_physio) })
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: data.selected_appt_type.name, physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
               + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
@@ -3128,7 +3132,7 @@ if (/^p(rev)?$/i.test(text)) {
           items: clinics,
           rowFn: (c) => ({ title: String(c.business_name) }),
           page,
-          header: t(this._getSessionLanguage(session), 'bookSoonest.selectClinic', { name: getPractitionerDisplayName(data.selected_physio) })
+          header: t(this._getSessionLanguage(session), 'bookSoonest.selectClinic', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
         return reply;
       }
@@ -3183,7 +3187,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
+      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
       return this._buildSlotList(filtered, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
@@ -3508,7 +3512,7 @@ if (/^p(rev)?$/i.test(text)) {
       const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
       const reply = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
         header: t(this._getSessionLanguage(session), 'bookSpecificDate.choosePhysioForDate', { type: data.selected_appt_type?.name || 'visit', date: headerDate })
       });
@@ -3556,7 +3560,7 @@ if (/^p(rev)?$/i.test(text)) {
             retryStep: 'choose_physio',
             retryLabel: t(this._getSessionLanguage(session), 'bookSpecificDate.tryAnotherPhysio'),
             result: slotResults1,
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: data.selected_appt_type?.name || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio) })
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: data.selected_appt_type?.name || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
               + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
@@ -3594,7 +3598,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
         page: data.clinic_page || 0,
-        header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectClinicForDate', { physio: getPractitionerDisplayName(data.selected_physio), date: headerDate })
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectClinicForDate', { physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger), date: headerDate })
       });
       return reply;
     }
@@ -3648,7 +3652,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
+      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
       return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
@@ -3795,7 +3799,7 @@ if (/^p(rev)?$/i.test(text)) {
 
       const reply = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
         header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.choosePhysio')
       });
@@ -3828,7 +3832,7 @@ if (/^p(rev)?$/i.test(text)) {
       if ((data.appointment_type_list || []).length === 0) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
           context: 'physio',
-          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noVisitTypesForPhysio', { name: getPractitionerDisplayName(data.selected_physio) || 'this practitioner' }),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noVisitTypesForPhysio', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) || 'this practitioner' }),
         });
       }
 
@@ -3860,7 +3864,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(a.name) }),
         page: data.appt_type_page || 0,
-        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectVisitTypeForPhysio', { name: getPractitionerDisplayName(data.selected_physio) })
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectVisitTypeForPhysio', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
       return reply;
     }
@@ -3918,7 +3922,7 @@ if (/^p(rev)?$/i.test(text)) {
             retryStep: 'choose_type',
             retryLabel: t(this._getSessionLanguage(session), 'bookSpecificPhysio.tryAnotherType'),
             result: slotResults2,
-            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio), type: data.selected_appt_type?.name || 'that visit type' })
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger), type: data.selected_appt_type?.name || 'that visit type' })
               + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
@@ -3955,7 +3959,7 @@ if (/^p(rev)?$/i.test(text)) {
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
         page: data.clinic_page || 0,
-        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectClinicForPhysio', { name: getPractitionerDisplayName(data.selected_physio) })
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectClinicForPhysio', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
       return reply;
     }
@@ -4011,7 +4015,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
+      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
       return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
@@ -4338,7 +4342,7 @@ if (/^p(rev)?$/i.test(text)) {
 
       const replyPhys = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name || p.id)) }),
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name || p.name || p.id)) }),
         page: data.practitioner_page || 0,
         header: t(this._getSessionLanguage(session), 'bookSpecificClinic.choosePhysioForClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : '' })
       });
@@ -4400,7 +4404,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : ''}`;
+      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : ''}`;
       return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
@@ -4554,7 +4558,7 @@ if (/^p(rev)?$/i.test(text)) {
       // Build concise confirmation with context in header
       const headerParts = [];
       if (data.prev_state_data?.selected_appt_type?.name) headerParts.push(`${data.prev_state_data.selected_appt_type.name}`);
-      if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) headerParts.push(`${data.prev_state_data.selected_physio.display_name || data.prev_state_data.selected_physio.first_name}`);
+      if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) headerParts.push(getPractitionerDisplayName(data.prev_state_data.selected_physio, this._getSessionLanguage(session), this.logger));
       if (data.prev_state_data?.selected_clinic?.business_name) headerParts.push(getBusinessDisplayName(data.prev_state_data.selected_clinic, this._getSessionLanguage(session), this.logger));
       const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || t(this._getSessionLanguage(session), 'slotSelection.defaultApptFallback'));
 
@@ -4573,7 +4577,7 @@ if (/^p(rev)?$/i.test(text)) {
       const parts = [];
       if (data.prev_state_data?.selected_appt_type?.name) parts.push(data.prev_state_data.selected_appt_type.name);
       if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) {
-        parts.push(data.prev_state_data.selected_physio.display_name || data.prev_state_data.selected_physio.first_name);
+        parts.push(getPractitionerDisplayName(data.prev_state_data.selected_physio, this._getSessionLanguage(session), this.logger));
       }
       if (data.prev_state_data?.selected_clinic?.business_name) parts.push(getBusinessDisplayName(data.prev_state_data.selected_clinic, this._getSessionLanguage(session), this.logger));
       header = parts.join(' • ');

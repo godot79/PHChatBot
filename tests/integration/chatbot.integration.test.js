@@ -4885,6 +4885,114 @@ describe('Clinic name translation (Phase 3b, yue/zh)', () => {
 });
 
 // =============================================================================
+// SUITE — Phase 3c: practitioner name translation (yue/zh)
+// =============================================================================
+describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+8528${String(++phoneSeq).padStart(6, '0')}`;
+
+  // A practitioner IS in the translation table (src/config/practitionerTranslations.js)
+  const TRANSLATED_PHYSIO = { id: 'PRAC-LEO', first_name: 'Leo', last_name: 'Choi' };
+  const TRANSLATED_PHYSIO_ZH = '蔡楚基';
+  // A practitioner NOT in the table — must fall back to English, never crash.
+  const UNKNOWN_PHYSIO = { id: 'PRAC-XX', first_name: 'Future', last_name: 'Hire' };
+  const CLINIC = { id: 'BIZ-001', business_name: 'Prohealth In Touch' }; // not in clinicTranslations, en-only fixture
+  const APPT_TYPE = { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'] };
+  const SLOT = { practitioner_id: 'PRAC-LEO', business_id: 'BIZ-001', appointment_type_id: 'AT-001', slot: '2026-08-20T02:00:00Z' };
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedAt(state, extraData = {}, language = 'yue') {
+    const phone = nextPhone();
+    const session = await seedVerified(db, phone, extraData);
+    await db.updateSession(session.id, { conversation_state: state, context: JSON.stringify({ region: 'HK', language }) });
+    return db.getSession(session.id);
+  }
+
+  describe('BOOK_SPECIFIC_PHYSIO — physio list', () => {
+    test('yue session sees the translated Chinese practitioner name in the physio list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+      expect(reply).not.toContain('Leo Choi');
+    });
+
+    test('zh session sees the same translated Chinese practitioner name (yue/zh share one table)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'zh');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+    });
+
+    test('en session still sees the English practitioner name (no regression)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'en');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain('Leo Choi');
+      expect(reply).not.toContain(TRANSLATED_PHYSIO_ZH);
+    });
+
+    test('a practitioner not in the translation table falls back to English for a yue session (never blocks booking)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [UNKNOWN_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain('Future Hire');
+    });
+  });
+
+  describe('BOOK_SPECIFIC_PHYSIO — slot list header carries the translated practitioner name', () => {
+    test('yue session: view_slots header shows the translated practitioner name, not English', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SLOT]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'view_slots',
+        selected_physio: TRANSLATED_PHYSIO,
+        selected_clinic: CLINIC,
+        selected_appt_type: APPT_TYPE,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+    });
+  });
+
+  describe('Slot-selection confirmation summary carries the translated practitioner name', () => {
+    test('yue session: "you have selected" header shows the translated practitioner name', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT],
+        slot_page: 0,
+        prev_state_data: {
+          selected_appt_type: APPT_TYPE,
+          selected_physio: TRANSLATED_PHYSIO,
+          selected_clinic: CLINIC,
+        },
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, '1'));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+    });
+  });
+});
+
+// =============================================================================
 // SUITE — Dead-end standardization
 // =============================================================================
 describe('Dead-end standardization', () => {
