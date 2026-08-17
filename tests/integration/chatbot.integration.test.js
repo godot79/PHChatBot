@@ -4993,6 +4993,125 @@ describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
 });
 
 // =============================================================================
+// SUITE — Phase 3a: appointment-type name translation (yue/zh)
+// =============================================================================
+describe('Appointment-type name translation (Phase 3a, yue/zh)', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+8527${String(++phoneSeq).padStart(6, '0')}`;
+
+  // A type IS in the translation table (src/config/apptTypeTranslations.js)
+  const TRANSLATED_TYPE = { id: 'AT-NP', name: 'New Patient', ids: ['AT-NP'], norm_name: 'new patient' };
+  const TRANSLATED_TYPE_YUE = '新症';
+  const TRANSLATED_TYPE_ZH = '新患者';
+  // A type NOT in the table (matches the flagged/excluded soft-tissue-release entry) —
+  // must fall back to English, never crash.
+  const UNKNOWN_TYPE = { id: 'AT-STR', name: 'Clinical Soft Tissue Release Treatment - Manual', ids: ['AT-STR'], norm_name: 'clinical soft tissue release treatment manual' };
+  const PHYSIO = { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' };
+  const CLINIC = { id: 'BIZ-001', business_name: 'Prohealth In Touch' }; // not in clinicTranslations, en-only fixture
+  const SLOT = { practitioner_id: 'PRAC-001', business_id: 'BIZ-001', appointment_type_id: 'AT-NP', slot: '2026-08-20T02:00:00Z' };
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedAt(state, extraData = {}, language = 'yue') {
+    const phone = nextPhone();
+    const session = await seedVerified(db, phone, extraData);
+    await db.updateSession(session.id, { conversation_state: state, context: JSON.stringify({ region: 'HK', language }) });
+    return db.getSession(session.id);
+  }
+
+  describe('BOOK_HISTORY — appointment-type list', () => {
+    test('yue session sees the translated Chinese type name in the type list', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [TRANSLATED_TYPE],
+        appt_type_page: 0,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain(TRANSLATED_TYPE_YUE);
+      expect(reply).not.toContain('New Patient');
+    });
+
+    test('zh session sees the Mandarin wording, distinct from the Cantonese wording', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [TRANSLATED_TYPE],
+        appt_type_page: 0,
+      }, 'zh');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain(TRANSLATED_TYPE_ZH);
+      expect(reply).not.toContain(TRANSLATED_TYPE_YUE);
+    });
+
+    test('en session still sees the English type name (no regression)', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [TRANSLATED_TYPE],
+        appt_type_page: 0,
+      }, 'en');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain('New Patient');
+      expect(reply).not.toContain(TRANSLATED_TYPE_YUE);
+    });
+
+    test('the flagged/excluded soft-tissue-release type falls back to English for a yue session (never blocks booking)', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [UNKNOWN_TYPE],
+        appt_type_page: 0,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain('Clinical Soft Tissue Release Treatment - Manual');
+    });
+  });
+
+  describe('BOOK_HISTORY — slot list header carries the translated type name', () => {
+    test('yue session: view_slots header shows the translated type name, not English', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SLOT]);
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'view_slots',
+        selected_physio: PHYSIO,
+        selected_clinic: CLINIC,
+        selected_appt_type: TRANSLATED_TYPE,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain(TRANSLATED_TYPE_YUE);
+    });
+  });
+
+  describe('Slot-selection confirmation summary carries the translated type name', () => {
+    test('yue session: "you have selected" header shows the translated type name', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT],
+        slot_page: 0,
+        prev_state_data: {
+          selected_appt_type: TRANSLATED_TYPE,
+          selected_physio: PHYSIO,
+          selected_clinic: CLINIC,
+        },
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, '1'));
+      expect(reply).toContain(TRANSLATED_TYPE_YUE);
+    });
+  });
+});
+
+// =============================================================================
 // SUITE — Dead-end standardization
 // =============================================================================
 describe('Dead-end standardization', () => {
