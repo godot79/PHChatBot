@@ -413,6 +413,52 @@ describe('ClinikoAPI', () => {
 
   // ─── getAppointmentTypes ────────────────────────────────────────────────────
 
+  describe('getAvailableTimes()', () => {
+    test('returns available_times for a practitioner/business/appt-type/window', async () => {
+      mockGet.mockResolvedValue({
+        total_entries: 1,
+        available_times: [{ appointment_start: '2026-08-01T10:00:00Z' }],
+      });
+      const result = await api.getAvailableTimes({
+        practitioner_id: 'p1', business_id: 'b1', appt_type: 't1', from: '2026-08-01', to: '2026-08-02',
+      });
+      expect(result).toEqual([{ appointment_start: '2026-08-01T10:00:00Z' }]);
+    });
+
+    // Regression: this was the one ClinikoAPI method that still re-threw on
+    // failure ("preserve original behavior: rethrow to let callers decide")
+    // while every sibling (getAppointmentTypes, getBusinessById,
+    // getPractitionersForClinic) already self-catches. The two real callers
+    // both happened to defensively wrap this call anyway, but anything that
+    // didn't (confirmed live: cliniko.live.test.js's direct call) crashed
+    // with an uncaught 429 instead of degrading gracefully, 2026-08-18.
+    test('returns [] marked _partial when SendMessage throws — does not re-throw', async () => {
+      mockGet.mockRejectedValue({ status: 429, error: 'timeout' });
+      const result = await api.getAvailableTimes({
+        practitioner_id: 'p1', business_id: 'b1', appt_type: 't1', from: '2026-08-01', to: '2026-08-02',
+      });
+      expect(result).toEqual([]);
+      expect(result._partial).toBe(true);
+    });
+
+    test('a failed fetch is not cached — the very next call retries against Cliniko', async () => {
+      mockGet.mockRejectedValueOnce({ status: 429, error: 'timeout' });
+      const failed = await api.getAvailableTimes({
+        practitioner_id: 'p1', business_id: 'b1', appt_type: 't1', from: '2026-08-01', to: '2026-08-02',
+      });
+      expect(failed._partial).toBe(true);
+
+      mockGet.mockResolvedValueOnce({
+        total_entries: 1,
+        available_times: [{ appointment_start: '2026-08-01T10:00:00Z' }],
+      });
+      const retried = await api.getAvailableTimes({
+        practitioner_id: 'p1', business_id: 'b1', appt_type: 't1', from: '2026-08-01', to: '2026-08-02',
+      });
+      expect(retried).toEqual([{ appointment_start: '2026-08-01T10:00:00Z' }]);
+    });
+  });
+
   describe('getAppointmentTypes()', () => {
     test('returns filtered types for a practitioner', async () => {
       mockGet.mockResolvedValue({
@@ -682,6 +728,25 @@ describe('ClinikoAPI', () => {
       expect(result._partial).toBe(true);
       expect(JSON.stringify(result)).toBe('[]');   // doesn't leak into serialized session data
       expect([...result]).toEqual([]);             // spread/iteration unaffected
+    });
+
+    // Regression: getAppointmentTypes() already self-catches and returns
+    // _markPartial([]) on its own failure — without an explicit check here,
+    // that was invisible: the inner loop just silently ran zero iterations
+    // for that practitioner and the outer result's _partial marker never got
+    // set, indistinguishable from the practitioner genuinely having zero
+    // appointment types. Fixed 2026-08-18 alongside getAvailableTimes().
+    test('practitioner\'s own getAppointmentTypes() call fails → outer result still marked _partial', async () => {
+      api.getAppointmentTypes = jest.fn().mockResolvedValue(
+        Object.assign([], { _partial: true }) // simulates getAppointmentTypes' own internal failure
+      );
+
+      const result = await api.getAvailableSlotsByBusinessAndDate({
+        business_id: 'BIZ-1', practitioner_id: 'P1', from: '2026-08-01', to: '2026-08-02',
+      });
+
+      expect(result).toHaveLength(0);
+      expect(result._partial).toBe(true);
     });
   });
 });
