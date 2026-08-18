@@ -43,7 +43,9 @@ async function getAllAppointmentTypesForAllPractitioners(clinikoAPI, groups) {
       }
     }
   }
-  return hadFailure ? _markPartial(result) : result;
+  // bulkAll's own overall deadline can mark the whole array _partial (with
+  // unsettled entries left undefined) even when no individual .catch() fired.
+  return (hadFailure || allTypes._partial) ? _markPartial(result) : result;
 }
 
 /**
@@ -68,7 +70,7 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => String(t.id) === targetId)) result.push(p);
   });
-  return hadFailure ? _markPartial(result) : result;
+  return (hadFailure || allTypes._partial) ? _markPartial(result) : result;
 }
 
 /**
@@ -100,7 +102,7 @@ async function getPractitionersForTypeName(groups, clinikoAPI, apptTypeName) {
   practitioners.forEach((p, i) => {
     if ((allTypes[i] || []).some(t => normalize(t.name) === target)) result.push(p);
   });
-  return hadFailure ? _markPartial(result) : result;
+  return (hadFailure || allTypes._partial) ? _markPartial(result) : result;
 }
 
 /**

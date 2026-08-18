@@ -686,7 +686,7 @@ class ClinikoAPI {
       // for GROUPS_CACHE_TTL_MS and masking real availability underneath it.
       const clinics = await this._getClinicsRaw();
       let hadFailure = false;
-      const results = await bulkAll(clinics, async (clinic) => {
+      const rawResults = await bulkAll(clinics, async (clinic) => {
         // Reuses the already-protected per-clinic lookup instead of an
         // inline fetch — one clinic timing out no longer discards every
         // other clinic's data (see _markPartial()). bulkAll throttles this
@@ -699,6 +699,14 @@ class ClinikoAPI {
           practitioners
         };
       });
+      // bulkAll's overall deadline can leave a clinic's slot as `undefined`
+      // (it never got a chance to settle) rather than the {clinic_id, ...}
+      // shape every caller of getPractitionersByClinic() assumes — filter
+      // those out here, at the one place this object shape originates,
+      // instead of pushing an undefined-entry check onto every downstream
+      // .flatMap(g => g.practitioners)/.find(g => ...) call site.
+      const results = rawResults.filter(Boolean);
+      if (rawResults._partial) hadFailure = true;
       // A partial result is missing data for at least one clinic — don't
       // cache it, same reasoning as the failed-clinics-fetch case below.
       if (hadFailure) return _markPartial(results);
