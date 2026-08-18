@@ -1074,6 +1074,50 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
     require('../../src/api/SendMessage').prototype.get = realGet;
   });
 
+  // The 5s beforeAll settle isn't always enough to clear a real 429 backlog left
+  // by the preceding "concurrent-load 429s" block (that block's own calibration
+  // found lockouts lasting up to ~45-50s). When that happens, BOTH the "first"
+  // and "second" calls each eat one real 429-then-retry (see ClinikoAPI's
+  // _get429Retry), so afterFirst/afterSecond both come back inflated by the same
+  // amount rather than the second call ever throwing — a false failure of this
+  // test, not evidence the cache didn't fire. Confirmed this test passes
+  // deterministically in isolation (no preceding load) and only flakes as part
+  // of the full live file — so on a mismatch, wait out a longer cooldown and
+  // measure a fresh before/afterFirst/afterSecond triplet once before failing,
+  // same "retry past a transient 429" convention _get429Retry already uses.
+  async function expectSecondCallIsCacheHit(fetchOnce) {
+    const measure = async () => {
+      const before = getSpy.count();
+      await fetchOnce();
+      const afterFirst = getSpy.count();
+      await fetchOnce();
+      const afterSecond = getSpy.count();
+      return { before, afterFirst, afterSecond };
+    };
+
+    let { before, afterFirst, afterSecond } = await measure();
+    if (afterSecond !== afterFirst) {
+      // 45s, not an arbitrary round number: matches the ~45-50s worst-case lockout
+      // duration this project already measured and calibrated against for real
+      // (BULK_CONCURRENCY_LIMIT, see CLAUDE.md's rate-limit investigation). A
+      // shorter 10s cooldown was tried first and confirmed insufficient live
+      // (2026-08-17: still failed after 10s during a heavy-load run). Not a
+      // guarantee — a single run this same session also saw an unrelated test
+      // stall past 120s under severe congestion, worse than even this — but 45s
+      // is the most defensible number we have real measurements for.
+      //
+      // The first attempt's "cache hit" call already warmed the cache even
+      // though it hit a stray 429 — clear it so the retry gets a clean triplet
+      // instead of a free hit from the previous attempt's residual cache state.
+      await new Promise((r) => setTimeout(r, 45000));
+      ClinikoAPI._clearGroupsCache();
+      ({ before, afterFirst, afterSecond } = await measure());
+    }
+
+    expect(afterFirst).toBeGreaterThan(before);
+    expect(afterSecond).toBe(afterFirst);
+  }
+
   maybeIt('getAppointmentTypes() — second call for the same practitioner makes zero HTTP requests', async () => {
     const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
     const practitioner = groups.flatMap(g => g.practitioners)[0];
@@ -1081,15 +1125,8 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
 
     ClinikoAPI._clearGroupsCache();
     await hk(() => api.getPractitionersByClinic()); // re-warm (cleared above)
-    const before = getSpy.count();
-    await hk(() => api.getAppointmentTypes({ practitioner_id: practitioner.id }));
-    const afterFirst = getSpy.count();
-    await hk(() => api.getAppointmentTypes({ practitioner_id: practitioner.id }));
-    const afterSecond = getSpy.count();
-
-    expect(afterFirst).toBeGreaterThan(before);       // first call was real
-    expect(afterSecond).toBe(afterFirst);             // second call was a cache hit
-  }, 30000);
+    await expectSecondCallIsCacheHit(() => hk(() => api.getAppointmentTypes({ practitioner_id: practitioner.id })));
+  }, 90000);
 
   maybeIt('getPractitionersForClinic() — second call for the same clinic makes zero HTTP requests', async () => {
     const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
@@ -1100,30 +1137,16 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
     // internally, so the cache this test targets may already be warm from the
     // groups fetch above — clear it so "first call" below is a real cache miss.
     ClinikoAPI._clearGroupsCache();
-    const before = getSpy.count();
-    await hk(() => api.getPractitionersForClinic(clinicId));
-    const afterFirst = getSpy.count();
-    await hk(() => api.getPractitionersForClinic(clinicId));
-    const afterSecond = getSpy.count();
-
-    expect(afterFirst).toBeGreaterThan(before);
-    expect(afterSecond).toBe(afterFirst);
-  }, 30000);
+    await expectSecondCallIsCacheHit(() => hk(() => api.getPractitionersForClinic(clinicId)));
+  }, 90000);
 
   maybeIt('getBusinessById() — second call for the same business makes zero HTTP requests', async () => {
     const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
     const clinicId = groups[0]?.clinic_id;
     if (!clinicId) { console.warn('[live] no clinics — skipping'); return; }
 
-    const before = getSpy.count();
-    await hk(() => api.getBusinessById(clinicId));
-    const afterFirst = getSpy.count();
-    await hk(() => api.getBusinessById(clinicId));
-    const afterSecond = getSpy.count();
-
-    expect(afterFirst).toBeGreaterThan(before);
-    expect(afterSecond).toBe(afterFirst);
-  }, 30000);
+    await expectSecondCallIsCacheHit(() => hk(() => api.getBusinessById(clinicId)));
+  }, 90000);
 
   maybeIt('getAvailableTimes() — second call for the same practitioner/type/window makes zero HTTP requests', async () => {
     const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
@@ -1137,13 +1160,6 @@ describe('ClinikoAPI caching — repeated lookups hit cache, not Cliniko (live)'
     const to = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
     const args = { practitioner_id: practitioner.id, business_id: group.clinic_id, appt_type: types[0].id, from, to };
 
-    const before = getSpy.count();
-    await hk(() => api.getAvailableTimes(args));
-    const afterFirst = getSpy.count();
-    await hk(() => api.getAvailableTimes(args));
-    const afterSecond = getSpy.count();
-
-    expect(afterFirst).toBeGreaterThan(before);
-    expect(afterSecond).toBe(afterFirst);
-  }, 30000);
+    await expectSecondCallIsCacheHit(() => hk(() => api.getAvailableTimes(args)));
+  }, 90000);
 });
