@@ -66,8 +66,24 @@ const REGION_FEES = {
         'Clinical Pilates: 1,450',
       ],
     },
-    yue: null, // TODO: needs native-speaker translation
-    zh: null,  // TODO: needs native-speaker translation
+    yue: {
+      header: '*收費（港幣）：*',
+      items: [
+        '首次物理治療：1,450',
+        '覆診物理治療：1,450',
+        '運動按摩：900',
+        '臨床普拉提：1,450',
+      ],
+    },
+    zh: {
+      header: '*收费（港币）：*',
+      items: [
+        '首次物理治疗：1,450',
+        '复诊物理治疗：1,450',
+        '运动按摩：900',
+        '临床普拉提：1,450',
+      ],
+    },
   },
   IN: {
     en: {
