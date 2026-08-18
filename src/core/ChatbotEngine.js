@@ -478,9 +478,13 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz) {
     bulkAll([...businessIds], id => clinikoAPI.getBusinessById(id).then(obj => [id, obj]))
   ]);
 
-  const practitionerMap = Object.fromEntries(practitioners);
-  const apptTypeMap = Object.fromEntries(apptTypes);
-  const businessMap = Object.fromEntries(businesses);
+  // bulkAll's overall deadline can leave an entry undefined (never settled in
+  // time) instead of the [id, obj] pair Object.fromEntries requires — filter
+  // those out; the missing* checks below already treat a missing map entry
+  // the same as any other fetch failure.
+  const practitionerMap = Object.fromEntries(practitioners.filter(Boolean));
+  const apptTypeMap = Object.fromEntries(apptTypes.filter(Boolean));
+  const businessMap = Object.fromEntries(businesses.filter(Boolean));
 
   // Only log if there were fetch failures
   const missingPractitioners = [...practitionerIds].filter(id => !practitionerMap[id]);
@@ -2701,7 +2705,10 @@ if (/^p(rev)?$/i.test(text)) {
       const allTypes = await bulkAll(allPractitioners,
         p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id })
       );
-      const hadTypeFetchFailure = allTypes.some(t => t && t._partial);
+      // bulkAll's own overall deadline (not just per-item failure) can also mark
+      // the whole array _partial, with unsettled entries left undefined — check
+      // both, and the `(allTypes[i] || [])` below already tolerates the latter.
+      const hadTypeFetchFailure = !!allTypes._partial || allTypes.some(t => t && t._partial);
       const phys = allPractitioners.filter((p, i) =>
         (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
       );
@@ -2709,8 +2716,8 @@ if (/^p(rev)?$/i.test(text)) {
       const slotResults = await bulkAll(phys,
         p => practitionerHasSlotsForTypeName(p, typeNorm)
       );
-      const hadSlotFetchFailure = slotResults.some(r => r.partial);
-      const result = phys.filter((_, i) => slotResults[i].hasSlots);
+      const hadSlotFetchFailure = !!slotResults._partial || slotResults.some(r => r && r.partial);
+      const result = phys.filter((_, i) => (slotResults[i] || {}).hasSlots);
       return (hadTypeFetchFailure || hadSlotFetchFailure) ? _markPartial(result) : result;
     };
 
@@ -4030,7 +4037,7 @@ if (/^p(rev)?$/i.test(text)) {
         const clinicTypesByPractitioner = await bulkAll(pracList,
           p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) })
         );
-        hadClinicTypeFailure = clinicTypesByPractitioner.some(types => types && types._partial);
+        hadClinicTypeFailure = !!clinicTypesByPractitioner._partial || clinicTypesByPractitioner.some(types => types && types._partial);
         for (const types of clinicTypesByPractitioner) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
@@ -4131,7 +4138,7 @@ if (/^p(rev)?$/i.test(text)) {
         const physioTypesByPractitioner = await bulkAll(pracInClinic,
           p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) })
         );
-        const hadPhysioTypeFailure = physioTypesByPractitioner.some(types => types && types._partial);
+        const hadPhysioTypeFailure = !!physioTypesByPractitioner._partial || physioTypesByPractitioner.some(types => types && types._partial);
         const practitioners = pracInClinic.filter((p, i) =>
           (physioTypesByPractitioner[i] || []).some(t => wanted.has(String(t.id)))
         );
