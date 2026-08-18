@@ -2,6 +2,7 @@ const SendMessage = require("./SendMessage.js");
 const Logger = require("../core/Logger.js");
 const config = require('../config/cliniko.js');
 const RegionContext = require('../core/RegionContext');
+const { bulkAll } = require('../core/BulkContext');
 
 // Clinics whose names match this pattern are excluded from all booking flows.
 // Physiofocus SG was shut down; UWC clinics are handled by a separate contract.
@@ -685,20 +686,19 @@ class ClinikoAPI {
       // for GROUPS_CACHE_TTL_MS and masking real availability underneath it.
       const clinics = await this._getClinicsRaw();
       let hadFailure = false;
-      const results = await Promise.all(
-        clinics.map(async (clinic) => {
-          // Reuses the already-protected per-clinic lookup instead of an
-          // inline fetch — one clinic timing out no longer discards every
-          // other clinic's data (see _markPartial()).
-          const practitioners = await this.getPractitionersForClinic(clinic.id);
-          if (practitioners._partial) hadFailure = true;
-          return {
-            clinic_id: clinic.id,
-            clinic_name: clinic.business_name,
-            practitioners
-          };
-        })
-      );
+      const results = await bulkAll(clinics, async (clinic) => {
+        // Reuses the already-protected per-clinic lookup instead of an
+        // inline fetch — one clinic timing out no longer discards every
+        // other clinic's data (see _markPartial()). bulkAll throttles this
+        // the same way every other Cliniko fan-out is throttled.
+        const practitioners = await this.getPractitionersForClinic(clinic.id);
+        if (practitioners._partial) hadFailure = true;
+        return {
+          clinic_id: clinic.id,
+          clinic_name: clinic.business_name,
+          practitioners
+        };
+      });
       // A partial result is missing data for at least one clinic — don't
       // cache it, same reasoning as the failed-clinics-fetch case below.
       if (hadFailure) return _markPartial(results);
