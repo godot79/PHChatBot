@@ -54,6 +54,15 @@ jest.mock('../../src/core/DatabaseManager', () => {
             id TEXT PRIMARY KEY, phone_number TEXT, code TEXT, patient_id TEXT,
             attempts INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             expires_at DATETIME
+          )`);
+          this.db.run(`CREATE TABLE IF NOT EXISTS patient_state (
+            phone_number TEXT PRIMARY KEY,
+            region TEXT,
+            appt_preference TEXT,
+            patient_id TEXT,
+            verified BOOLEAN,
+            preferred_insurer TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
           )`, (err) => { if (err) return rej(err); this.isInitialized = true; res(); });
         });
       });
@@ -136,6 +145,36 @@ jest.mock('../../src/core/DatabaseManager', () => {
       );
     }
 
+    async getPatientState (phone) {
+      return new Promise((res, rej) =>
+        this.db.get('SELECT * FROM patient_state WHERE phone_number = ?', [phone],
+          (err, row) => (err ? rej(err) : res(row || null)))
+      );
+    }
+
+    async upsertPatientState (phone, updates) {
+      const { region, appt_preference, patient_id, verified, preferred_insurer } = updates;
+      const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
+      return new Promise((res, rej) =>
+        this.db.run(
+          `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, preferred_insurer, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(phone_number) DO UPDATE SET
+             region = COALESCE(?, region),
+             appt_preference = COALESCE(?, appt_preference),
+             patient_id = COALESCE(?, patient_id),
+             verified = COALESCE(?, verified),
+             preferred_insurer = COALESCE(?, preferred_insurer),
+             updated_at = CURRENT_TIMESTAMP`,
+          [
+            phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, preferred_insurer ?? null,
+            region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, preferred_insurer ?? null,
+          ],
+          (err) => (err ? rej(err) : res())
+        )
+      );
+    }
+
     close () {
       if (!this.db) return Promise.resolve();
       return new Promise((res, rej) => this.db.close(err => err ? rej(err) : res()));
@@ -176,6 +215,19 @@ async function plantExpiredVerifiedSession (db, phone, patientId = 'PAT-PRIOR') 
           conversation_state, context, expires_at, last_activity)
        VALUES (?, ?, ?, 1, 'verified', 'BOOK_MANAGE_OPTIONS', '{}', ?, ?)`,
       [id, phone, patientId, expiredIso(), expiredIso()],
+      (err) => (err ? rej(err) : res())
+    )
+  );
+  // Production always writes patient_state.verified alongside sessions.verified
+  // (ChatbotEngine.js handleVerifyState / registration success paths) — the reseed
+  // logic now checks patient_state as the durable source of truth, so fixtures must
+  // match that invariant instead of only planting the sessions-table row.
+  await new Promise((res, rej) =>
+    db.run(
+      `INSERT INTO patient_state (phone_number, patient_id, verified, updated_at)
+       VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+       ON CONFLICT(phone_number) DO UPDATE SET patient_id = ?, verified = 1`,
+      [phone, patientId, patientId],
       (err) => (err ? rej(err) : res())
     )
   );

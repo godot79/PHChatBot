@@ -2,6 +2,7 @@ const SendMessage = require("./SendMessage.js");
 const Logger = require("../core/Logger.js");
 const config = require('../config/cliniko.js');
 const RegionContext = require('../core/RegionContext');
+const { bulkAll } = require('../core/BulkContext');
 
 // Clinics whose names match this pattern are excluded from all booking flows.
 // Physiofocus SG was shut down; UWC clinics are handled by a separate contract.
@@ -339,8 +340,19 @@ class ClinikoAPI {
           to: params.get('to')
         }
       });
-      // Preserve original behavior: rethrow to let callers decide
-      throw err;
+      // Was previously the one method in this class that rethrew instead of
+      // degrading gracefully ("let callers decide") — every sibling method
+      // (getAppointmentTypes, getBusinessById, getPractitionersForClinic)
+      // already self-catches and returns _markPartial([]). The two real
+      // callers (ChatbotEngine._rescheduleFetchAndShowSlots,
+      // getAvailableSlotsByBusinessAndDate's inner loop) both already wrap
+      // this call defensively and treat a thrown error identically to an
+      // empty/_partial result, so this was a distinction without a
+      // difference in practice — just an inconsistent contract that let a
+      // raw 429 escape uncaught anywhere that DIDN'T defensively wrap it
+      // (confirmed live: cliniko.live.test.js's direct call had no wrapper
+      // and crashed instead of degrading, 2026-08-18).
+      return _markPartial([]);
     }
   }
 
@@ -685,20 +697,27 @@ class ClinikoAPI {
       // for GROUPS_CACHE_TTL_MS and masking real availability underneath it.
       const clinics = await this._getClinicsRaw();
       let hadFailure = false;
-      const results = await Promise.all(
-        clinics.map(async (clinic) => {
-          // Reuses the already-protected per-clinic lookup instead of an
-          // inline fetch — one clinic timing out no longer discards every
-          // other clinic's data (see _markPartial()).
-          const practitioners = await this.getPractitionersForClinic(clinic.id);
-          if (practitioners._partial) hadFailure = true;
-          return {
-            clinic_id: clinic.id,
-            clinic_name: clinic.business_name,
-            practitioners
-          };
-        })
-      );
+      const rawResults = await bulkAll(clinics, async (clinic) => {
+        // Reuses the already-protected per-clinic lookup instead of an
+        // inline fetch — one clinic timing out no longer discards every
+        // other clinic's data (see _markPartial()). bulkAll throttles this
+        // the same way every other Cliniko fan-out is throttled.
+        const practitioners = await this.getPractitionersForClinic(clinic.id);
+        if (practitioners._partial) hadFailure = true;
+        return {
+          clinic_id: clinic.id,
+          clinic_name: clinic.business_name,
+          practitioners
+        };
+      });
+      // bulkAll's overall deadline can leave a clinic's slot as `undefined`
+      // (it never got a chance to settle) rather than the {clinic_id, ...}
+      // shape every caller of getPractitionersByClinic() assumes — filter
+      // those out here, at the one place this object shape originates,
+      // instead of pushing an undefined-entry check onto every downstream
+      // .flatMap(g => g.practitioners)/.find(g => ...) call site.
+      const results = rawResults.filter(Boolean);
+      if (rawResults._partial) hadFailure = true;
       // A partial result is missing data for at least one clinic — don't
       // cache it, same reasoning as the failed-clinics-fetch case below.
       if (hadFailure) return _markPartial(results);
@@ -776,6 +795,13 @@ class ClinikoAPI {
       let hadFetchFailure = false;
       for (const practitioner of practitioners) {
         const apptTypes = await this.getAppointmentTypes({ practitioner_id: practitioner.id });
+        // getAppointmentTypes() already self-catches and returns _markPartial([])
+        // on failure — without this check, that failure was silently invisible
+        // here: the inner loop below just does zero iterations for this
+        // practitioner, contributing nothing, with no signal that anything
+        // went wrong (as opposed to this practitioner genuinely having zero
+        // appointment types).
+        if (apptTypes._partial) hadFetchFailure = true;
         for (const apptType of apptTypes) {
           let slots = [];
           try {
@@ -801,6 +827,13 @@ class ClinikoAPI {
               from: fromDateOnly,
               to: toDateOnly,
             });
+            // getAvailableTimes() now also self-catches and returns
+            // _markPartial([]) on failure instead of throwing (see that
+            // method) — the try/catch around this call is dead for that path
+            // now, kept only as defense-in-depth for anything else that might
+            // still throw. Check the marker directly so a real failure here
+            // is still detected the same way it always was.
+            if (slots._partial) hadFetchFailure = true;
           } catch (slotErr) {
             const safeMsg = (slotErr && (slotErr.message || slotErr.status || slotErr.code)) || 'unknown_error';
             // Log the failed inner query with full context

@@ -482,16 +482,23 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz, langua
   // Single log for what we're fetching
   console.log(`[ENRICH] Fetching: ${practitionerIds.size} practitioners, ${apptTypeIds.size} types, ${businessIds.size} businesses`);
 
-  // Fetch all entities in parallel
+  // Fetch all entities in parallel — each inner fan-out goes through bulkAll
+  // for the same throttling as every other Cliniko fan-out (see
+  // fix/fanout-batching-consistency); the outer Promise.all just combines
+  // three already-independent bulk operations, not a fan-out itself.
   const [practitioners, apptTypes, businesses] = await Promise.all([
-    Promise.all([...practitionerIds].map(id => clinikoAPI.getPractitionerById(id).then(obj => [id, obj]))),
-    Promise.all([...apptTypeIds].map(id => clinikoAPI.getAppointmentTypeById(id).then(obj => [id, obj]))),
-    Promise.all([...businessIds].map(id => clinikoAPI.getBusinessById(id).then(obj => [id, obj])))
+    bulkAll([...practitionerIds], id => clinikoAPI.getPractitionerById(id).then(obj => [id, obj])),
+    bulkAll([...apptTypeIds], id => clinikoAPI.getAppointmentTypeById(id).then(obj => [id, obj])),
+    bulkAll([...businessIds], id => clinikoAPI.getBusinessById(id).then(obj => [id, obj]))
   ]);
 
-  const practitionerMap = Object.fromEntries(practitioners);
-  const apptTypeMap = Object.fromEntries(apptTypes);
-  const businessMap = Object.fromEntries(businesses);
+  // bulkAll's overall deadline can leave an entry undefined (never settled in
+  // time) instead of the [id, obj] pair Object.fromEntries requires — filter
+  // those out; the missing* checks below already treat a missing map entry
+  // the same as any other fetch failure.
+  const practitionerMap = Object.fromEntries(practitioners.filter(Boolean));
+  const apptTypeMap = Object.fromEntries(apptTypes.filter(Boolean));
+  const businessMap = Object.fromEntries(businesses.filter(Boolean));
 
   // Only log if there were fetch failures
   const missingPractitioners = [...practitionerIds].filter(id => !practitionerMap[id]);
@@ -2855,7 +2862,10 @@ if (/^p(rev)?$/i.test(text)) {
       const allTypes = await bulkAll(allPractitioners,
         p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id })
       );
-      const hadTypeFetchFailure = allTypes.some(t => t && t._partial);
+      // bulkAll's own overall deadline (not just per-item failure) can also mark
+      // the whole array _partial, with unsettled entries left undefined — check
+      // both, and the `(allTypes[i] || [])` below already tolerates the latter.
+      const hadTypeFetchFailure = !!allTypes._partial || allTypes.some(t => t && t._partial);
       const phys = allPractitioners.filter((p, i) =>
         (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
       );
@@ -2863,8 +2873,8 @@ if (/^p(rev)?$/i.test(text)) {
       const slotResults = await bulkAll(phys,
         p => practitionerHasSlotsForTypeName(p, typeNorm)
       );
-      const hadSlotFetchFailure = slotResults.some(r => r.partial);
-      const result = phys.filter((_, i) => slotResults[i].hasSlots);
+      const hadSlotFetchFailure = !!slotResults._partial || slotResults.some(r => r && r.partial);
+      const result = phys.filter((_, i) => (slotResults[i] || {}).hasSlots);
       return (hadTypeFetchFailure || hadSlotFetchFailure) ? _markPartial(result) : result;
     };
 
@@ -3071,14 +3081,12 @@ if (/^p(rev)?$/i.test(text)) {
         const allClinics = await clinicsForPractitioner(data.selected_physio.id);
         const typeNorm = normName(data.selected_appt_type.name);
         const { from, to } = normalizeDateWindow();
-        const slotResults0 = await Promise.all(
-          allClinics.map(c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
-            business_id: String(c.id),
-            practitioner_id: String(data.selected_physio.id),
-            from,
-            to
-          }))
-        );
+        const slotResults0 = await bulkAll(allClinics, c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+          business_id: String(c.id),
+          practitioner_id: String(data.selected_physio.id),
+          from,
+          to
+        }));
         const withSlots = allClinics.filter((c, i) =>
           (slotResults0[i] || []).some(s => normName(s.appointment_type_name) === typeNorm)
         );
@@ -3539,11 +3547,9 @@ if (/^p(rev)?$/i.test(text)) {
         const resolvedIds = data.selected_appt_type?.ids;
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow(data.selected_date, data.selected_date, 1);
-        const slotResults1 = await Promise.all(
-          allClinics.map(c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
-            business_id: c.id, practitioner_id: physId, from, to
-          }))
-        );
+        const slotResults1 = await bulkAll(allClinics, c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+          business_id: c.id, practitioner_id: physId, from, to
+        }));
         const withSlots = allClinics.filter((c, i) =>
           (slotResults1[i] || []).some(s => resolvedIds && resolvedIds.length
             ? resolvedIds.includes(String(s.appointment_type_id))
@@ -3902,11 +3908,9 @@ if (/^p(rev)?$/i.test(text)) {
         const resolvedIds = data.selected_appt_type?.ids;
         const typeNorm = normName(data.selected_appt_type?.name || '');
         const { from, to } = normalizeDateWindow();
-        const slotResults2 = await Promise.all(
-          allClinics.map(c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
-            business_id: c.id, practitioner_id: physId, from, to
-          }))
-        );
+        const slotResults2 = await bulkAll(allClinics, c => this.clinikoAPI.getAvailableSlotsByBusinessAndDate({
+          business_id: c.id, practitioner_id: physId, from, to
+        }));
         const withSlots = allClinics.filter((c, i) =>
           (slotResults2[i] || []).some(s => resolvedIds && resolvedIds.length
             ? resolvedIds.includes(String(s.appointment_type_id))
@@ -4181,16 +4185,17 @@ if (/^p(rev)?$/i.test(text)) {
         const pracList = (inClinic?.practitioners || []).map(p => ({ id: String(p.id), ...p }));
 
         const buckets = new Map(); // norm -> { display, entries: [{id, insurer}] }
-        // One practitioner's fetch failing must not discard every other
-        // practitioner's already-fetched types — Promise.all would reject
-        // the whole batch on a single rejection.
-        const settledClinicTypes = await Promise.allSettled(
-          pracList.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) }))
+        // getAppointmentTypes() never throws (it catches internally and returns
+        // _markPartial([]) on failure) — bulkAll both throttles this fanout the
+        // same way every other practitioner-scale sweep is throttled (was
+        // previously bypassing that via a bare Promise.allSettled, see
+        // fix/fanout-batching-consistency) and lets us detect a real failure via
+        // the _partial marker instead of a 'rejected' status that can never fire.
+        const clinicTypesByPractitioner = await bulkAll(pracList,
+          p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) })
         );
-        hadClinicTypeFailure = settledClinicTypes.some(s => s.status === 'rejected');
-        for (const s of settledClinicTypes) {
-          if (s.status === 'rejected') continue;
-          const types = s.value;
+        hadClinicTypeFailure = !!clinicTypesByPractitioner._partial || clinicTypesByPractitioner.some(types => types && types._partial);
+        for (const types of clinicTypesByPractitioner) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
@@ -4281,16 +4286,18 @@ if (/^p(rev)?$/i.test(text)) {
         // correctly excludes practitioners who only offer a different insurer's id.
         const wanted = new Set((data.selected_appt_type?.ids || []).map(String));
 
-        // One practitioner's fetch failing must not discard every other
-        // practitioner's already-fetched types — Promise.all would reject
-        // the whole batch on a single rejection.
-        const settledPhysioTypes = await Promise.allSettled(
-          pracInClinic.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) }))
+        // getAppointmentTypes() never throws (it catches internally and returns
+        // _markPartial([]) on failure) — bulkAll both throttles this fanout the
+        // same way every other practitioner-scale sweep is throttled (was
+        // previously bypassing that via a bare Promise.allSettled, see
+        // fix/fanout-batching-consistency) and lets us detect a real failure via
+        // the _partial marker instead of a 'rejected' status that can never fire.
+        const physioTypesByPractitioner = await bulkAll(pracInClinic,
+          p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) })
         );
-        const hadPhysioTypeFailure = settledPhysioTypes.some(s => s.status === 'rejected');
+        const hadPhysioTypeFailure = !!physioTypesByPractitioner._partial || physioTypesByPractitioner.some(types => types && types._partial);
         const practitioners = pracInClinic.filter((p, i) =>
-          settledPhysioTypes[i].status === 'fulfilled' &&
-          (settledPhysioTypes[i].value || []).some(t => wanted.has(String(t.id)))
+          (physioTypesByPractitioner[i] || []).some(t => wanted.has(String(t.id)))
         );
 
         data.practitioner_list = sortPractitioners(practitioners);

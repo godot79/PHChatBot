@@ -97,6 +97,16 @@ class SessionManager {
 
         this.logger.info(`Created new session ${sessionId} for ${normalizedPhone}`);
 
+        // Load patient_state up front — it's the durable source of truth for verification
+        // (survives logout/expiry cleanup) and is used to sanity-check the prior-session
+        // reseed below, not just for the region/context restore further down.
+        let patientState = null;
+        try {
+          patientState = await this.db.getPatientState(normalizedPhone);
+        } catch (psLoadErr) {
+          this.logger.warn('Loading patient_state failed (non-fatal):', psLoadErr?.message || psLoadErr);
+        }
+
         // Seed new session with persistent attributes from the latest prior session (even if expired)
         try {
           const priorRows = await this.db.query(
@@ -130,9 +140,12 @@ class SessionManager {
               newContext.language = priorContext.language;
             }
 
-            // If prior was verified, carry over verification flags
-            // We consider both the boolean 'verified' and the 'verification_status'
-            const wasVerified = (prior.verified === 1) || prior.verification_status === 'verified';
+            // If prior was verified, carry over verification flags. Also require
+            // patient_state.verified to agree — patient_state is the durable flag that
+            // logout explicitly clears, so a stale `sessions` row left behind by an
+            // earlier expiry/logout can no longer resurrect a verified state on its own.
+            const wasVerified = ((prior.verified === 1) || prior.verification_status === 'verified')
+              && !!(patientState && patientState.verified);
             if (wasVerified) {
               seedUpdates.verified = 1;
               seedUpdates.verification_status = 'verified';
@@ -164,9 +177,9 @@ class SessionManager {
           this.logger.warn('Seeding new session from prior session failed (non-fatal):', seedErr?.message || seedErr);
         }
 
-        // Load persistent patient state (region + appt_preference) — overrides prior-session values
+        // Apply persistent patient state (region + appt_preference) — overrides prior-session values
         try {
-          const ps = await this.db.getPatientState(normalizedPhone);
+          const ps = patientState;
           if (ps) {
             const psContext = {};
             if (ps.region) psContext.region = ps.region;
@@ -1015,9 +1028,10 @@ class SessionManager {
         }
     }
     /**
-     * Delete a session and all related data (chat history, verification codes).
+     * Delete a session and all related data (chat history, verification codes),
+     * plus any other lingering session rows for the same phone number.
      * @param {string} sessionId - The session ID to delete.
-     * @returns {Promise<number>} - Number of session rows deleted (0 or 1).
+     * @returns {Promise<number>} - Number of session rows deleted.
      */
     async deleteSessionAndData(sessionId) {
         this.logger.debug(`[deleteSessionAndData] Called for session: ${sessionId}`);
@@ -1057,9 +1071,14 @@ class SessionManager {
             this.logger.debug(`[deleteSessionAndData] Cleared appt_preference/verified/patient_id for phone: ${phoneNumber}`);
         }
 
-        // Delete the session itself (use DatabaseManager.deleteSession)
-        const deleted = await this.db.deleteSession(sessionId);
-        this.logger.debug(`[deleteSessionAndData] Deleted session row: ${sessionId}`);
+        // Delete ALL session rows for this phone, not just this one — an older row left
+        // behind by a prior expiry/logout can still have verified=1 and would otherwise
+        // be picked up by the prior-session reseed in getOrCreateSession() on the very
+        // next message, silently undoing this logout.
+        const deleted = phoneNumber
+            ? await this.db.deleteSessionsByPhone(phoneNumber)
+            : await this.db.deleteSession(sessionId);
+        this.logger.debug(`[deleteSessionAndData] Deleted session row(s) for phone: ${phoneNumber}`);
         return deleted;
     }
 
@@ -1085,13 +1104,16 @@ class SessionManager {
       if (normalized.startsWith('91') && normalized.length >= 12) {
         return { region: 'IN', countryCode: '91', nationalNumber: normalized.slice(-10) };
       }
-      // 0XXXXXXXXXX (11 digits, local)
-      if (/^0\d{10}$/.test(digits)) {
-        return { region: 'IN', countryCode: '91', nationalNumber: digits.slice(-10) };
-      }
-      if (/^\d{10}$/.test(digits)) {
-        return { region: 'IN', countryCode: '91', nationalNumber: digits };
-      }
+      // NOTE: a bare 10-digit number or an 11-digit "0XXXXXXXXXX" local-format
+      // number used to be assumed Indian here. That guess is genuinely ambiguous —
+      // a UK domestic mobile ("07863464276") or a US local number without a
+      // country code look identical to Indian domestic format, and there's no way
+      // to tell them apart from digits alone. Real WhatsApp traffic never hits this
+      // branch anyway (Meta's wa_id always includes the full country code, e.g.
+      // "917863464276" for India, which the check above already handles), so this
+      // only ever fired for manually-typed test numbers via /test-message. Removed
+      // rather than guessed — falls through to the "unrecognized" return below,
+      // same as any other unsupported country, prompting manual region selection.
 
       // ---- Philippines 🇵🇭 ----
       if (normalized.startsWith('63') && (normalized.length === 12 || normalized.length === 11)) {

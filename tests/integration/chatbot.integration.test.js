@@ -153,6 +153,13 @@ jest.mock('../../src/core/DatabaseManager', () => {
       );
     }
 
+    async deleteSessionsByPhone (phoneNumber) {
+      return new Promise((res, rej) =>
+        this.db.run('DELETE FROM sessions WHERE phone_number = ?', [phoneNumber],
+          function (err) { err ? rej(err) : res(this.changes); })
+      );
+    }
+
     async cleanupExpiredSessions () {
       return new Promise((res, rej) =>
         this.db.run(`DELETE FROM sessions WHERE expires_at < datetime('now')`,
