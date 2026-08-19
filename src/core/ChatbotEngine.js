@@ -1375,6 +1375,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
       const region = this._getSessionRegion(session);
       const support = getSupportInfo(region);
+      this.logger.analyticsEvent({ event: 'verification_failed', reason: 'no_match', sessionId: session.id, region, ts: Date.now() });
       return buttons(
         `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}`,
         [
@@ -1388,6 +1389,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       this.logger.error('[handleVerifyState] API error during verification', { err: e?.message });
       cleared.verify_error_prompt = true;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(cleared) });
+      this.logger.analyticsEvent({ event: 'verification_failed', reason: 'api_error', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
       // Distinct from the "wrong email/DOB" message above — this is a real
       // fetch failure (e.g. Cliniko rate-limited), not a non-matching patient.
       return buttons(
@@ -1453,6 +1455,7 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     if (text === '1' || text.includes('book')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
+      this.logger.analyticsEvent({ event: 'booking_flow_started', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
       return await this.renderBookingMethodMenu(session);
     }
     if (text === '2' || text.includes('cancel')) {
@@ -4762,6 +4765,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const updated = await this.sessionManager.getSession(session.id);
         log.info('Registration success', { email: patient.email, patient_id: newPatientId });
+        this.logger.analyticsEvent({ event: 'registration_completed', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
         return prependTextToEnvelope(`✅ You've been registered!`, await this.renderMainMenu(updated));
       }
       log.warn('Registration returned falsy result');

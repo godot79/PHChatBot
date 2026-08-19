@@ -1221,6 +1221,16 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toMatch(/soonest|history|specific date|physio|clinic/i);
     });
 
+    test('1/book → emits booking_flow_started analytics event', async () => {
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
+      await callHandler(engine, ['handleBookManageOptions'], session, '1');
+      expect(analyticsSpy).toHaveBeenCalledWith(expect.objectContaining({
+        event: 'booking_flow_started',
+        sessionId: session.id,
+      }));
+    });
+
     test('2/cancel → enters cancel flow', async () => {
       const session = await seedAt('BOOK_MANAGE_OPTIONS');
       const reply   = await callHandler(engine, ['handleBookManageOptions'], session, '2');
@@ -4889,6 +4899,23 @@ describe('Dead-end standardization', () => {
         expect.objectContaining({ date_of_birth: '1990-03-15' })
       );
     });
+
+    test('valid DOB completes registration and emits registration_completed analytics event', async () => {
+      engine.clinikoAPI.registerNewPatient.mockResolvedValueOnce({ id: 'NEW-PATIENT-002' });
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
+      await callHandler(engine, ['handleRegisterPatientState'], session, '15 03 1990');
+      expect(analyticsSpy).toHaveBeenCalledWith(expect.objectContaining({
+        event: 'registration_completed', sessionId: session.id,
+      }));
+    });
+
+    test('a rejected DOB format does not emit registration_completed', async () => {
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
+      await callHandler(engine, ['handleRegisterPatientState'], session, 'not a date');
+      expect(analyticsSpy).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'registration_completed' }));
+    });
   });
 
   // ─── Reschedule no-slots ─────────────────────────────────────────────────────
@@ -6288,6 +6315,34 @@ describe('handleVerifyState — email+DOB verification distinguishes real failur
     expect(updated.conversation_state).toBe('VERIFY');
     const data = JSON.parse(updated.data || '{}');
     expect(data.verify_error_prompt).toBe(true);
+  });
+
+  test('genuine non-match emits verification_failed analytics event with reason no_match', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockResolvedValue(null);
+    const session = await verifyStepSession('+6564000005');
+    const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
+    await engine.handleVerifyState(session, '');
+    expect(analyticsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'verification_failed', reason: 'no_match', sessionId: session.id,
+    }));
+  });
+
+  test('a real API failure emits verification_failed analytics event with reason api_error', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockRejectedValue({ status: 429 });
+    const session = await verifyStepSession('+6564000006');
+    const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
+    await engine.handleVerifyState(session, '');
+    expect(analyticsSpy).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'verification_failed', reason: 'api_error', sessionId: session.id,
+    }));
+  });
+
+  test('a successful match does not emit verification_failed', async () => {
+    engine.clinikoAPI.findPatientByEmailAndDob = jest.fn().mockResolvedValue({ id: 'pat-2', email: 'test@example.com' });
+    const session = await verifyStepSession('+6564000007');
+    const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
+    await engine.handleVerifyState(session, '');
+    expect(analyticsSpy).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'verification_failed' }));
   });
 });
 
