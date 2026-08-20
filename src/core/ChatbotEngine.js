@@ -1148,7 +1148,9 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     if (text) {
       const nlu = await NluRouter.classifyIntent(text, this.STATES.INTRO, session);
-      if (NluRouter.isConfident(nlu)) {
+      const matched = NluRouter.isConfident(nlu);
+      this.logger.analyticsEvent({ event: 'nlu_intent_classified', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'INTRO', intent: nlu.intent, confidence: nlu.confidence, matched });
+      if (matched) {
         if (nlu.intent === 'view_fees') {
           await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_FEES });
           const fresh = await this.sessionManager.getSession(session.id);
@@ -1160,6 +1162,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           return await this.handleViewLocationsState(fresh, '');
         }
       }
+      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'INTRO', intent: nlu.intent, confidence: nlu.confidence });
     }
 
     const fallbackPrefix = session._isFirstContactMessage
@@ -1468,7 +1471,9 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     if (text) {
       const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOK_MANAGE_OPTIONS, session);
-      if (NluRouter.isConfident(nlu)) {
+      const matched = NluRouter.isConfident(nlu);
+      this.logger.analyticsEvent({ event: 'nlu_intent_classified', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOK_MANAGE_OPTIONS', intent: nlu.intent, confidence: nlu.confidence, matched });
+      if (matched) {
         if (nlu.intent === 'book_appointment') {
           await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
           this.logger.analyticsEvent({ event: 'booking_flow_started', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), source: 'nlu' });
@@ -1483,6 +1488,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           return await this.handleRescheduleAppointmentState(session, '');
         }
       }
+      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOK_MANAGE_OPTIONS', intent: nlu.intent, confidence: nlu.confidence });
     }
 
     return prependTextToEnvelope('Your response is not understood. Here are the options. Try again.', await this.goToInteractiveMenu(session));
@@ -1632,7 +1638,9 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     if (text) {
       const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOKING_METHOD_OPTIONS, session);
-      if (NluRouter.isConfident(nlu)) {
+      const matched = NluRouter.isConfident(nlu);
+      this.logger.analyticsEvent({ event: 'nlu_intent_classified', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOKING_METHOD_OPTIONS', intent: nlu.intent, confidence: nlu.confidence, matched });
+      if (matched) {
         const BOOKING_METHOD_INTENT_STATES = {
           book_history: [this.STATES.BOOK_HISTORY, this.handleBookHistory],
           book_soonest: [this.STATES.BOOK_SOONEST, this.handleBookSoonest],
@@ -1665,6 +1673,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           return await handler.call(this, session, '');
         }
       }
+      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOKING_METHOD_OPTIONS', intent: nlu.intent, confidence: nlu.confidence });
     }
 
     return prependTextToEnvelope('Please reply with a valid booking method (1–5).', await this.renderBookingMethodMenu(session));
