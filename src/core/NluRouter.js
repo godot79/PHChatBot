@@ -31,6 +31,11 @@ const KNOWN_INTENTS = [
   'book_specific_date',
   'book_specific_physio',
   'book_specific_clinic',
+  // Phase 3: wired at the INTRO dead-end (handleIntroState) only, for
+  // unverified users asking about fees/locations in free text instead of
+  // tapping menu options 3/4.
+  'view_fees',
+  'view_locations',
 ];
 
 // Phase 2 vocabulary: appointment-type slot only, wired into two handlers so

@@ -1146,6 +1146,22 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleViewLocationsState(fresh, '');
     }
 
+    if (text) {
+      const nlu = await NluRouter.classifyIntent(text, this.STATES.INTRO, session);
+      if (NluRouter.isConfident(nlu)) {
+        if (nlu.intent === 'view_fees') {
+          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_FEES });
+          const fresh = await this.sessionManager.getSession(session.id);
+          return await this.handleViewFeesState(fresh, '');
+        }
+        if (nlu.intent === 'view_locations') {
+          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VIEW_LOCATIONS });
+          const fresh = await this.sessionManager.getSession(session.id);
+          return await this.handleViewLocationsState(fresh, '');
+        }
+      }
+    }
+
     const fallbackPrefix = session._isFirstContactMessage
       ? `Thanks for reaching out! To make sure I get your booking right, I'll collect a few details step by step — starting with the options below.`
       : `Let's start again — here are the options.`;

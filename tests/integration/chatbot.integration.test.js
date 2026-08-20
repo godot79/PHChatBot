@@ -654,6 +654,32 @@ describe('ChatbotEngine — state machine', () => {
       const reply = await callHandler(engine, ['handleIntroState'], session, 'book');
       expect(reply).toMatch(/registered with us/i);
     });
+
+    // Phase 3: fees/locations free text at the unverified INTRO dead-end.
+    // Sample text avoids the 'fee'/'location'/'register'/'book'/'manage'
+    // keyword shortcuts above (Phase 1/2 note: keyword branches fire first
+    // and would prevent classifyIntent from ever being called).
+    test('free text with a confident view_fees NLU match → shows fee schedule', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'view_fees', slots: {}, confidence: 0.95 });
+      const session = await seedUnverified('+6531000008');
+      const reply = await callHandler(engine, ['handleIntroState'], session, 'how much does a session cost');
+      expect(reply).toMatch(/fee|price|cost|sgd|hkd|inr|php/i);
+    });
+
+    test('free text with a confident view_locations NLU match → shows locations', async () => {
+      engine.clinikoAPI.getClinics.mockResolvedValue([]);
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'view_locations', slots: {}, confidence: 0.95 });
+      const session = await seedUnverified('+6531000009');
+      const reply = await callHandler(engine, ['handleIntroState'], session, 'where are you guys based');
+      expect(reply).toMatch(/location|address|clinic|where|no clinic/i);
+    });
+
+    test('free text with a low-confidence NLU match → falls through to the fallback menu', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'view_fees', slots: {}, confidence: 0.2 });
+      const session = await seedUnverified('+6531000010');
+      const reply = await callHandler(engine, ['handleIntroState'], session, 'xyz');
+      expect(reply).toMatch(/start again|options below/i);
+    });
   });
 
   // ─── First-contact acknowledgment (regression: Conray Chan support case, 2026-07-25) ──
