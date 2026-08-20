@@ -7,7 +7,7 @@ jest.mock('@anthropic-ai/sdk', () => {
   }));
 });
 
-const { classifyIntent, NO_CLASSIFICATION, isConfident, KNOWN_INTENTS } = require('../../../src/core/NluRouter.js');
+const { classifyIntent, NO_CLASSIFICATION, isConfident, isSlotAutofillable, isSlotSuggestable, KNOWN_INTENTS } = require('../../../src/core/NluRouter.js');
 
 describe('NluRouter.classifyIntent', () => {
   beforeEach(() => {
@@ -77,5 +77,36 @@ describe('NluRouter.isConfident', () => {
 
   test('false for the NO_CLASSIFICATION sentinel', () => {
     expect(isConfident(NO_CLASSIFICATION)).toBe(false);
+  });
+});
+
+// Default thresholds (config/anthropic.js): autofill 0.85, suggest 0.5 — both
+// explicitly placeholders, not calibrated values. These tests pin behavior
+// against whatever the current config exports, not against hardcoded numbers.
+describe('NluRouter.isSlotAutofillable / isSlotSuggestable', () => {
+  const config = require('../../../src/config/anthropic.js');
+
+  test('autofillable when slot confidence meets the autofill threshold', () => {
+    expect(isSlotAutofillable({ value: 'physio', confidence: config.slotAutofillThreshold })).toBe(true);
+    expect(isSlotSuggestable({ value: 'physio', confidence: config.slotAutofillThreshold })).toBe(false);
+  });
+
+  test('suggestable when slot confidence is between suggest and autofill thresholds', () => {
+    const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+    expect(isSlotSuggestable({ value: 'physio', confidence: mid })).toBe(true);
+    expect(isSlotAutofillable({ value: 'physio', confidence: mid })).toBe(false);
+  });
+
+  test('neither autofillable nor suggestable below the suggest threshold', () => {
+    const low = config.slotSuggestThreshold - 0.01;
+    expect(isSlotAutofillable({ value: 'physio', confidence: low })).toBe(false);
+    expect(isSlotSuggestable({ value: 'physio', confidence: low })).toBe(false);
+  });
+
+  test('false for a missing/empty slot value regardless of confidence', () => {
+    expect(isSlotAutofillable({ value: '', confidence: 0.99 })).toBe(false);
+    expect(isSlotSuggestable({ value: '', confidence: 0.99 })).toBe(false);
+    expect(isSlotAutofillable(undefined)).toBe(false);
+    expect(isSlotSuggestable(null)).toBe(false);
   });
 });

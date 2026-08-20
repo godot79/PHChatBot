@@ -1377,6 +1377,70 @@ describe('Booking menu and flow coverage', () => {
       expect(reply).toHaveProperty('interactive');
       expect(reply._textFallback).toMatch(/valid|1–5|booking method/i);
     });
+
+    // Phase 2: a book_specific_clinic match carrying an appointmentType slot
+    // stashes it on session.data for handleBookSpecificClinic to consume once
+    // it has the real type list to match against — everything else (other
+    // intents, no-slot matches) keeps the existing data:null reset behavior.
+    // handleBookSpecificClinic consumes/clears the stash synchronously as part
+    // of the same call (it's chained right after the stash write), so we spy
+    // on the initial updateSession write rather than reading back the final
+    // state — end-to-end matching behavior is covered separately by the
+    // "BOOK_SPECIFIC_CLINIC — NLU appointment-type slot" tests below. Message
+    // text deliberately avoids the '...clinic'/'...history' etc. keyword
+    // shortcuts (see Phase 1 memory note: keyword branches fire before the
+    // NLU branch and would prevent classifyIntent from ever being called).
+    test('confident book_specific_clinic match with an appointmentType slot → stashes it as pending_nlu_slots', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_specific_clinic',
+        slots: { appointmentType: { value: 'massage', confidence: 0.8 } },
+        confidence: 0.95,
+      });
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const updateSpy = jest.spyOn(engine.sessionManager, 'updateSession');
+      await callHandler(engine, ['handleBookingMethodOptions'], session, 'i would like to book something please');
+      const [firstCallArgs] = updateSpy.mock.calls;
+      const [, firstPatch] = firstCallArgs;
+      expect(firstPatch.conversation_state).toBe('BOOK_SPECIFIC_CLINIC');
+      const stashed = JSON.parse(firstPatch.data || '{}');
+      expect(stashed.pending_nlu_slots?.appointmentType).toEqual({ value: 'massage', confidence: 0.8 });
+      updateSpy.mockRestore();
+    });
+
+    test('confident book_soonest match (no clinic slot support) → still resets data to null', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_soonest',
+        slots: { appointmentType: { value: 'massage', confidence: 0.9 } },
+        confidence: 0.95,
+      });
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const updateSpy = jest.spyOn(engine.sessionManager, 'updateSession');
+      await callHandler(engine, ['handleBookingMethodOptions'], session, 'just get me the earliest one available');
+      const [firstCallArgs] = updateSpy.mock.calls;
+      const [, firstPatch] = firstCallArgs;
+      expect(firstPatch.data).toBeNull();
+      updateSpy.mockRestore();
+    });
+
+    // book_by_type: type named, no method/clinic decided — routes into
+    // BOOK_SOONEST's own funnel (type -> physio -> clinic) and carries the
+    // slot the same way book_specific_clinic does.
+    test('confident book_by_type match with an appointmentType slot → routes to BOOK_SOONEST and stashes the slot', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_by_type',
+        slots: { appointmentType: { value: 'massage', confidence: 0.8 } },
+        confidence: 0.95,
+      });
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const updateSpy = jest.spyOn(engine.sessionManager, 'updateSession');
+      await callHandler(engine, ['handleBookingMethodOptions'], session, 'i would like to book something please');
+      const [firstCallArgs] = updateSpy.mock.calls;
+      const [, firstPatch] = firstCallArgs;
+      expect(firstPatch.conversation_state).toBe('BOOK_SOONEST');
+      const stashed = JSON.parse(firstPatch.data || '{}');
+      expect(stashed.pending_nlu_slots?.appointmentType).toEqual({ value: 'massage', confidence: 0.8 });
+      updateSpy.mockRestore();
+    });
   });
 
   // ─── Re-entry regression: stale data must be cleared when switching booking method ─
@@ -2851,6 +2915,90 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── Phase 2 — NLU appointment-type slot extraction (BOOK_SOONEST / book_by_type) ─
+  // Same mechanism as BOOK_SPECIFIC_CLINIC's slot handling, generalized to the
+  // funnel_catalogue shape here. Slot value 'return visit' is a deliberate
+  // substring of the default mock's 'Return Visit (Existing Clients)' type.
+  // Default getAvailableSlotsByBusinessAndDate mock only returns a slot for
+  // AT-001 (Initial visit), so matching to AT-002 (Return visit) correctly
+  // stops at a no-slots-for-this-type retry rather than cascading into
+  // SELECT_SLOT — keeps these tests asserting the flat post-match data shape.
+  describe('BOOK_SOONEST — NLU appointment-type slot (Phase 2 / book_by_type)', () => {
+    const config = require('../../src/config/anthropic.js');
+
+    test('high-confidence slot → auto-fills type, skips the duration/type prompt', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type',
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).not.toMatch(/select duration|what type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.id).toBe('AT-002');
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('medium-confidence slot → shows a "did you mean" suggestion, does not auto-fill', async () => {
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type',
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: mid } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      expect(reply).toMatch(/return visit/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_type_suggestion');
+      expect(d.suggested_appt_type?.id).toBe('AT-002');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('low-confidence slot → falls straight through to the unchanged funnel', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_type',
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotSuggestThreshold - 0.01 } },
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('confirming a suggestion applies it, same as a manual funnel selection', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'confirm_type_suggestion',
+        suggested_appt_type: FUNNEL_CAT_2,
+        navigation_chain: [{ selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false }],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, 'confirm_type');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.id).toBe('AT-002');
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    test('declining a suggestion re-enters the normal funnel, no type applied', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'confirm_type_suggestion',
+        suggested_appt_type: FUNNEL_CAT_2,
+        navigation_chain: [{ selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, 'change_type'));
+      expect(reply).toMatch(/select duration|what type|physiotherapy/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+  });
+
   // ─── BOOK_SOONEST — funnel step pagination ───────────────────────────────────
   // Reproduces the 2026-07-19 production incident: the funnel's service/insurer/
   // final_pick prompts rendered every option in one unpaginated WhatsApp list
@@ -3908,6 +4056,142 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data || '{}');
       expect(d.no_slots_prompt?.context).toBe('clinic');
+    });
+  });
+
+  // ─── Phase 2 — NLU appointment-type slot extraction (BOOK_SPECIFIC_CLINIC only) ─
+  describe('BOOK_SPECIFIC_CLINIC — NLU appointment-type slot (Phase 2)', () => {
+    const config = require('../../src/config/anthropic.js');
+
+    const mockTwoTypesAtOnePhysio = () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+      ]);
+    };
+
+    // Slot value 'return visit' is a deliberate substring of the mocked
+    // 'Return Visit (Existing Clients)' type's norm_name so the fuzzy
+    // (substring) matcher resolves it to AT-002.
+    test('high-confidence slot → auto-fills type, skips the type list entirely', async () => {
+      mockTwoTypesAtOnePhysio();
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).not.toMatch(/select visit type for prohealth in touch/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      // The type auto-fill can cascade all the way to a real slot list (single
+      // physio/single insurer here), which moves selected_appt_type under
+      // prev_state_data — check whichever shape the flow actually reached.
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('medium-confidence slot → shows a "did you mean" suggestion, does not auto-fill', async () => {
+      mockTwoTypesAtOnePhysio();
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: mid } },
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      expect(reply).toMatch(/return visit/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_type_suggestion');
+      expect(d.suggested_appt_type?.ids).toContain('AT-002');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('low-confidence slot → falls straight through to the unchanged type list', async () => {
+      mockTwoTypesAtOnePhysio();
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotSuggestThreshold - 0.01 } },
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('no matching type in the slot value → falls through to the unchanged type list', async () => {
+      mockTwoTypesAtOnePhysio();
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        pending_nlu_slots: { appointmentType: { value: 'something nobody offers', confidence: 0.99 } },
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+    });
+
+    test('confirming a suggestion applies it, same as a manual selection', async () => {
+      mockTwoTypesAtOnePhysio();
+      // Stop the cascade right after type/insurer resolution (before it reaches
+      // a real slot list, which would move selected_appt_type under
+      // prev_state_data) so we can assert the flat post-confirm shape directly.
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValueOnce([]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'confirm_type_suggestion',
+        selected_clinic: CLINIC_1,
+        suggested_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)', ids: ['AT-001'], entries: [{ id: 'AT-001', insurer: null }] },
+        navigation_chain: [
+          { selection_step: 'choose_clinic', had_multiple_options: true, auto: false },
+          { selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false },
+        ],
+      });
+      await callHandler(engine, ['handleBookSpecificClinic'], session, 'confirm_type');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.ids).toContain('AT-001');
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    test('declining a suggestion shows the normal type list, no type applied', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'confirm_type_suggestion',
+        selected_clinic: CLINIC_1,
+        suggested_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)', ids: ['AT-001'], entries: [{ id: 'AT-001', insurer: null }] },
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)',    norm_name: 'return visit (existing clients)',    ids: ['AT-002'] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [
+          { selection_step: 'choose_clinic', had_multiple_options: true, auto: false },
+          { selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false },
+        ],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, 'change_type'));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.suggested_appt_type).toBeUndefined();
     });
   });
 

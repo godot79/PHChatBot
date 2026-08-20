@@ -86,27 +86,9 @@ const REGION_TZ = {
 
 // ====== NAVIGATION HELPERS ======
 
-/**
- * Normalize appointment type names for consistent matching and dedupe.
- * - Collapses repeated whitespace
- * - Ensures a single space before '(' and no extra space before ')'
- * - Normalizes Unicode dashes to '-'
- * - Lowercases and trims
- *
- * @param {string} s
- * @returns {string}
- */
-function normalizeTypeName(s) {
-  return String(s || '')
-    .replace(/\s+/g, ' ')
-    .replace(/([A-Za-z])\(/g, '$1 (')
-    .replace(/\s+\)/g, ')')
-    .replace(/[\u2010-\u2015]/g, '-') // Unicode dashes \u2192 ASCII hyphen
-    .replace(/-/g, ' ')               // hyphens \u2192 spaces so "Follow-Up" === "Follow Up"
-    .replace(/\s+/g, ' ')             // collapse any new consecutive spaces
-    .toLowerCase()
-    .trim();
-}
+// normalizeTypeName is centralized in _slotHelpers.js so both menu-driven
+// matching here and NLU slot extraction (NluRouter/Phase 2+) use identical rules.
+const { normalizeTypeName } = require('./_slotHelpers.js');
 
 /**
  * Push a step entry into navigation_chain.
@@ -1638,15 +1620,32 @@ async handleMessageEnvelope(message, phoneNumber) {
         const BOOKING_METHOD_INTENT_STATES = {
           book_history: [this.STATES.BOOK_HISTORY, this.handleBookHistory],
           book_soonest: [this.STATES.BOOK_SOONEST, this.handleBookSoonest],
+          // book_by_type: type named, no specific method/clinic decided — routes
+          // into the same BOOK_SOONEST funnel (type -> physio -> clinic), which
+          // already resolves this shape of request rather than forcing a
+          // method choice first (see NluRouter.js KNOWN_INTENTS comment).
+          book_by_type: [this.STATES.BOOK_SOONEST, this.handleBookSoonest],
           book_specific_date: [this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate],
           book_specific_physio: [this.STATES.BOOK_SPECIFIC_PHYSIO, this.handleBookSpecificPhysio],
           book_specific_clinic: [this.STATES.BOOK_SPECIFIC_CLINIC, this.handleBookSpecificClinic],
         };
+        // Intents whose appointmentType slot (if any) should be stashed for the
+        // target handler to consume — see SLOT_CONSUMING_INTENTS' handlers'
+        // own choose_type steps (handleBookSpecificClinic, handleBookSoonest).
+        const SLOT_CONSUMING_INTENTS = new Set(['book_specific_clinic', 'book_by_type']);
         const match = BOOKING_METHOD_INTENT_STATES[nlu.intent];
         if (match) {
           const [state, handler] = match;
-          await this.sessionManager.updateSession(session.id, { conversation_state: state, data: null });
-          session.data = null;
+          // Slot pre-fill (Phase 2): stash the raw NLU slot on session.data so
+          // the handler can match/apply it once it has the real appointment-
+          // type list to match against. Consumed exactly once inside the
+          // handler's own choose_type step.
+          let initialData = null;
+          if (SLOT_CONSUMING_INTENTS.has(nlu.intent) && nlu.slots && nlu.slots.appointmentType) {
+            initialData = JSON.stringify({ pending_nlu_slots: { appointmentType: nlu.slots.appointmentType } });
+          }
+          await this.sessionManager.updateSession(session.id, { conversation_state: state, data: initialData });
+          session.data = initialData;
           return await handler.call(this, session, '');
         }
       }
@@ -2843,6 +2842,32 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.handleBookSoonest(session, '');
     }
 
+    // ===== confirm_type_suggestion (Phase 2 NLU slot suggestion): "Did you
+    // mean X?" for a medium-confidence appointment-type slot match. Never
+    // auto-applied and never silently discarded — the user decides. Declining,
+    // an unrecognized reply, or reaching this step with no live suggestion
+    // (e.g. via Back after it was already resolved) all converge on the same
+    // unmodified choose_type funnel — no duplicated rendering logic. =====
+    if (data.selection_step === 'confirm_type_suggestion') {
+      if (data.suggested_appt_type && text === 'confirm_type') {
+        data.selected_appt_type = data.suggested_appt_type;
+        delete data.suggested_appt_type;
+        data.selection_step = 'choose_type';
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+        return await this.handleBookSoonest(session, '');
+      }
+      if (data.suggested_appt_type && text === '') {
+        return buttons(`Did you mean *${data.suggested_appt_type.name}*?`, [
+          { id: 'confirm_type', title: 'Yes' },
+          { id: 'change_type', title: 'Choose from list' },
+        ]);
+      }
+      delete data.suggested_appt_type;
+      data.selection_step = 'choose_type';
+      await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+      return await this.handleBookSoonest(session, '');
+    }
+
     // ===== choose_type — funnel =====
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.funnel_catalogue)) {
@@ -2856,6 +2881,39 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           confirmedMessage: 'No appointment types are available right now.',
         });
+      }
+
+      // Phase 2: consume a pending NLU appointment-type slot exactly once, now
+      // that funnel_catalogue/appointment_type_list exist to match it against.
+      // Same discipline as handleBookSpecificClinic: the raw LLM value only
+      // picks which existing catalogue entry to apply, never bypasses it —
+      // matched via appointment_type_list's norm_name, then mapped to the
+      // funnel_catalogue entry sharing that id.
+      const pendingSlot = data.pending_nlu_slots && data.pending_nlu_slots.appointmentType;
+      if (data.pending_nlu_slots) delete data.pending_nlu_slots.appointmentType;
+      if (pendingSlot && typeof pendingSlot.value === 'string' && !data.selected_appt_type) {
+        const slotNorm = normName(pendingSlot.value);
+        const matchedListEntry = (data.appointment_type_list || []).find(t => t.norm_name === slotNorm)
+          || (data.appointment_type_list || []).find(t => t.norm_name.includes(slotNorm) || slotNorm.includes(t.norm_name));
+        const matchedCatalogueEntry = matchedListEntry
+          ? (data.funnel_catalogue || []).find(f => String(f.id) === String(matchedListEntry.id))
+          : null;
+        if (matchedCatalogueEntry && NluRouter.isSlotAutofillable(pendingSlot)) {
+          data.selected_appt_type = matchedCatalogueEntry;
+          navPush(data, 'choose_type', { had_multiple_options: (data.funnel_catalogue || []).length > 1, auto: true });
+          await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+          return await this.handleBookSoonest(session, '');
+        }
+        if (matchedCatalogueEntry && NluRouter.isSlotSuggestable(pendingSlot)) {
+          data.suggested_appt_type = matchedCatalogueEntry;
+          data.selection_step = 'confirm_type_suggestion';
+          navPush(data, 'confirm_type_suggestion', { had_multiple_options: true });
+          await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+          return buttons(`Did you mean *${matchedCatalogueEntry.name}*?`, [
+            { id: 'confirm_type', title: 'Yes' },
+            { id: 'change_type', title: 'Choose from list' },
+          ]);
+        }
       }
 
       if (!data.selected_appt_type) {
@@ -4099,6 +4157,35 @@ if (/^p(rev)?$/i.test(text)) {
         );
         data.appt_type_page = 0;
 
+        // Phase 2: consume a pending NLU appointment-type slot exactly once,
+        // now that the real type list exists to match it against. The raw LLM
+        // slot value is never trusted directly — it's only used to pick which
+        // *existing* entry (already ID-matched to real Cliniko types above) to
+        // apply, same discipline as every manual selection in this handler.
+        const pendingSlot = data.pending_nlu_slots && data.pending_nlu_slots.appointmentType;
+        if (data.pending_nlu_slots) delete data.pending_nlu_slots.appointmentType;
+        if (pendingSlot && typeof pendingSlot.value === 'string') {
+          const slotNorm = normName(pendingSlot.value);
+          const matched = data.appointment_type_list.find(t => t.norm_name === slotNorm)
+            || data.appointment_type_list.find(t => t.norm_name.includes(slotNorm) || slotNorm.includes(t.norm_name));
+          if (matched && NluRouter.isSlotAutofillable(pendingSlot)) {
+            this._applyTypeSelection(data, matched);
+            navPush(data, 'choose_type', { had_multiple_options: data.appointment_type_list.length > 1, auto: true });
+            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+            return await this.handleBookSpecificClinic(session, '');
+          }
+          if (matched && NluRouter.isSlotSuggestable(pendingSlot)) {
+            data.suggested_appt_type = { ...matched };
+            data.selection_step = 'confirm_type_suggestion';
+            navPush(data, 'confirm_type_suggestion', { had_multiple_options: true });
+            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+            return buttons(`Did you mean *${matched.name}*?`, [
+              { id: 'confirm_type', title: 'Yes' },
+              { id: 'change_type', title: 'Choose from list' },
+            ]);
+          }
+        }
+
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_type', data.appointment_type_list.length, () => {
           this._applyTypeSelection(data, data.appointment_type_list[0]);
         }) : { advanced: false };
@@ -4145,6 +4232,31 @@ if (/^p(rev)?$/i.test(text)) {
         header: `Select visit type for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
       });
       return replyTypes;
+    }
+
+    // ===== confirm_type_suggestion (Phase 2 NLU slot suggestion): "Did you
+    // mean X?" for a medium-confidence appointment-type slot match. Never
+    // auto-applied and never silently discarded — the user decides. Declining,
+    // an unrecognized reply, or reaching this step with no live suggestion
+    // (e.g. via Back after it was already resolved) all converge on the same
+    // unmodified choose_type list — no duplicated rendering logic. =====
+    if (data.selection_step === 'confirm_type_suggestion') {
+      if (data.suggested_appt_type && text === 'confirm_type') {
+        this._applyTypeSelection(data, data.suggested_appt_type);
+        delete data.suggested_appt_type;
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+        return await this.handleBookSpecificClinic(session, '');
+      }
+      if (data.suggested_appt_type && text === '') {
+        return buttons(`Did you mean *${data.suggested_appt_type.name}*?`, [
+          { id: 'confirm_type', title: 'Yes' },
+          { id: 'change_type', title: 'Choose from list' },
+        ]);
+      }
+      delete data.suggested_appt_type;
+      data.selection_step = 'choose_type';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      return await this.handleBookSpecificClinic(session, '');
     }
 
     // ===== choose_type_insurer: disambiguate insurer for a same-named type. Not a

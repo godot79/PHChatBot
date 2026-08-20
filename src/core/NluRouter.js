@@ -10,8 +10,20 @@ const NO_CLASSIFICATION = { intent: null, slots: {}, confidence: 0 };
 // keyword at the two dead-end fallback sites this phase wires in
 // (handleBookManageOptions, handleBookingMethodOptions in ChatbotEngine.js).
 // Extend only alongside a phase that actually wires the new intent somewhere.
+//
+// 'book_appointment' is a generic catch-all, correctly wired at the outer
+// BOOK_MANAGE_OPTIONS dead-end (handleBookManageOptions, ChatbotEngine.js
+// ~1456: "wants to book, hasn't said how" -> booking-method menu). It's
+// unhandled at the inner BOOKING_METHOD_OPTIONS site though (user already
+// said "book"), and a live check (2026-08-20) showed Haiku reaches for it
+// there on type-only phrasing ("book me a massage", "new patient assessment
+// please"), dead-ending those messages. 'book_by_type' covers that inner
+// case instead: type named, no specific method/clinic — routes into the
+// BOOK_SOONEST funnel (type -> physio -> clinic), which already resolves
+// exactly this shape of request instead of forcing a method choice first.
 const KNOWN_INTENTS = [
   'book_appointment',
+  'book_by_type',
   'cancel_appointment',
   'reschedule_appointment',
   'book_history',
@@ -21,14 +33,34 @@ const KNOWN_INTENTS = [
   'book_specific_clinic',
 ];
 
+// Phase 2 vocabulary: appointment-type slot only, wired into two handlers so
+// far — BOOK_SPECIFIC_CLINIC (book_specific_clinic: clinic already decided)
+// and BOOK_SOONEST (book_by_type: type named, method/clinic not decided).
+// Each slot carries its own confidence so a confident intent match doesn't
+// force a low-confidence slot guess to be either silently applied or
+// silently dropped — see isSlotAutofillable/isSlotSuggestable below and
+// config/anthropic.js for the threshold split.
 const CLASSIFY_TOOL = {
   name: 'classify_intent',
-  description: 'Classify a WhatsApp user message into a known booking-bot intent with extracted slots.',
+  description: 'Classify a WhatsApp user message into a known booking-bot intent, with optional extracted slots for booking intents.',
   input_schema: {
     type: 'object',
     properties: {
       intent: { type: 'string', enum: KNOWN_INTENTS },
-      slots: { type: 'object' },
+      slots: {
+        type: 'object',
+        properties: {
+          appointmentType: {
+            type: 'object',
+            description: 'Appointment/visit type mentioned in the message (e.g. "physio", "massage"), if any.',
+            properties: {
+              value: { type: 'string', description: 'The appointment type as mentioned by the user, in their own words.' },
+              confidence: { type: 'number', description: 'Confidence 0-1 that this slot value is correct.' },
+            },
+            required: ['value', 'confidence'],
+          },
+        },
+      },
       confidence: { type: 'number' },
     },
     required: ['intent', 'confidence'],
@@ -42,6 +74,21 @@ function isConfident(result) {
   return !!result && typeof result.confidence === 'number'
     && result.confidence >= config.intentConfidenceThreshold
     && KNOWN_INTENTS.includes(result.intent);
+}
+
+// Slot-confidence tiers, mirroring isConfident's single-source-of-truth
+// pattern so callers never compare against config.slot*Threshold directly.
+function isSlotAutofillable(slot) {
+  return !!slot && typeof slot.confidence === 'number'
+    && typeof slot.value === 'string' && slot.value.length > 0
+    && slot.confidence >= config.slotAutofillThreshold;
+}
+
+function isSlotSuggestable(slot) {
+  return !!slot && typeof slot.confidence === 'number'
+    && typeof slot.value === 'string' && slot.value.length > 0
+    && slot.confidence >= config.slotSuggestThreshold
+    && slot.confidence < config.slotAutofillThreshold;
 }
 
 let _client = null;
@@ -79,4 +126,4 @@ async function classifyIntent(text, currentState, sessionContext) {
   }
 }
 
-module.exports = { classifyIntent, NO_CLASSIFICATION, KNOWN_INTENTS, isConfident };
+module.exports = { classifyIntent, NO_CLASSIFICATION, KNOWN_INTENTS, isConfident, isSlotAutofillable, isSlotSuggestable };
