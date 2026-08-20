@@ -101,6 +101,7 @@ Prefer:
 ## Cliniko policy
 - If Cliniko behavior is not clear from the repo, say so.
 - If needed, consult Cliniko public API docs before proposing implementation or test changes.
+- Multiple region keys exist in `.env` (`CLINIKO_API_KEY_HK`, `_SG`, `_PH`, `_IN`, plus a base `CLINIKO_API_KEY`). Default to `CLINIKO_API_KEY_HK` for live testing unless explicitly asked to test another region.
 - For live integration testing:
   - never run against live data without explicit approval
   - prefer read-only checks first
