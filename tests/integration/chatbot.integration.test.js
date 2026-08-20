@@ -241,12 +241,25 @@ jest.mock('../../src/core/DatabaseManager', () => {
 jest.mock('../../src/api/ClinikoAPI');
 jest.mock('../../src/api/WhatsAppAPI');
 
+// Never hit the real Anthropic API from Jest. classifyIntent is mocked to a
+// no-op sentinel by default (matches "no classification"); tests that need a
+// confident NLU match override it with mockResolvedValueOnce. isConfident/
+// KNOWN_INTENTS stay real so threshold logic is exercised as written.
+jest.mock('../../src/core/NluRouter', () => {
+  const actual = jest.requireActual('../../src/core/NluRouter');
+  return {
+    ...actual,
+    classifyIntent: jest.fn().mockResolvedValue(actual.NO_CLASSIFICATION),
+  };
+});
+
 // ─── Imports (after all mocks are registered) ─────────────────────────────────
 const DatabaseManager = require('../../src/core/DatabaseManager');
 const SessionManager  = require('../../src/core/SessionManager');
 const ChatbotEngine   = require('../../src/core/ChatbotEngine');
 const ClinikoAPI      = require('../../src/api/ClinikoAPI');
 const WhatsAppAPI     = require('../../src/api/WhatsAppAPI');
+const NluRouter       = require('../../src/core/NluRouter');
 
 // ─── Shared test data ─────────────────────────────────────────────────────────
 const PATIENT_ID = 'PAT-TEST-001';
@@ -1260,6 +1273,22 @@ describe('Booking menu and flow coverage', () => {
       expect(typeof reply).toBe('string');
       expect(reply.length).toBeGreaterThan(0);
     });
+
+    test('free text with a confident NLU match → jumps to the matching flow instead of the fallback', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'cancel_appointment', slots: {}, confidence: 0.95 });
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, 'get rid of my upcoming session please');
+      expect(reply).not.toMatch(/not understood/i);
+      const updated = await db.getSession(session.id);
+      expect(['CANCEL_APPOINTMENT', 'CONFIRM_CANCEL']).toContain(updated.conversation_state);
+    });
+
+    test('free text with a low-confidence NLU match → falls through to the fallback message', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'cancel_appointment', slots: {}, confidence: 0.2 });
+      const session = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookManageOptions'], session, 'xyz');
+      expect(reply).toMatch(/not understood/i);
+    });
   });
 
   // ─── BOOKING_METHOD_OPTIONS ───────────────────────────────────────────────────
@@ -1330,6 +1359,23 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookingMethodOptions'], session, 'back');
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('BOOK_MANAGE_OPTIONS');
+    });
+
+    test('free text with a confident NLU match → jumps to the matching booking method', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_soonest', slots: {}, confidence: 0.95 });
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply   = await callHandler(engine, ['handleBookingMethodOptions'], session, 'just get me the earliest one available');
+      expect(reply).not.toMatch(/valid|1–5|booking method/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).not.toBe('BOOKING_METHOD_OPTIONS');
+    });
+
+    test('free text with a low-confidence NLU match → stays on the validation fallback', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_soonest', slots: {}, confidence: 0.2 });
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const reply = await engine.handleBookingMethodOptions(session, 'xyz');
+      expect(reply).toHaveProperty('interactive');
+      expect(reply._textFallback).toMatch(/valid|1–5|booking method/i);
     });
   });
 

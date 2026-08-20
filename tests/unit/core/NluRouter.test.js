@@ -7,7 +7,7 @@ jest.mock('@anthropic-ai/sdk', () => {
   }));
 });
 
-const { classifyIntent, NO_CLASSIFICATION } = require('../../../src/core/NluRouter.js');
+const { classifyIntent, NO_CLASSIFICATION, isConfident, KNOWN_INTENTS } = require('../../../src/core/NluRouter.js');
 
 describe('NluRouter.classifyIntent', () => {
   beforeEach(() => {
@@ -58,5 +58,24 @@ describe('NluRouter.classifyIntent', () => {
     const result = await classifyIntent('hello');
 
     expect(result).toEqual(NO_CLASSIFICATION);
+  });
+});
+
+describe('NluRouter.isConfident', () => {
+  test('true when confidence meets the configured threshold (default 0.7) and intent is known', () => {
+    expect(isConfident({ intent: 'book_appointment', confidence: 0.7 })).toBe(true);
+    expect(isConfident({ intent: KNOWN_INTENTS[0], confidence: 0.99 })).toBe(true);
+  });
+
+  test('false when confidence is below the threshold', () => {
+    expect(isConfident({ intent: 'book_appointment', confidence: 0.69 })).toBe(false);
+  });
+
+  test('false for an unknown intent regardless of confidence', () => {
+    expect(isConfident({ intent: 'order_pizza', confidence: 0.99 })).toBe(false);
+  });
+
+  test('false for the NO_CLASSIFICATION sentinel', () => {
+    expect(isConfident(NO_CLASSIFICATION)).toBe(false);
   });
 });

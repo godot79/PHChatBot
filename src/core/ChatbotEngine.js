@@ -19,6 +19,7 @@ const {
   _markPartial,
 } = require('./_appointmentTypeHelpers');
 const { bulkAll } = require('./BulkContext');
+const NluRouter = require('./NluRouter');
 
 
 function getMailerConfig() {
@@ -1466,6 +1467,26 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
       return await this.handleRescheduleAppointmentState(session, '');
     }
+
+    if (text) {
+      const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOK_MANAGE_OPTIONS, session);
+      if (NluRouter.isConfident(nlu)) {
+        if (nlu.intent === 'book_appointment') {
+          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
+          this.logger.analyticsEvent({ event: 'booking_flow_started', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), source: 'nlu' });
+          return await this.renderBookingMethodMenu(session);
+        }
+        if (nlu.intent === 'cancel_appointment') {
+          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CANCEL_APPOINTMENT });
+          return await this.handleCancelAppointmentState(session, '');
+        }
+        if (nlu.intent === 'reschedule_appointment') {
+          await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
+          return await this.handleRescheduleAppointmentState(session, '');
+        }
+      }
+    }
+
     return prependTextToEnvelope('Your response is not understood. Here are the options. Try again.', await this.goToInteractiveMenu(session));
   }
 
@@ -1610,6 +1631,27 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = null;
       return await this.handleBookSpecificClinic(session, '');
     }
+
+    if (text) {
+      const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOKING_METHOD_OPTIONS, session);
+      if (NluRouter.isConfident(nlu)) {
+        const BOOKING_METHOD_INTENT_STATES = {
+          book_history: [this.STATES.BOOK_HISTORY, this.handleBookHistory],
+          book_soonest: [this.STATES.BOOK_SOONEST, this.handleBookSoonest],
+          book_specific_date: [this.STATES.BOOK_SPECIFIC_DATE, this.handleBookSpecificDate],
+          book_specific_physio: [this.STATES.BOOK_SPECIFIC_PHYSIO, this.handleBookSpecificPhysio],
+          book_specific_clinic: [this.STATES.BOOK_SPECIFIC_CLINIC, this.handleBookSpecificClinic],
+        };
+        const match = BOOKING_METHOD_INTENT_STATES[nlu.intent];
+        if (match) {
+          const [state, handler] = match;
+          await this.sessionManager.updateSession(session.id, { conversation_state: state, data: null });
+          session.data = null;
+          return await handler.call(this, session, '');
+        }
+      }
+    }
+
     return prependTextToEnvelope('Please reply with a valid booking method (1–5).', await this.renderBookingMethodMenu(session));
   }
 
