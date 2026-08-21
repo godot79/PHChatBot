@@ -3025,6 +3025,217 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── Phase 5 — NLU date slot extraction (BOOK_SPECIFIC_DATE / choose_date) ───
+  // Candidate dates are generated fresh each render (next weekdays from
+  // tomorrow, skipping Sundays) — these helpers reproduce that exact logic so
+  // the test picks a real candidate instead of a hardcoded date that could
+  // drift out of the window or land on a skipped Sunday.
+  describe('BOOK_SPECIFIC_DATE — NLU date slot (Phase 5)', () => {
+    const config = require('../../src/config/anthropic.js');
+    function firstCandidateDate() {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + 1);
+      while (d.getDay() === 0) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    function ymdLocal(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    const candidateIso = ymdLocal(firstCandidateDate());
+
+    test('high-confidence slot → auto-fills the date, skips the date picker', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        pending_nlu_slots: { date: { value: candidateIso, confidence: config.slotAutofillThreshold } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).not.toMatch(/pick a date/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(candidateIso);
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.pending_nlu_slots?.date).toBeUndefined();
+    });
+
+    test('medium-confidence slot → shows a "did you mean" suggestion, does not auto-fill', async () => {
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        pending_nlu_slots: { date: { value: candidateIso, confidence: mid } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_date_suggestion');
+      expect(d.suggested_date).toBe(candidateIso);
+      expect(d.selected_date).toBeUndefined();
+      expect(d.pending_nlu_slots?.date).toBeUndefined();
+    });
+
+    test('low-confidence slot → falls straight through to the unchanged date picker', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        pending_nlu_slots: { date: { value: candidateIso, confidence: config.slotSuggestThreshold - 0.01 } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/pick a date/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBeUndefined();
+      expect(d.pending_nlu_slots?.date).toBeUndefined();
+    });
+
+    test('a slot value outside the candidate window never auto-fills or suggests', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        pending_nlu_slots: { date: { value: '2099-01-01', confidence: 0.99 } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/pick a date/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBeUndefined();
+      expect(d.selection_step).toBe('choose_date');
+    });
+
+    test('confirming a date suggestion applies it, same as a manual pick', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'confirm_date_suggestion',
+        suggested_date: candidateIso,
+        navigation_chain: [{ selection_step: 'confirm_date_suggestion', had_multiple_options: true, auto: false }],
+      });
+      await callHandler(engine, ['handleBookSpecificDate'], session, 'confirm_date');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(candidateIso);
+      expect(d.suggested_date).toBeUndefined();
+      expect(d.selection_step).toBe('choose_type');
+    });
+
+    test('declining a date suggestion re-enters the date picker, no date applied', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'confirm_date_suggestion',
+        suggested_date: candidateIso,
+        navigation_chain: [{ selection_step: 'confirm_date_suggestion', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'change_date'));
+      expect(reply).toMatch(/pick a date/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBeUndefined();
+      expect(d.suggested_date).toBeUndefined();
+    });
+  });
+
+  // ─── Phase 5 — NLU physio slot extraction (BOOK_SPECIFIC_PHYSIO / choose_physio) ─
+  describe('BOOK_SPECIFIC_PHYSIO — NLU physio slot (Phase 5)', () => {
+    const config = require('../../src/config/anthropic.js');
+    const UNIQUE_PHYSIO = { id: 'PRAC-010', first_name: 'Zoe', last_name: 'Zephyr' };
+    const AMBIGUOUS_PHYSIOS = [
+      { id: 'PRAC-001', first_name: 'Amy', last_name: 'Phy' },
+      { id: 'PRAC-002', first_name: 'Bob', last_name: 'Phy' },
+    ];
+
+    test('high-confidence, unambiguous name slot → auto-fills the physio, skips the physio list', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_physio',
+        practitioner_list: [UNIQUE_PHYSIO],
+        pending_nlu_slots: { physio: { value: 'Zoe', confidence: config.slotAutofillThreshold } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).not.toMatch(/choose a physio/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-010');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.pending_nlu_slots?.physio).toBeUndefined();
+    });
+
+    test('medium-confidence slot → shows a "did you mean" suggestion, does not auto-fill', async () => {
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_physio',
+        practitioner_list: [UNIQUE_PHYSIO],
+        pending_nlu_slots: { physio: { value: 'Zoe', confidence: mid } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      expect(reply).toMatch(/zoe/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_physio_suggestion');
+      expect(String(d.suggested_physio?.id)).toBe('PRAC-010');
+      expect(d.selected_physio).toBeUndefined();
+    });
+
+    test('low-confidence slot → falls straight through to the unchanged physio list', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_physio',
+        practitioner_list: [UNIQUE_PHYSIO],
+        pending_nlu_slots: { physio: { value: 'Zoe', confidence: config.slotSuggestThreshold - 0.01 } },
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_physio).toBeUndefined();
+      expect(d.pending_nlu_slots?.physio).toBeUndefined();
+    });
+
+    test('a name matching more than one practitioner never auto-fills — ambiguity falls through to the list', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_physio',
+        practitioner_list: AMBIGUOUS_PHYSIOS,
+        pending_nlu_slots: { physio: { value: 'Phy', confidence: 0.99 } },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/choose a physio/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_physio).toBeUndefined();
+    });
+
+    test('confirming a physio suggestion applies it, same as a manual pick', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'confirm_physio_suggestion',
+        suggested_physio: UNIQUE_PHYSIO,
+        navigation_chain: [{ selection_step: 'confirm_physio_suggestion', had_multiple_options: true, auto: false }],
+      });
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, 'confirm_physio');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-010');
+      expect(d.suggested_physio).toBeUndefined();
+      expect(d.selection_step).toBe('choose_type');
+    });
+
+    test('declining a physio suggestion re-enters the physio list, no physio applied', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'confirm_physio_suggestion',
+        suggested_physio: UNIQUE_PHYSIO,
+        navigation_chain: [{ selection_step: 'confirm_physio_suggestion', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'change_physio'));
+      expect(reply).toMatch(/choose a physio/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_physio).toBeUndefined();
+      expect(d.suggested_physio).toBeUndefined();
+    });
+  });
+
   // ─── BOOK_SOONEST — funnel step pagination ───────────────────────────────────
   // Reproduces the 2026-07-19 production incident: the funnel's service/insurer/
   // final_pick prompts rendered every option in one unpaginated WhatsApp list

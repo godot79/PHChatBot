@@ -38,6 +38,17 @@ const KNOWN_INTENTS = [
   'view_locations',
 ];
 
+// Phase 5: date/physio slots let a single message pick the right existing
+// funnel (BOOK_SPECIFIC_DATE / BOOK_SPECIFIC_PHYSIO) instead of always
+// collapsing to book_by_type/book_appointment. Model resolves relative
+// phrasing ("next Tuesday") against the "today" date given in the system
+// prompt (see buildSystemPrompt below) and must return an absolute
+// YYYY-MM-DD, never a relative string.
+const TODAY_ISO = () => new Date().toISOString().slice(0, 10);
+function buildSystemPrompt() {
+  return `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan".`;
+}
+
 // Phase 2 vocabulary: appointment-type slot only, wired into two handlers so
 // far — BOOK_SPECIFIC_CLINIC (book_specific_clinic: clinic already decided)
 // and BOOK_SOONEST (book_by_type: type named, method/clinic not decided).
@@ -60,6 +71,24 @@ const CLASSIFY_TOOL = {
             description: 'Appointment/visit type mentioned in the message (e.g. "physio", "massage"), if any.',
             properties: {
               value: { type: 'string', description: 'The appointment type as mentioned by the user, in their own words.' },
+              confidence: { type: 'number', description: 'Confidence 0-1 that this slot value is correct.' },
+            },
+            required: ['value', 'confidence'],
+          },
+          date: {
+            type: 'object',
+            description: 'A specific calendar date the user wants, if any, resolved to an absolute date using today\'s date from the system prompt.',
+            properties: {
+              value: { type: 'string', description: 'The date as an absolute YYYY-MM-DD string. Never a relative phrase.' },
+              confidence: { type: 'number', description: 'Confidence 0-1 that this slot value is correct.' },
+            },
+            required: ['value', 'confidence'],
+          },
+          physio: {
+            type: 'object',
+            description: 'A specific practitioner/physio name mentioned in the message, if any.',
+            properties: {
+              value: { type: 'string', description: 'The practitioner name as mentioned by the user, in their own words.' },
               confidence: { type: 'number', description: 'Confidence 0-1 that this slot value is correct.' },
             },
             required: ['value', 'confidence'],
@@ -112,6 +141,7 @@ async function classifyIntent(text, currentState, sessionContext) {
     const response = await client.messages.create({
       model: config.model,
       max_tokens: 256,
+      system: buildSystemPrompt(),
       tools: [CLASSIFY_TOOL],
       tool_choice: { type: 'tool', name: 'classify_intent' },
       messages: [{ role: 'user', content: text }],

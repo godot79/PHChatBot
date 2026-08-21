@@ -26,6 +26,17 @@ describe('NluRouter.classifyIntent', () => {
     expect(result).toEqual({ intent: 'book_appointment', slots: { date: 'next tuesday' }, confidence: 0.92 });
   });
 
+  test('passes a system prompt containing today\'s date, for relative-date resolution', async () => {
+    mockCreate.mockResolvedValue({
+      content: [{ type: 'tool_use', name: 'classify_intent', input: { intent: 'book_specific_date', slots: {}, confidence: 0.9 } }],
+    });
+
+    await classifyIntent('book me next tuesday');
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ system: expect.stringContaining(todayIso) }));
+  });
+
   test('API error falls through to sentinel, never throws', async () => {
     mockCreate.mockRejectedValue(new Error('network error'));
 
