@@ -1467,6 +1467,30 @@ describe('Booking menu and flow coverage', () => {
       expect(stashed.pending_nlu_slots?.appointmentType).toEqual({ value: 'massage', confidence: 0.8 });
       updateSpy.mockRestore();
     });
+
+    // Phase 7: a message carrying both date and physio slots always routes
+    // to BOOK_SPECIFIC_DATE — the only funnel with steps for both — even
+    // when NLU picked book_specific_physio as the primary intent.
+    test('confident match with both date and physio slots → routes to BOOK_SPECIFIC_DATE and stashes both slots', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_specific_physio',
+        slots: {
+          date: { value: '2099-01-01', confidence: 0.9 },
+          physio: { value: 'Chan', confidence: 0.9 },
+        },
+        confidence: 0.95,
+      });
+      const session = await seedAt('BOOKING_METHOD_OPTIONS');
+      const updateSpy = jest.spyOn(engine.sessionManager, 'updateSession');
+      await callHandler(engine, ['handleBookingMethodOptions'], session, 'book with Dr Chan next Tuesday');
+      const [firstCallArgs] = updateSpy.mock.calls;
+      const [, firstPatch] = firstCallArgs;
+      expect(firstPatch.conversation_state).toBe('BOOK_SPECIFIC_DATE');
+      const stashed = JSON.parse(firstPatch.data || '{}');
+      expect(stashed.pending_nlu_slots?.date).toEqual({ value: '2099-01-01', confidence: 0.9 });
+      expect(stashed.pending_nlu_slots?.physio).toEqual({ value: 'Chan', confidence: 0.9 });
+      updateSpy.mockRestore();
+    });
   });
 
   // ─── Re-entry regression: stale data must be cleared when switching booking method ─
@@ -3133,6 +3157,141 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       expect(d.selected_date).toBeUndefined();
       expect(d.suggested_date).toBeUndefined();
+    });
+  });
+
+  // ─── Phase 7 — combined date+physio NLU slots (BOOK_SPECIFIC_DATE) ───
+  // Both slots arrive from the same message and are consumed at their
+  // respective steps within the same funnel: date at choose_date, physio
+  // later at choose_physio (once selected_appt_type is resolved).
+  describe('BOOK_SPECIFIC_DATE — combined date+physio NLU slots (Phase 7)', () => {
+    const config = require('../../src/config/anthropic.js');
+    function firstCandidateDate() {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + 1);
+      while (d.getDay() === 0) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    function ymdLocal(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    const candidateIso = ymdLocal(firstCandidateDate());
+    const UNIQUE_PHYSIO = { id: 'PRAC-010', first_name: 'Zoe', last_name: 'Zephyr' };
+    const AMBIGUOUS_PHYSIOS = [
+      { id: 'PRAC-001', first_name: 'Amy', last_name: 'Phy' },
+      { id: 'PRAC-002', first_name: 'Bob', last_name: 'Phy' },
+    ];
+
+    test('both high-confidence → date auto-fills at choose_date, physio auto-fills at choose_physio', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        pending_nlu_slots: {
+          date: { value: candidateIso, confidence: config.slotAutofillThreshold },
+          physio: { value: 'Zoe', confidence: config.slotAutofillThreshold },
+        },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).not.toMatch(/pick a date/i);
+      let updated = await db.getSession(session.id);
+      let d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(candidateIso);
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.pending_nlu_slots?.date).toBeUndefined();
+      expect(d.pending_nlu_slots?.physio).toEqual({ value: 'Zoe', confidence: config.slotAutofillThreshold });
+
+      // Advance to choose_physio directly (bypassing the real type-list
+      // fetch, same seedAt shortcut used by the Phase 5 physio tests) and
+      // confirm the still-pending physio slot auto-fills there too.
+      await db.updateSession(session.id, { data: JSON.stringify({
+        ...d,
+        selection_step: 'choose_physio',
+        practitioner_list: [UNIQUE_PHYSIO],
+        selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+      }) });
+      const reloaded = await db.getSession(session.id);
+      const reply2 = String(await callHandler(engine, ['handleBookSpecificDate'], reloaded, ''));
+      expect(reply2).not.toMatch(/choose a physio/i);
+      updated = await db.getSession(session.id);
+      d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-010');
+      expect(d.selection_step).toBe('choose_clinic');
+      expect(d.pending_nlu_slots?.physio).toBeUndefined();
+    });
+
+    test('date confident, physio medium → date auto-fills, physio shows "did you mean" once choose_physio is reached', async () => {
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_physio',
+        pending_nlu_slots: { physio: { value: 'Zoe', confidence: mid } },
+        practitioner_list: [UNIQUE_PHYSIO],
+        selected_date: candidateIso,
+        selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_physio_suggestion');
+      expect(String(d.suggested_physio?.id)).toBe('PRAC-010');
+      expect(d.selected_physio).toBeUndefined();
+      expect(d.selected_date).toBe(candidateIso);
+    });
+
+    test('physio confident, date medium → confirm_date_suggestion fires first; physio slot still pending afterward', async () => {
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        pending_nlu_slots: {
+          date: { value: candidateIso, confidence: mid },
+          physio: { value: 'Zoe', confidence: config.slotAutofillThreshold },
+        },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_date_suggestion');
+      expect(d.selected_date).toBeUndefined();
+      expect(d.pending_nlu_slots?.physio).toEqual({ value: 'Zoe', confidence: config.slotAutofillThreshold });
+    });
+
+    test('confirming the date suggestion advances to choose_type, still carrying the pending physio slot', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'confirm_date_suggestion',
+        suggested_date: candidateIso,
+        pending_nlu_slots: { physio: { value: 'Zoe', confidence: config.slotAutofillThreshold } },
+        navigation_chain: [{ selection_step: 'confirm_date_suggestion', had_multiple_options: true, auto: false }],
+      });
+      await callHandler(engine, ['handleBookSpecificDate'], session, 'confirm_date');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(candidateIso);
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.pending_nlu_slots?.physio).toEqual({ value: 'Zoe', confidence: config.slotAutofillThreshold });
+    });
+
+    test('an ambiguous physio name at choose_physio still falls through to the unchanged list, even with a date already applied', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_physio',
+        pending_nlu_slots: { physio: { value: 'Phy', confidence: 0.99 } },
+        practitioner_list: AMBIGUOUS_PHYSIOS,
+        selected_date: candidateIso,
+        selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/choose a physio/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_physio).toBeUndefined();
+      expect(d.selected_date).toBe(candidateIso);
     });
   });
 

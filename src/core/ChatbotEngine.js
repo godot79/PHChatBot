@@ -1658,19 +1658,36 @@ async handleMessageEnvelope(message, phoneNumber) {
         // choose_type/choose_date/choose_physio steps (handleBookSpecificClinic,
         // handleBookSoonest, handleBookSpecificDate, handleBookSpecificPhysio).
         const SLOT_CONSUMING_INTENTS = new Set(['book_specific_clinic', 'book_by_type', 'book_specific_date', 'book_specific_physio']);
-        const match = BOOKING_METHOD_INTENT_STATES[nlu.intent];
+        let match = BOOKING_METHOD_INTENT_STATES[nlu.intent];
+        // Phase 7: a message can carry both date and physio slots at once
+        // (e.g. "book with Dr Chan next Tuesday"). Only handleBookSpecificDate's
+        // funnel has steps for both (choose_date -> ... -> choose_physio) —
+        // handleBookSpecificPhysio's funnel has no date step at all — so any
+        // message with both slots present routes there regardless of which
+        // single intent NLU picked as primary.
+        const hasBothSlots = (nlu.intent === 'book_specific_date' || nlu.intent === 'book_specific_physio')
+          && nlu.slots && nlu.slots.date && nlu.slots.physio;
+        if (hasBothSlots) {
+          match = BOOKING_METHOD_INTENT_STATES.book_specific_date;
+        }
         if (match) {
           const [state, handler] = match;
-          // Slot pre-fill (Phase 2: appointmentType; Phase 5: date, physio):
-          // stash the raw NLU slot(s) on session.data so the handler can
-          // match/apply them once it has the real list to match against.
-          // Consumed exactly once inside the handler's own choose_* step.
+          // Slot pre-fill (Phase 2: appointmentType; Phase 5: date, physio;
+          // Phase 7: both date+physio together): stash the raw NLU slot(s)
+          // on session.data so the handler can match/apply them once it has
+          // the real list to match against. Consumed exactly once inside the
+          // handler's own choose_* step.
           let initialData = null;
           if (SLOT_CONSUMING_INTENTS.has(nlu.intent) && nlu.slots) {
             const pending = {};
             if (nlu.slots.appointmentType) pending.appointmentType = nlu.slots.appointmentType;
-            if (nlu.intent === 'book_specific_date' && nlu.slots.date) pending.date = nlu.slots.date;
-            if (nlu.intent === 'book_specific_physio' && nlu.slots.physio) pending.physio = nlu.slots.physio;
+            if (hasBothSlots) {
+              pending.date = nlu.slots.date;
+              pending.physio = nlu.slots.physio;
+            } else {
+              if (nlu.intent === 'book_specific_date' && nlu.slots.date) pending.date = nlu.slots.date;
+              if (nlu.intent === 'book_specific_physio' && nlu.slots.physio) pending.physio = nlu.slots.physio;
+            }
             if (Object.keys(pending).length) initialData = JSON.stringify({ pending_nlu_slots: pending });
           }
           await this.sessionManager.updateSession(session.id, { conversation_state: state, data: initialData });
@@ -3525,6 +3542,32 @@ if (/^p(rev)?$/i.test(text)) {
       return await this.handleBookSpecificDate(session, '');
     }
 
+    // ===== confirm_physio_suggestion (Phase 7 NLU slot suggestion, combined
+    // date+physio message): "Did you mean X?" for a medium-confidence
+    // physio-name slot match reached via handleBookSpecificDate's funnel.
+    // Same pattern as handleBookSpecificPhysio's own confirm_physio_suggestion
+    // — never auto-applied, decline/unrecognized reply converges on the
+    // normal choose_physio list. =====
+    if (data.selection_step === 'confirm_physio_suggestion') {
+      if (data.suggested_physio && text === 'confirm_physio') {
+        data.selected_physio = data.suggested_physio;
+        delete data.suggested_physio;
+        data.selection_step = 'choose_clinic';
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        return await this.handleBookSpecificDate(session, '');
+      }
+      if (data.suggested_physio && text === '') {
+        return buttons(`Did you mean *${getPractitionerDisplayName ? getPractitionerDisplayName(data.suggested_physio) : data.suggested_physio.name}*?`, [
+          { id: 'confirm_physio', title: 'Yes' },
+          { id: 'change_physio', title: 'Choose from list' },
+        ]);
+      }
+      delete data.suggested_physio;
+      data.selection_step = 'choose_physio';
+      await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+      return await this.handleBookSpecificDate(session, '');
+    }
+
     // =====================================================================
     // choose_physio — physios who offer that type
     // =====================================================================
@@ -3548,6 +3591,42 @@ if (/^p(rev)?$/i.test(text)) {
             confirmedMessage: `No practitioners offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
           });
         }
+      }
+
+      // Phase 7: consume a pending NLU physio slot (carried alongside a
+      // date slot from the same message) exactly once, now that the real
+      // type-filtered practitioner list exists to match it against — same
+      // discipline as handleBookSpecificPhysio's own choose_physio consume
+      // block. Only autofills on a single unambiguous name match.
+      if (data.pending_nlu_slots && data.pending_nlu_slots.physio) {
+        const pendingSlot = data.pending_nlu_slots.physio;
+        delete data.pending_nlu_slots.physio;
+        if (typeof pendingSlot.value === 'string') {
+          const slotNorm = normName(pendingSlot.value);
+          const nameMatches = data.practitioner_list.filter(p => {
+            const n = normName(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name || ''));
+            return n === slotNorm || n.includes(slotNorm) || slotNorm.includes(n);
+          });
+          const physioMatch = nameMatches.length === 1 ? nameMatches[0] : null;
+          if (physioMatch && NluRouter.isSlotAutofillable(pendingSlot)) {
+            data.selected_physio = physioMatch;
+            data.selection_step = 'choose_clinic';
+            if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: data.practitioner_list.length > 1, auto: true });
+            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+            return await this.handleBookSpecificDate(session, '');
+          }
+          if (physioMatch && NluRouter.isSlotSuggestable(pendingSlot)) {
+            data.suggested_physio = physioMatch;
+            data.selection_step = 'confirm_physio_suggestion';
+            if (typeof navPush === 'function') navPush(data, 'confirm_physio_suggestion', { had_multiple_options: true });
+            await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+            return buttons(`Did you mean *${getPractitionerDisplayName ? getPractitionerDisplayName(physioMatch) : physioMatch.name}*?`, [
+              { id: 'confirm_physio', title: 'Yes' },
+              { id: 'change_physio', title: 'Choose from list' },
+            ]);
+          }
+        }
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
       if (/^m(ore)?$|^next$/i.test(text)) {
