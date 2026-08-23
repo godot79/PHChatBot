@@ -3268,6 +3268,33 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // =====================================================================
+    // Phase 6: mid-flow date correction. Only once a date is already
+    // selected (past choose_date) and only for free text that isn't a
+    // control token for the current step (numeric pick, m/more/next,
+    // p/prev — 0/back/menu are already handled above). Reuses the same
+    // pending_nlu_slots consume path choose_date already has for Phase 5's
+    // autofill/suggest/fallthrough — a correction just re-stashes the new
+    // date and jumps back there, never introduces a new confirmation UI.
+    // =====================================================================
+    const MIDFLOW_CORRECTION_STEPS = ['choose_type', 'choose_physio', 'choose_clinic'];
+    const isStepControlToken = (t) => t === '' || /^\d+$/.test(t) || /^m(ore)?$|^next$/i.test(t) || /^p(rev)?$/i.test(t);
+    if (data.selected_date && MIDFLOW_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
+      const result = await NluRouter.classifyIntent(raw, this.STATES.BOOK_SPECIFIC_DATE, { existingSlots: { date: data.selected_date } });
+      const dateSlot = result.slots && result.slots.date;
+      if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && dateSlot && dateSlot.value && dateSlot.value !== data.selected_date
+          && (NluRouter.isSlotAutofillable(dateSlot) || NluRouter.isSlotSuggestable(dateSlot))) {
+        this.logger.analyticsEvent({ event: 'nlu_midflow_correction', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: this.STATES.BOOK_SPECIFIC_DATE, slot: 'date', confidence: dateSlot.confidence });
+        for (const f of CLEAR_FIELDS_BY_STEP.choose_date) delete data[f];
+        data.navigation_chain = [];
+        data.selection_step = 'choose_date';
+        data.date_page = 0;
+        data.pending_nlu_slots = { ...(data.pending_nlu_slots || {}), date: dateSlot };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        return await this.handleBookSpecificDate(session, '');
+      }
+    }
+
+    // =====================================================================
     // choose_date — 10 dates from tomorrow, skip Sundays, 5 per page
     // =====================================================================
     if (data.selection_step === 'choose_date') {
@@ -3777,6 +3804,34 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // =====================================================================
+    // Phase 6: mid-flow physio correction. Same pattern as
+    // handleBookSpecificDate's date correction — only once a physio is
+    // already selected (past choose_physio) and only for free text that
+    // isn't a control token for the current step. Reuses the same
+    // pending_nlu_slots consume path choose_physio already has for Phase
+    // 5's autofill/suggest/fallthrough.
+    // =====================================================================
+    const MIDFLOW_PHYSIO_CORRECTION_STEPS = ['choose_type', 'choose_type_insurer', 'choose_clinic'];
+    const isStepControlToken = (t) => t === '' || /^\d+$/.test(t) || /^m(ore)?$|^next$/i.test(t) || /^p(rev)?$/i.test(t);
+    if (data.selected_physio && MIDFLOW_PHYSIO_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
+      const currentPhysioName = normName(getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : (data.selected_physio.display_name || data.selected_physio.name || ''));
+      const result = await NluRouter.classifyIntent(textRaw, this.STATES.BOOK_SPECIFIC_PHYSIO, { existingSlots: { physio: currentPhysioName } });
+      const physioSlot = result.slots && result.slots.physio;
+      if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && physioSlot && physioSlot.value && normName(physioSlot.value) !== currentPhysioName
+          && (NluRouter.isSlotAutofillable(physioSlot) || NluRouter.isSlotSuggestable(physioSlot))) {
+        this.logger.analyticsEvent({ event: 'nlu_midflow_correction', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: this.STATES.BOOK_SPECIFIC_PHYSIO, slot: 'physio', confidence: physioSlot.confidence });
+        for (const f of CLEAR_FIELDS_BY_STEP.choose_physio) delete data[f];
+        delete data.appointment_type_list;
+        data.navigation_chain = [];
+        data.selection_step = 'choose_physio';
+        data.practitioner_page = 0;
+        data.pending_nlu_slots = { ...(data.pending_nlu_slots || {}), physio: physioSlot };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+        return await this.handleBookSpecificPhysio(session, '');
+      }
+    }
+
+    // =====================================================================
     // choose_physio
     // =====================================================================
     if (data.selection_step === 'choose_physio') {
@@ -4192,6 +4247,40 @@ if (/^p(rev)?$/i.test(text)) {
       data.selection_step = 'choose_clinic';
       data.clinic_page = 0;
       await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+    }
+
+    // =====================================================================
+    // Phase 6: mid-flow appointment-type correction. Same pattern as
+    // handleBookSpecificDate/handleBookSpecificPhysio's slot correction —
+    // only once a type is already selected (past choose_type) and only for
+    // free text that isn't a control token for the current step. Unlike
+    // those handlers, selected_clinic is chosen *before* the type here, so
+    // this never touches clinic_list/selected_clinic — only reuses the
+    // choose_type step's own pending_nlu_slots consume path.
+    // =====================================================================
+    const MIDFLOW_TYPE_CORRECTION_STEPS = ['choose_type_insurer', 'choose_physio'];
+    const isStepControlToken = (t) => t === '' || /^\d+$/.test(t) || /^m(ore)?$|^next$/i.test(t) || /^p(rev)?$/i.test(t);
+    if (data.selected_appt_type && MIDFLOW_TYPE_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
+      const currentTypeNorm = normName(data.selected_appt_type.name || '');
+      const result = await NluRouter.classifyIntent(textRaw, this.STATES.BOOK_SPECIFIC_CLINIC, { existingSlots: { appointmentType: currentTypeNorm } });
+      const typeSlot = result.slots && result.slots.appointmentType;
+      if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && typeSlot && typeSlot.value && normName(typeSlot.value) !== currentTypeNorm
+          && (NluRouter.isSlotAutofillable(typeSlot) || NluRouter.isSlotSuggestable(typeSlot))) {
+        this.logger.analyticsEvent({ event: 'nlu_midflow_correction', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: this.STATES.BOOK_SPECIFIC_CLINIC, slot: 'appointmentType', confidence: typeSlot.confidence });
+        delete data.selected_appt_type;
+        delete data.appointment_type_list;
+        delete data.appt_type_page;
+        delete data.insurer_page;
+        delete data.suggested_appt_type;
+        delete data.practitioner_list;
+        delete data.practitioner_page;
+        delete data.selected_physio;
+        data.navigation_chain = [];
+        data.selection_step = 'choose_type';
+        data.pending_nlu_slots = { ...(data.pending_nlu_slots || {}), appointmentType: typeSlot };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+        return await this.handleBookSpecificClinic(session, '');
+      }
     }
 
     // =====================================================================

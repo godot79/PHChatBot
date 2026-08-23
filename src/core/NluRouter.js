@@ -38,6 +38,27 @@ const KNOWN_INTENTS = [
   'view_locations',
 ];
 
+// Phase 6: intents that still mean "the user is booking/adjusting a slot in
+// the current flow" — used to gate mid-flow corrections. A live check
+// (2026-08-21) showed genuine corrections ("actually make it Thursday")
+// often classify under a generic/adjacent intent (book_appointment,
+// reschedule_appointment, book_by_type) rather than the exact
+// book_specific_* intent tied to the handler the user is already in — so
+// gating on an exact intent match silently drops real corrections.
+// Deliberately excludes cancel_appointment/book_history/book_soonest/
+// view_fees/view_locations: those represent the user asking about
+// something else entirely, not correcting the current selection, and a
+// slot-shaped value extracted alongside one of those must not clear
+// in-progress flow state.
+const MIDFLOW_CORRECTION_INTENTS = [
+  'book_appointment',
+  'book_by_type',
+  'reschedule_appointment',
+  'book_specific_date',
+  'book_specific_physio',
+  'book_specific_clinic',
+];
+
 // Phase 5: date/physio slots let a single message pick the right existing
 // funnel (BOOK_SPECIFIC_DATE / BOOK_SPECIFIC_PHYSIO) instead of always
 // collapsing to book_by_type/book_appointment. Model resolves relative
@@ -45,8 +66,17 @@ const KNOWN_INTENTS = [
 // prompt (see buildSystemPrompt below) and must return an absolute
 // YYYY-MM-DD, never a relative string.
 const TODAY_ISO = () => new Date().toISOString().slice(0, 10);
-function buildSystemPrompt() {
-  return `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan".`;
+// Phase 6: existingSlots (when supplied via classifyIntent's sessionContext)
+// tells Haiku what's already been picked in the current funnel, so it can
+// tell a genuine correction ("actually make it Thursday") from an
+// unrelated/ambiguous message instead of always extracting slots cold.
+function buildSystemPrompt(existingSlots) {
+  let prompt = `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan".`;
+  if (existingSlots && Object.keys(existingSlots).length > 0) {
+    const known = Object.entries(existingSlots).map(([k, v]) => `${k}=${v}`).join(', ');
+    prompt += ` The user is already partway through booking with these selections already made: ${known}. Only extract a slot for one of these if the message clearly states a *different* value for it (a correction, e.g. "actually Thursday" or "no, Dr Chan instead") — otherwise omit that slot.`;
+  }
+  return prompt;
 }
 
 // Phase 2 vocabulary: appointment-type slot only, wired into two handlers so
@@ -141,7 +171,7 @@ async function classifyIntent(text, currentState, sessionContext) {
     const response = await client.messages.create({
       model: config.model,
       max_tokens: 256,
-      system: buildSystemPrompt(),
+      system: buildSystemPrompt(sessionContext && sessionContext.existingSlots),
       tools: [CLASSIFY_TOOL],
       tool_choice: { type: 'tool', name: 'classify_intent' },
       messages: [{ role: 'user', content: text }],
@@ -161,4 +191,4 @@ async function classifyIntent(text, currentState, sessionContext) {
   }
 }
 
-module.exports = { classifyIntent, NO_CLASSIFICATION, KNOWN_INTENTS, isConfident, isSlotAutofillable, isSlotSuggestable };
+module.exports = { classifyIntent, NO_CLASSIFICATION, KNOWN_INTENTS, MIDFLOW_CORRECTION_INTENTS, isConfident, isSlotAutofillable, isSlotSuggestable };

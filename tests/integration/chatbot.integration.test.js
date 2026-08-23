@@ -3136,6 +3136,108 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── Phase 6 — mid-flow date correction (BOOK_SPECIFIC_DATE, past choose_date) ─
+  describe('BOOK_SPECIFIC_DATE — mid-flow date correction (Phase 6)', () => {
+    const config = require('../../src/config/anthropic.js');
+    function firstCandidateDate() {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + 1);
+      while (d.getDay() === 0) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    function secondCandidateDate() {
+      const d = firstCandidateDate();
+      d.setDate(d.getDate() + 1);
+      while (d.getDay() === 0) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    function ymdLocal(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    const firstIso = ymdLocal(firstCandidateDate());
+    const secondIso = ymdLocal(secondCandidateDate());
+
+    const baseData = {
+      selection_step: 'choose_type',
+      selected_date: firstIso,
+      appointment_type_list: [{ name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' }],
+      navigation_chain: [
+        { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+      ],
+    };
+
+    test('high-confidence free-text correction re-fills the date and jumps back to choose_type', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_specific_date',
+        slots: { date: { value: secondIso, confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'actually make it the next day instead'));
+      expect(reply).not.toMatch(/pick a date/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(secondIso);
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.pending_nlu_slots?.date).toBeUndefined();
+      // downstream state from the old date must be cleared, not left stale
+      expect(d.selected_appt_type).toBeUndefined();
+    });
+
+    test('a numeric pick at choose_type is untouched — correction never fires on control tokens', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      await callHandler(engine, ['handleBookSpecificDate'], session, '1');
+      expect(NluRouter.classifyIntent).not.toHaveBeenCalled();
+    });
+
+    test('low-confidence/no-match free text at choose_type falls through unchanged to the existing menu', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'what about tuesdays'));
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(firstIso);
+      expect(d.selection_step).toBe('choose_type');
+      expect(reply).toMatch(/select visit type/i);
+    });
+
+    test('a differing date slot under an off-topic intent (view_fees) is ignored — the flow must not clear for a question that is not a correction', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'view_fees',
+        slots: { date: { value: secondIso, confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'how much does a session cost on the 26th'));
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(firstIso);
+      expect(d.selection_step).toBe('choose_type');
+      expect(reply).toMatch(/select visit type/i);
+    });
+
+    // Live check (2026-08-21) found genuine corrections often classify under
+    // reschedule_appointment/book_appointment rather than the exact
+    // book_specific_date intent — this locks in that the correction still
+    // fires for those, not just an exact intent match.
+    test('a correction classified under reschedule_appointment (not the exact book_specific_date intent) still fires', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'reschedule_appointment',
+        slots: { date: { value: secondIso, confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      await callHandler(engine, ['handleBookSpecificDate'], session, 'actually can we do the next day instead');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(secondIso);
+      expect(d.selection_step).toBe('choose_type');
+    });
+  });
+
   // ─── Phase 5 — NLU physio slot extraction (BOOK_SPECIFIC_PHYSIO / choose_physio) ─
   describe('BOOK_SPECIFIC_PHYSIO — NLU physio slot (Phase 5)', () => {
     const config = require('../../src/config/anthropic.js');
@@ -3233,6 +3335,90 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       expect(d.selected_physio).toBeUndefined();
       expect(d.suggested_physio).toBeUndefined();
+    });
+  });
+
+  // ─── Phase 6 — mid-flow physio correction (BOOK_SPECIFIC_PHYSIO, past choose_physio) ─
+  describe('BOOK_SPECIFIC_PHYSIO — mid-flow physio correction (Phase 6)', () => {
+    const config = require('../../src/config/anthropic.js');
+    const ORIGINAL_PHYSIO = { id: 'PRAC-010', first_name: 'Zoe', last_name: 'Zephyr' };
+    const CORRECTED_PHYSIO = { id: 'PRAC-011', first_name: 'Amy', last_name: 'Ling' };
+
+    const baseData = {
+      selection_step: 'choose_type',
+      selected_physio: ORIGINAL_PHYSIO,
+      practitioner_list: [ORIGINAL_PHYSIO, CORRECTED_PHYSIO],
+      appointment_type_list: [{ name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' }],
+      navigation_chain: [
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+      ],
+    };
+
+    test('high-confidence free-text correction re-fills the physio and jumps back to choose_type', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_specific_physio',
+        slots: { physio: { value: 'Amy Ling', confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'actually book with Amy Ling instead'));
+      expect(reply).not.toMatch(/choose a physio/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-011');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.pending_nlu_slots?.physio).toBeUndefined();
+      // stale appointment_type_list from the old physio must not survive — it
+      // gets rebuilt fresh for the new physio, not left as the seeded placeholder
+      expect(d.appointment_type_list).not.toEqual(baseData.appointment_type_list);
+    });
+
+    test('a numeric pick at choose_type is untouched — correction never fires on control tokens', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '1');
+      expect(NluRouter.classifyIntent).not.toHaveBeenCalled();
+    });
+
+    test('low-confidence/no-match free text at choose_type falls through unchanged to the existing menu', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'what about mornings'));
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-010');
+      expect(d.selection_step).toBe('choose_type');
+      expect(reply).toMatch(/select visit type/i);
+    });
+
+    test('a differing physio slot under an off-topic intent (view_fees) is ignored — the flow must not clear for a question that is not a correction', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'view_fees',
+        slots: { physio: { value: 'Amy Ling', confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'does Amy Ling charge extra for insurance'));
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-010');
+      expect(d.selection_step).toBe('choose_type');
+      expect(reply).toMatch(/select visit type/i);
+    });
+
+    // Live check (2026-08-21) found genuine physio corrections often classify
+    // under book_appointment/book_by_type rather than the exact
+    // book_specific_physio intent — locks in the correction still fires.
+    test('a correction classified under book_appointment (not the exact book_specific_physio intent) still fires', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_appointment',
+        slots: { physio: { value: 'Amy Ling', confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, 'actually book with Amy Ling instead');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(String(d.selected_physio?.id)).toBe('PRAC-011');
+      expect(d.selection_step).toBe('choose_type');
     });
   });
 
@@ -4429,6 +4615,104 @@ describe('Booking menu and flow coverage', () => {
       expect(d.selection_step).toBe('choose_type');
       expect(d.selected_appt_type).toBeUndefined();
       expect(d.suggested_appt_type).toBeUndefined();
+    });
+  });
+
+  // ─── Phase 6 — mid-flow type correction (BOOK_SPECIFIC_CLINIC, past choose_type) ─
+  describe('BOOK_SPECIFIC_CLINIC — mid-flow type correction (Phase 6)', () => {
+    const config = require('../../src/config/anthropic.js');
+    const PHYSIO_2 = { id: 'PRAC-002', first_name: 'Amy', last_name: 'Ling' };
+
+    const mockTwoTypesTwoPhysios = () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+      ]);
+    };
+
+    const baseData = {
+      selection_step: 'choose_physio',
+      selected_clinic: CLINIC_1,
+      selected_appt_type: { name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'], norm_name: 'initial 60 min visit (new clients)', entries: [{ id: 'AT-001', insurer: null }] },
+      navigation_chain: [
+        { selection_step: 'choose_clinic', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+      ],
+    };
+
+    test('high-confidence free-text correction re-fills the type and jumps back to choose_type — clinic is preserved', async () => {
+      mockTwoTypesTwoPhysios();
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_specific_clinic',
+        slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, 'actually make it a return visit instead'));
+      expect(reply).not.toMatch(/choose a clinic/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
+      // clinic must never be touched by a type correction
+      const appliedClinic = d.selected_clinic || d.prev_state_data?.selected_clinic;
+      expect(String(appliedClinic?.id)).toBe(String(CLINIC_1.id));
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('a numeric pick at choose_physio is untouched — correction never fires on control tokens', async () => {
+      mockTwoTypesTwoPhysios();
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', { ...baseData, practitioner_list: [PHYSIO_1, PHYSIO_2] });
+      await callHandler(engine, ['handleBookSpecificClinic'], session, '1');
+      expect(NluRouter.classifyIntent).not.toHaveBeenCalled();
+    });
+
+    test('low-confidence/no-match free text at choose_physio falls through unchanged to the existing menu', async () => {
+      mockTwoTypesTwoPhysios();
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', { ...baseData, practitioner_list: [PHYSIO_1, PHYSIO_2] });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, 'what about mornings'));
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.ids).toContain('AT-001');
+      expect(d.selection_step).toBe('choose_physio');
+      expect(reply).toMatch(/choose a physio/i);
+    });
+
+    test('a differing type slot under an off-topic intent (view_fees) is ignored — the flow must not clear for a question that is not a correction', async () => {
+      mockTwoTypesTwoPhysios();
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'view_fees',
+        slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', { ...baseData, practitioner_list: [PHYSIO_1, PHYSIO_2] });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, 'how much does a return visit cost'));
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.ids).toContain('AT-001');
+      expect(d.selection_step).toBe('choose_physio');
+      expect(reply).toMatch(/choose a physio/i);
+    });
+
+    // Live check (2026-08-21) found genuine type corrections often classify
+    // under book_by_type rather than the exact book_specific_clinic intent —
+    // locks in the correction still fires.
+    test('a correction classified under book_by_type (not the exact book_specific_clinic intent) still fires', async () => {
+      mockTwoTypesTwoPhysios();
+      NluRouter.classifyIntent.mockResolvedValueOnce({
+        intent: 'book_by_type',
+        slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        confidence: 0.9,
+      });
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', baseData);
+      await callHandler(engine, ['handleBookSpecificClinic'], session, 'change that to a return visit please');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
     });
   });
 
