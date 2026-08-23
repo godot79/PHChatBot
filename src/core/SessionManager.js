@@ -135,6 +135,11 @@ class SessionManager {
               newContext.region = priorContext.region;
             }
 
+            // Preserve language if available
+            if (priorContext && priorContext.language) {
+              newContext.language = priorContext.language;
+            }
+
             // If prior was verified, carry over verification flags. Also require
             // patient_state.verified to agree — patient_state is the durable flag that
             // logout explicitly clears, so a stale `sessions` row left behind by an
@@ -178,6 +183,7 @@ class SessionManager {
           if (ps) {
             const psContext = {};
             if (ps.region) psContext.region = ps.region;
+            if (ps.language) psContext.language = ps.language;
             if (ps.appt_preference) {
               try { psContext.appt_preference = JSON.parse(ps.appt_preference); } catch {}
             }

@@ -234,6 +234,21 @@ async function plantExpiredVerifiedSession (db, phone, patientId = 'PAT-PRIOR') 
   return id;
 }
 
+async function plantExpiredVerifiedSessionWithLanguage (db, phone, language, patientId = 'PAT-LANG') {
+  const id = `prior_lang_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  await new Promise((res, rej) =>
+    db.run(
+      `INSERT INTO sessions
+         (id, phone_number, patient_id, verified, verification_status,
+          conversation_state, context, expires_at, last_activity)
+       VALUES (?, ?, ?, 1, 'verified', 'BOOK_MANAGE_OPTIONS', ?, ?, ?)`,
+      [id, phone, patientId, JSON.stringify({ language }), expiredIso(), expiredIso()],
+      (err) => (err ? rej(err) : res())
+    )
+  );
+  return id;
+}
+
 async function plantExpiredUnverifiedSession (db, phone) {
   const id = `prior_unverified_${Date.now()}`;
   await new Promise((res, rej) =>
@@ -306,6 +321,14 @@ describe('SessionManager.getOrCreateSession — reseed from prior session', () =
   test('no prior session → new session stays in INTRO', async () => {
     const session = await sm.getOrCreateSession('+6591000099');
     expect(session.conversation_state).toBe('INTRO');
+  });
+
+  test('prior session with a selected language → reseeded session context carries the language forward', async () => {
+    const phone = '+6591000005';
+    await plantExpiredVerifiedSessionWithLanguage(db, phone, 'yue');
+    const session = await sm.getOrCreateSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('yue');
   });
 });
 

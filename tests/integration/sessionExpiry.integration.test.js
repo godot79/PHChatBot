@@ -120,4 +120,24 @@ describe('Verified-user carryover survives session expiry + cleanup', () => {
     const s2 = await sm.getOrCreateSession(phone);
     expect(s2.conversation_state).toBe('INTRO');
   });
+
+  test('a verified session with a selected language survives expiry + cleanup: language is restored from patient_state', async () => {
+    const s1 = await sm.getOrCreateSession(phone);
+    await sm.updateSession(s1.id, {
+      verified: true,
+      patient_id: 'PAT-123',
+      conversation_state: 'BOOK_MANAGE_OPTIONS',
+      context: JSON.stringify({ language: 'yue', region: 'HK' }),
+    });
+    await db.upsertPatientState(phone, { patient_id: 'PAT-123', verified: true, language: 'yue', region: 'HK' });
+
+    await db.query(`UPDATE sessions SET expires_at = datetime('now', '-1 minutes') WHERE id = ?`, [s1.id]);
+    const cleaned = await db.cleanupExpiredSessions();
+    expect(cleaned).toBeGreaterThan(0);
+    expect(await db.getSession(s1.id)).toBeNull();
+
+    const s2 = await sm.getOrCreateSession(phone);
+    const ctx2 = typeof s2.context === 'string' ? JSON.parse(s2.context) : (s2.context || {});
+    expect(ctx2.language).toBe('yue');
+  });
 });
