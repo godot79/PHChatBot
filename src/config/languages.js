@@ -9,8 +9,8 @@
  */
 const LANGUAGE_LABELS = {
   en: 'English',
-  yue: '廣東話',
-  zh: '普通话',
+  yue: '廣東話 (Cantonese)',
+  zh: '普通话 (Mandarin)',
 };
 
 module.exports = { LANGUAGE_LABELS };
