@@ -10,6 +10,17 @@ const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
 const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage } = require('../config/regions');
 const { LANGUAGE_LABELS } = require('../config/languages');
+
+// LANGUAGE_LABELS entries may carry a "(English gloss)" suffix for readability
+// (e.g. "廣東話 (Cantonese)") — match against the base label and the gloss
+// separately, rather than the whole string, so typing "cantonese" alone still works.
+function matchesLanguageLabel(text, code) {
+  const label = LANGUAGE_LABELS[code].toLowerCase();
+  const glossMatch = label.match(/^(.*?)\s*\(([^)]+)\)\s*$/);
+  const base = (glossMatch ? glossMatch[1] : label).trim();
+  const gloss = glossMatch ? glossMatch[2].trim() : null;
+  return text.includes(base) || (!!gloss && text.includes(gloss));
+}
 const { t } = require('../config/strings');
 const { translateInsurerName } = require('../config/insurerTranslations');
 const { translateClinicName } = require('../config/clinicTranslations');
@@ -1222,8 +1233,8 @@ async handleMessageEnvelope(message, phoneNumber) {
           this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
           return await renderMenuFresh();
         }
-      } else if (languageCodes.some(code => text.includes(LANGUAGE_LABELS[code].toLowerCase()))) {
-        const found = languageCodes.find(code => text.includes(LANGUAGE_LABELS[code].toLowerCase()));
+      } else if (text && languageCodes.some(code => matchesLanguageLabel(text, code))) {
+        const found = languageCodes.find(code => matchesLanguageLabel(text, code));
         context.language = found;
         delete context.awaiting_language_selection;
         await this.sessionManager.updateSession(session.id, { context });
@@ -1314,6 +1325,7 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     const textRaw = (message || '').trim();
     const text = textRaw.toLowerCase();
+    const language = this._getSessionLanguage(session);
 
     // Back/menu at any time -> Intro + main menu
     if (['0', 'menu', 'back'].includes(text)) {
@@ -1324,11 +1336,11 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     // Gateway screen — shown before asking for email, so new patients can self-register
     const GATEWAY_BUTTONS = buttons(
-      'To get started, are you registered with us?',
+      t(language, 'verifyFlow.gatewayPrompt'),
       [
-        { id: '1', title: "Yes, I'm registered" },
-        { id: '2', title: 'Register new patient' },
-        { id: '3', title: 'Forgot my details' },
+        { id: '1', title: t(language, 'verifyFlow.gatewayYesRegistered') },
+        { id: '2', title: t(language, 'verifyFlow.gatewayRegisterNew') },
+        { id: '3', title: t(language, 'verifyFlow.gatewayForgotDetails') },
       ]
     );
 
@@ -1342,7 +1354,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.gateway_prompt = false;
         data.awaiting_email = true;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        return 'Please enter the email address you registered with.\n\n(0️⃣ Back)';
+        return t(language, 'verifyFlow.enterRegisteredEmail');
       }
       if (text === '2') {
         await this.sessionManager.updateSession(session.id, {
@@ -1362,12 +1374,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         });
         const updated = await this.sessionManager.getSession(session.id);
         return prependTextToEnvelope(
-          `Please contact us at ${info.email} and we'll help you recover your details.`,
+          t(language, 'verifyFlow.forgotDetailsContact', { email: info.email }),
           await this.renderMainMenu(updated)
         );
       }
       // Unknown input — re-render gateway with error prefix so text clients see the options
-      return prependTextToEnvelope("Sorry, please reply with 1, 2, or 3.", GATEWAY_BUTTONS);
+      return prependTextToEnvelope(t(language, 'verifyFlow.gatewayInvalidReply'), GATEWAY_BUTTONS);
     }
 
     // DOB parser: accepts "dd mm yyyy", "dd/mm/yyyy", "dd-mm-yyyy", "dd.mm.yyyy"
@@ -1380,11 +1392,11 @@ async handleMessageEnvelope(message, phoneNumber) {
     };
 
     const FAIL_PROMPT = buttons(
-      "We couldn't verify those details. Please check your email and date of birth and try again.",
+      t(language, 'verifyFlow.failPromptBody'),
       [
-        { id: '1', title: 'Try again' },
-        { id: '2', title: 'Email us' },
-        { id: '3', title: 'Main menu' }
+        { id: '1', title: t(language, 'verifyFlow.failPromptTryAgain') },
+        { id: '2', title: t(language, 'verifyFlow.failPromptEmailUs') },
+        { id: '3', title: t(language, 'verifyFlow.failPromptMainMenu') }
       ]
     );
 
@@ -1394,7 +1406,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         // Restart from email
         const fresh = { verify_error_prompt: false, awaiting_email: true };
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(fresh) });
-        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.restartEnterEmail');
       }
       if (text === '2') {
         const region = this._getSessionRegion(session);
@@ -1411,7 +1423,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         delete data.verify_error_prompt;
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
         const updated = await this.sessionManager.getSession(session.id);
-        return prependTextToEnvelope(`We've sent your details to our support team. They'll be in touch shortly.`, await this.renderMainMenu(updated));
+        return prependTextToEnvelope(t(language, 'verifyFlow.outreachSent'), await this.renderMainMenu(updated));
       }
       if (text === '3') {
         delete data.verify_error_prompt;
@@ -1420,7 +1432,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.renderMainMenu(updated);
       }
       // Unknown input in fail prompt — reprint with prefix
-      return prependTextToEnvelope("Please reply with 1, 2, or 3.", FAIL_PROMPT);
+      return prependTextToEnvelope(t(language, 'verifyFlow.failPromptInvalidReply'), FAIL_PROMPT);
     }
 
     // Step 1: ask for email
@@ -1428,28 +1440,28 @@ async handleMessageEnvelope(message, phoneNumber) {
       if (!data.awaiting_email) {
         data.awaiting_email = true;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.restartEnterEmail');
       }
       // Validate and store email
       const email = textRaw.toLowerCase();
       if (!email.includes('@') || !email.includes('.')) {
-        return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.invalidEmail');
       }
       data.verify_email = email;
       delete data.awaiting_email;
       data.awaiting_dob = true;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Thanks. Now please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
+      return t(language, 'verifyFlow.enterDob');
     }
 
     // Step 2: collect and validate DOB
     if (!data.verify_dob) {
       if (!textRaw) {
-        return 'Please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.enterDobRetry');
       }
       const parsed = parseDob(textRaw);
       if (!parsed) {
-        return 'That doesn\'t look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.invalidDob');
       }
       data.verify_dob = parsed; // stored as YYYY-MM-DD
       delete data.awaiting_dob;
@@ -1487,7 +1499,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           this.sessionManager.db.upsertPatientState(phoneForState, { patient_id: patient.id, verified: true }).catch(() => {});
         }
         const updated = await this.sessionManager.getSession(session.id);
-        return prependTextToEnvelope('Verification successful!', await this.goToInteractiveMenu(updated));
+        return prependTextToEnvelope(t(language, 'verifyFlow.verificationSuccessful'), await this.goToInteractiveMenu(updated));
       }
 
       // Verification failed — show 3-option prompt, stay in VERIFY state
@@ -1497,11 +1509,11 @@ async handleMessageEnvelope(message, phoneNumber) {
       const support = getSupportInfo(region);
       this.logger.analyticsEvent({ event: 'verification_failed', reason: 'no_match', sessionId: session.id, region, ts: Date.now() });
       return buttons(
-        `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}`,
+        t(language, 'verifyFlow.noMatchBody', { support }),
         [
-          { id: '1', title: 'Try again' },
-          { id: '2', title: 'Email us' },
-          { id: '3', title: 'Main menu' }
+          { id: '1', title: t(language, 'verifyFlow.failPromptTryAgain') },
+          { id: '2', title: t(language, 'verifyFlow.failPromptEmailUs') },
+          { id: '3', title: t(language, 'verifyFlow.failPromptMainMenu') }
         ]
       );
 
@@ -1513,11 +1525,11 @@ async handleMessageEnvelope(message, phoneNumber) {
       // Distinct from the "wrong email/DOB" message above — this is a real
       // fetch failure (e.g. Cliniko rate-limited), not a non-matching patient.
       return buttons(
-        "We're having trouble verifying your details right now. Please try again in a moment.",
+        t(language, 'verifyFlow.apiErrorBody'),
         [
-          { id: '1', title: 'Try again' },
-          { id: '2', title: 'Email us' },
-          { id: '3', title: 'Main menu' }
+          { id: '1', title: t(language, 'verifyFlow.failPromptTryAgain') },
+          { id: '2', title: t(language, 'verifyFlow.failPromptEmailUs') },
+          { id: '3', title: t(language, 'verifyFlow.failPromptMainMenu') }
         ]
       );
     }
@@ -4812,6 +4824,7 @@ if (/^p(rev)?$/i.test(text)) {
     const log = this.logger.child({ component: 'RegisterPatient', sessionId: session?.id });
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     const text = (message || '').trim();
+    const language = this._getSessionLanguage(session);
 
     // Back/cancel to Intro from any step
     if (['0', 'back', 'menu'].includes(text.toLowerCase())) {
@@ -4850,13 +4863,13 @@ if (/^p(rev)?$/i.test(text)) {
           // Same format check as handleVerifyState's email step.
           const email = text.toLowerCase();
           if (!email.includes('@') || !email.includes('.')) {
-            return buttons("That doesn't look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+            return buttons(t(language, 'registerFlow.invalidEmail'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
           }
           data.email = email;
         } else if (next === 'dob') {
           const parsed = parseDob(text);
           if (!parsed) {
-            return buttons("That doesn't look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+            return buttons(t(language, 'registerFlow.invalidDob'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
           }
           data.dob = parsed; // stored as YYYY-MM-DD
         } else {
@@ -4865,10 +4878,10 @@ if (/^p(rev)?$/i.test(text)) {
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         log.info('Collected field', { field: next });
       }
-      if (!data.first_name) return buttons("Please tell me your first name:\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.last_name)  return buttons("Got it. What's your last name?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.email)      return buttons("Thanks. What's your email address?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.dob)        return buttons("Lastly, what's your date of birth? (e.g. 15 03 1985 or 15/03/1985)\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+      if (!data.first_name) return buttons(t(language, 'registerFlow.askFirstName'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+      if (!data.last_name)  return buttons(t(language, 'registerFlow.askLastName'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+      if (!data.email)      return buttons(t(language, 'registerFlow.askEmail'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+      if (!data.dob)        return buttons(t(language, 'registerFlow.askDob'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
     }
 
     // All fields collected → register
@@ -4880,7 +4893,7 @@ if (/^p(rev)?$/i.test(text)) {
       });
       const updated = await this.sessionManager.getSession(session.id);
       log.warn('Missing email or phone for registration');
-      return prependTextToEnvelope('We need both email and phone number to complete registration.', await this.renderMainMenu(updated));
+      return prependTextToEnvelope(t(language, 'registerFlow.missingEmailOrPhone'), await this.renderMainMenu(updated));
     }
 
     const patient = {
@@ -4926,15 +4939,15 @@ if (/^p(rev)?$/i.test(text)) {
         const updated = await this.sessionManager.getSession(session.id);
         log.info('Registration success', { email: patient.email, patient_id: newPatientId });
         this.logger.analyticsEvent({ event: 'registration_completed', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
-        return prependTextToEnvelope(`✅ You've been registered!`, await this.renderMainMenu(updated));
+        return prependTextToEnvelope(t(language, 'registerFlow.registrationSuccess'), await this.renderMainMenu(updated));
       }
       log.warn('Registration returned falsy result');
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return prependTextToEnvelope("Sorry, we couldn't complete registration right now.", await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(language, 'registerFlow.registrationFailedFalsy'), await this.renderMainMenu(session));
     } catch (e) {
       log.error('Registration error', { err: e?.message || e });
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return prependTextToEnvelope('We hit an error while registering you. Please try again later.', await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(language, 'registerFlow.registrationError'), await this.renderMainMenu(session));
     }
   }
 
