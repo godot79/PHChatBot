@@ -369,6 +369,23 @@ function formatSlotDateTime(dateOrIso, tz) {
   });
 }
 
+/**
+ * Format a Date or ISO string as a date-only string (no time), for the
+ * Specific Date flow's date-picker rows and prompt headers. Same fixed-locale
+ * rationale as formatSlotDateTime: dt.toLocaleDateString() with no locale arg
+ * depends on the server process's resolved locale, which is unset/minimal on
+ * Cloud Run — it silently renders Western numeric dates (e.g. "8/29/2026")
+ * inside otherwise fully-translated yue/zh prompts. e.g. "29 Aug 2026".
+ *
+ * @param {Date|string} dateOrIso
+ * @returns {string}
+ */
+function formatDateOnly(dateOrIso) {
+  const dt = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (isNaN(dt.getTime())) return String(dateOrIso);
+  return dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
 function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
   return `${idx}. ${formatSlotDateTime(dt)}`; // no tz: standalone util not used in class methods
@@ -429,10 +446,15 @@ function deduplicateSlots(slots) {
  */
 function getPractitionerDisplayName(practitioner, language, logger) {
   if (!practitioner) return 'Practitioner';
-  const name = practitioner.display_name
-    || (practitioner.first_name || practitioner.last_name
+  // Prefer the structured first/last name over Cliniko's own display_name —
+  // Cliniko lets clinics set display_name to a first-name-only value per
+  // practitioner (confirmed live for several HK practitioners), which both
+  // undertranslates (yue/zh lookups are keyed by full name) and looks
+  // inconsistent in English. Only fall back to display_name when first/last
+  // are both unavailable.
+  const name = (practitioner.first_name || practitioner.last_name
         ? [practitioner.first_name, practitioner.last_name].filter(Boolean).join(' ')
-        : 'Practitioner');
+        : practitioner.display_name) || 'Practitioner';
   return translatePractitionerName(name, language || 'en', logger);
 }
 
@@ -3365,7 +3387,7 @@ if (/^p(rev)?$/i.test(text)) {
             });
           }
 
-          const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+          const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
           const reply = buildInteractiveSelectionList({
             items: data.appointment_type_list || [],
             rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
@@ -3400,7 +3422,7 @@ if (/^p(rev)?$/i.test(text)) {
       return buildInteractiveSelectionList({
         header: t(this._getSessionLanguage(session), 'bookSpecificDate.pickDatePage', { current: cur + 1, total: MAX_DATE_PAGES }),
         items: candidates,
-        rowFn: (dt) => ({ title: dt.toLocaleDateString() }),
+        rowFn: (dt) => ({ title: formatDateOnly(dt) }),
         page: cur,
         fixedPageSize: MAX_DATE_ITEMS
       });
@@ -3462,7 +3484,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+      const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
       const reply = buildInteractiveSelectionList({
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
@@ -3535,7 +3557,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+      const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
       const reply = buildInteractiveSelectionList({
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
@@ -3574,7 +3596,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.clinic_page = 0;
 
         if (withSlots.length === 0) {
-          const noSlotsDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+          const noSlotsDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
           // context 'date_inner' is intercepted by the special-case handler at
           // the top of this function (before _handleNoSlotsDecision even runs),
           // which navigates to choose_physio and clears the stale selection —
@@ -3617,7 +3639,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+      const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
       const reply = buildInteractiveSelectionList({
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
@@ -3676,7 +3698,7 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger)} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
+      const header = `${getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger)} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)} • ${formatDateOnly(new Date(`${date}T00:00:00Z`))}`;
       return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 

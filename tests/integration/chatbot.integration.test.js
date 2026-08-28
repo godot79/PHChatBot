@@ -6494,7 +6494,10 @@ describe('Cancellation blocked within 24 hours', () => {
       expect(payload.to).toContain('patient@example.com');
       expect(payload.subject).toMatch(/cancel blocked/i);
       expect(payload.text).not.toMatch(/successfully cancelled/i);
-      expect(payload.text).toContain('Dr. Jane Tan');
+      // getPractitionerDisplayName now prefers first_name+last_name over Cliniko's
+      // own display_name (which can be a title-prefixed or first-name-only value) —
+      // see fix/practitioner-display-name-precedence.
+      expect(payload.text).toContain('Jane Tan');
       expect(payload.text).toContain('Prohealth Novena');
       expect(String(reply)).toMatch(/front desk will be in touch/i);
 
@@ -6722,7 +6725,8 @@ describe('Reschedule blocked within 24 hours', () => {
       expect(payload.to).toContain('patient@example.com');
       expect(payload.subject).toMatch(/reschedule blocked/i);
       expect(payload.text).not.toMatch(/has been rescheduled|successfully rescheduled/i); // never claims it was actually rescheduled
-      expect(payload.text).toContain('Dr. Jane Tan');
+      // See fix/practitioner-display-name-precedence — first_name+last_name now wins.
+      expect(payload.text).toContain('Jane Tan');
       expect(payload.text).toContain('Prohealth Novena');
       expect(String(reply)).toMatch(/front desk will be in touch/i);
 
