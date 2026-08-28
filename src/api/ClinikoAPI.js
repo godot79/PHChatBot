@@ -856,7 +856,7 @@ class ClinikoAPI {
             if (!EXCLUDED_CLINIC_PATTERN.test(businessName)) {
               allSlots.push(...slots.map(slot => ({
                 practitioner_id: practitioner.id,
-                practitioner_name: practitioner.display_name || `${practitioner.first_name} ${practitioner.last_name}`.trim(),
+                practitioner_name: `${practitioner.first_name || ''} ${practitioner.last_name || ''}`.trim() || practitioner.display_name,
                 appointment_type_id: apptType.id,
                 appointment_type_name: apptType.name,
                 business_id: business_id,

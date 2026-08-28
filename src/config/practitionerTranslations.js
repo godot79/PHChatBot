@@ -17,11 +17,11 @@
 const PRACTITIONER_TRANSLATIONS = {
   // WS
   'Leo Choi': '蔡楚基',
-  'Maritza Lai': '雷小嫱',
+  'Maritza Lue': '雷小嫱', // was keyed 'Maritza Lai' — corrected against live Cliniko last name
   'Wing Cheung': '張詠瑜',
   'Louis Lee': '李耀漢',
-  'Amanda Ko': '葛妍彤',
-  'Carmen Ku': '顧芷慜',
+  'Amanda Kot': '葛妍彤', // was keyed 'Amanda Ko' — corrected against live Cliniko last name
+  'Carmen Koo': '顧芷慜', // was keyed 'Carmen Ku' — corrected against live Cliniko last name
   'Stanley Ho': '何晉熙',
   'Hazel Chan': '陳海瑩',
   // WS / WWH / TST (shared across clinics, one Cliniko record each)
@@ -32,7 +32,7 @@ const PRACTITIONER_TRANSLATIONS = {
   'Michael Pan': '潘今立',
   'Chloe Lau': '劉洛鏡',
   'Meredith Cheng': '鄭美姿',
-  'Arnold Tseng': '曾子瑜',
+  'Arnold Tsang': '曾子瑜', // was keyed 'Arnold Tseng' — corrected against live Cliniko last name
   'Cliff Chan': '陳正謙',
   'Sandy Lee': '李理儀',
   'Brian Chan': '陳沛行',
@@ -41,7 +41,7 @@ const PRACTITIONER_TRANSLATIONS = {
   'Dario Tam': '譚宇哲',
   'Dickson Lee': '李文迪',
   'Pinky Chan': '陳展晴',
-  'Yi Fan Jia': '賈一凡',
+  'Yifan Jia': '賈一凡', // was keyed 'Yi Fan Jia' (extra space) — corrected against live Cliniko first name
   'Brian Cheung': '張偉維',
   // TST
   'Alicia Lam': '林雅莉',

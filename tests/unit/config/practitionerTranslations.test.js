@@ -27,6 +27,20 @@ describe('practitionerTranslations', () => {
     expect(PRACTITIONER_TRANSLATIONS['Bonnie Ong']).toBeUndefined();
   });
 
+  // 2026-08-28: these 5 keys were transcribed wrong from the source PDF (see file
+  // header) — live Cliniko data showed different last names/spacing. Confirmed
+  // live: Amanda Kot, Arnold Tsang, Maritza Lue, Carmen Koo, Yifan Jia (no space).
+  test.each([
+    ['Amanda Kot', 'Amanda Ko', '葛妍彤'],
+    ['Arnold Tsang', 'Arnold Tseng', '曾子瑜'],
+    ['Maritza Lue', 'Maritza Lai', '雷小嫱'],
+    ['Carmen Koo', 'Carmen Ku', '顧芷慜'],
+    ['Yifan Jia', 'Yi Fan Jia', '賈一凡'],
+  ])('is keyed by the corrected Cliniko name "%s", not the old "%s"', (correctKey, oldKey, expected) => {
+    expect(translatePractitionerName(correctKey, 'yue')).toBe(expected);
+    expect(PRACTITIONER_TRANSLATIONS[oldKey]).toBeUndefined();
+  });
+
   test('confirmed no-Chinese-name practitioners (Greg Lock, Suki Law, Yashmita Changlani, Etienne Simonnet) fall back to English and log a warning', () => {
     for (const name of ['Greg Lock', 'Suki Law', 'Yashmita Changlani', 'Etienne Simonnet']) {
       const warn = jest.fn();
