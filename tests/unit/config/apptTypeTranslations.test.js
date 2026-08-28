@@ -3,8 +3,16 @@
 const { APPT_TYPE_TRANSLATIONS, translateApptTypeName, normName } = require('../../../src/config/apptTypeTranslations');
 
 describe('apptTypeTranslations', () => {
-  test('has 32 entries (33 "certain" PDF entries minus the flagged soft-tissue-release type)', () => {
-    expect(Object.keys(APPT_TYPE_TRANSLATIONS)).toHaveLength(32);
+  test('has 34 entries (33 "certain" PDF entries minus the flagged soft-tissue-release type, plus 2 Osteopathy entries added 2026-08-28)', () => {
+    expect(Object.keys(APPT_TYPE_TRANSLATIONS)).toHaveLength(34);
+  });
+
+  // 2026-08-28: found via a live coverage sweep — genuinely missing, not part
+  // of the documented doubtful/no-idea exclusion list.
+  test.each(['yue', 'zh'])('%s translates the Osteopathy appointment types', (lang) => {
+    const expected = lang === 'yue' ? '整骨治療' : '整骨治疗';
+    expect(translateApptTypeName('Follow Up Appointment-Osteopathy', lang)).toBe(`${lang === 'yue' ? '覆診' : '复诊'} - ${expected}`);
+    expect(translateApptTypeName('New Patient-Osteopathy', lang)).toBe(`${lang === 'yue' ? '新症' : '新患者'} - ${expected}`);
   });
 
   test('English language passes the name through untranslated', () => {

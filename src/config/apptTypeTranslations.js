@@ -57,6 +57,8 @@ const APPT_TYPE_TRANSLATIONS = {
   [normName('Clinical Stretch Therapy')]: { yue: '臨床伸展治療', zh: '临床伸展治疗' },
   [normName('Clinical Ultrasound Session for inflammation relief')]: { yue: '臨床超聲波療程（消炎）', zh: '临床超声波疗程（消炎）' },
   [normName('Follow up Clinical Physiotherapy Treatment')]: { yue: '覆診 - 臨床物理治療', zh: '复诊 - 临床物理治疗' },
+  [normName('Follow Up Appointment-Osteopathy')]: { yue: '覆診 - 整骨治療', zh: '复诊 - 整骨治疗' },
+  [normName('New Patient-Osteopathy')]: { yue: '新症 - 整骨治療', zh: '新患者 - 整骨治疗' },
   [normName('No Charge')]: { yue: '免費', zh: '免费' },
   [normName('Pre/Post Natal Sessions')]: { yue: '產前/產後療程', zh: '产前/产后疗程' },
   [normName('Pre/Post Natal Single session')]: { yue: '產前/產後單次療程', zh: '产前/产后单次疗程' },
