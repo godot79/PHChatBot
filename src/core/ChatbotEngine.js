@@ -575,7 +575,7 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz, langua
  * Titles over 24 chars are truncated; the full text becomes the description.
  * fixedPageSize overrides the default variable sizing (use for date picker).
  */
-function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPageSize = null }) {
+function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPageSize = null, language = 'en' }) {
   if (!Array.isArray(items)) items = [];
 
   const hasPrev = page > 0;
@@ -597,29 +597,29 @@ function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPa
     return { id: String(localIdx), title: safeTitle, ...(description ? { description: String(description).slice(0, 72) } : {}) };
   });
 
-  if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
-  if (hasNext) rows.push({ id: 'next', title: 'More →' });
-  rows.push({ id: 'back', title: '← Back' });
+  if (hasPrev) rows.push({ id: 'prev', title: t(language, 'listNav.previousLabel') });
+  if (hasNext) rows.push({ id: 'next', title: t(language, 'listNav.moreLabel') });
+  rows.push({ id: 'back', title: t(language, 'listNav.backLabel') });
 
   const textLines = pageItems.map((item, i) => {
     const { title } = rowFn(item, i + 1);
     return `${i + 1}. ${title}`;
   });
-  if (hasPrev) textLines.push('P. Previous');
-  if (hasNext) textLines.push('M. More');
-  textLines.push('0. Back');
+  if (hasPrev) textLines.push(t(language, 'listNav.prevNavText'));
+  if (hasNext) textLines.push(t(language, 'listNav.moreNavText'));
+  textLines.push(t(language, 'listNav.backNavText'));
   const numberedList = textLines.join('\n');
-  const textFallback = header + '\n\n' + numberedList + '\n\nReply with number or option above.';
+  const textFallback = header + '\n\n' + numberedList + '\n\n' + t(language, 'listNav.replyWithNumberInstruction');
 
   // Include numbered options in the body so users can type a number if the
   // interactive picker doesn't fire (e.g. Mac WhatsApp Desktop).
-  const bodyText = (header + '\n\n' + numberedList + '\n\nTap to select, or type a number.').slice(0, 1024);
+  const bodyText = (header + '\n\n' + numberedList + '\n\n' + t(language, 'listNav.tapToSelectInstruction')).slice(0, 1024);
 
   const interactive = {
     type: 'list',
     body: { text: bodyText },
     action: {
-      button: 'Select option',
+      button: t(language, 'listNav.selectOptionButton'),
       sections: [{ rows }]
     }
   };
@@ -2267,7 +2267,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       const language = this._getSessionLanguage(session);
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: list,
         rowFn: (p) => ({
           title: getPractitionerDisplayName(p.practitioner, this._getSessionLanguage(session), this.logger) || '',
@@ -2340,7 +2340,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply2 = buildInteractiveSelectionList({
+      const reply2 = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
@@ -2415,7 +2415,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply3 = buildInteractiveSelectionList({
+      const reply3 = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(c.business_name) }),
         page: data.clinic_page || 0,
@@ -2571,7 +2571,7 @@ if (/^p(rev)?$/i.test(text)) {
     const badInput = text !== '';
     const menu = options.length <= 3
       ? buttons(t(language, 'bookSoonest.funnelHowCovered'), translatedOptions.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-      : buildInteractiveSelectionList({ header: t(language, 'bookSoonest.funnelHowCovered'), items: translatedOptions, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
+      : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: t(language, 'bookSoonest.funnelHowCovered'), items: translatedOptions, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
     return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
   }
 
@@ -2661,7 +2661,7 @@ if (/^p(rev)?$/i.test(text)) {
         {
           const menu = services.length <= 3
             ? buttons(t(language, 'bookSoonest.funnelWhatType'), services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: t(language, 'bookSoonest.funnelWhatType'), items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
+            : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: t(language, 'bookSoonest.funnelWhatType'), items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
           return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
@@ -2751,7 +2751,7 @@ if (/^p(rev)?$/i.test(text)) {
         {
           const menu = combos.length <= 3
             ? buttons(bodyText, combos.map((c, i) => ({ id: String(i + 1), title: comboLabel(c).slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: bodyText, items: combos, rowFn: (c) => ({ title: comboLabel(c).slice(0, 24) }), page });
+            : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: bodyText, items: combos, rowFn: (c) => ({ title: comboLabel(c).slice(0, 24) }), page });
           return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
@@ -2945,7 +2945,7 @@ if (/^p(rev)?$/i.test(text)) {
           data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-          const reply = buildInteractiveSelectionList({
+          const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
             items: data.practitioner_list,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
@@ -3047,7 +3047,7 @@ if (/^p(rev)?$/i.test(text)) {
       await sync();
 
       if (practitioners.length > 1) {
-        const reply = buildInteractiveSelectionList({
+        const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
           items: data.practitioner_list,
           rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
           page: 0,
@@ -3091,7 +3091,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this.handleBookSoonest(session, '');
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: practitionerList,
         rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
         page,
@@ -3176,7 +3176,7 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (!data.selected_clinic) {
-        const reply = buildInteractiveSelectionList({
+        const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
           items: clinics,
           rowFn: (c) => ({ title: String(c.business_name) }),
           page,
@@ -3242,7 +3242,7 @@ if (/^p(rev)?$/i.test(text)) {
     // Fallback → show types again
     const apptTypes = data.appointment_type_list || [];
     const apptTypePage = data.appt_type_page || 0;
-    const reply = buildInteractiveSelectionList({
+    const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
       items: apptTypes,
       rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
       page: apptTypePage,
@@ -3388,7 +3388,7 @@ if (/^p(rev)?$/i.test(text)) {
           }
 
           const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
-          const reply = buildInteractiveSelectionList({
+          const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
             items: data.appointment_type_list || [],
             rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
             page: 0,
@@ -3419,7 +3419,7 @@ if (/^p(rev)?$/i.test(text)) {
 
       // render date page
       const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-      return buildInteractiveSelectionList({
+      return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         header: t(this._getSessionLanguage(session), 'bookSpecificDate.pickDatePage', { current: cur + 1, total: MAX_DATE_PAGES }),
         items: candidates,
         rowFn: (dt) => ({ title: formatDateOnly(dt) }),
@@ -3485,7 +3485,7 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
@@ -3558,7 +3558,7 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
@@ -3640,7 +3640,7 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
         page: data.clinic_page || 0,
@@ -3843,7 +3843,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
@@ -3906,7 +3906,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
@@ -3999,7 +3999,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
         page: data.clinic_page || 0,
@@ -4201,7 +4201,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : (c.business_name || c.display_name || c.id)) }),
         page: data.clinic_page || 0,
@@ -4287,7 +4287,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const replyTypes = buildInteractiveSelectionList({
+      const replyTypes = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
         rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
@@ -4387,7 +4387,7 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const replyPhys = buildInteractiveSelectionList({
+      const replyPhys = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.practitioner_list || [],
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name || p.name || p.id)) }),
         page: data.practitioner_page || 0,
@@ -5024,7 +5024,7 @@ if (/^p(rev)?$/i.test(text)) {
       data: JSON.stringify(data)
     });
 
-    return buildInteractiveSelectionList({
+    return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
       header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
       items: futureAppts,
       rowFn: (appt) => ({
@@ -5055,7 +5055,7 @@ if (/^p(rev)?$/i.test(text)) {
     const renderCancelList = async (page) => {
       data.cancel_appt_page = page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return buildInteractiveSelectionList({
+      return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
         items: appts,
         rowFn: (appt) => ({
@@ -5354,7 +5354,7 @@ if (/^p(rev)?$/i.test(text)) {
       data: JSON.stringify(data)
     });
 
-    return buildInteractiveSelectionList({
+    return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
       header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
       items: futureAppts,
       rowFn: (appt) => ({
@@ -5388,7 +5388,7 @@ if (/^p(rev)?$/i.test(text)) {
     const renderRescheduleList = async (page) => {
       data.reschedule_appt_page = page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return buildInteractiveSelectionList({
+      return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
         items: appts,
         rowFn: (appt) => ({

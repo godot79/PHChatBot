@@ -4802,7 +4802,7 @@ describe('Clinic name translation (Phase 3b, yue/zh)', () => {
   const nextPhone = () => `+8529${String(++phoneSeq).padStart(6, '0')}`;
 
   // A clinic that IS in the translation table (src/config/clinicTranslations.js)
-  const TRANSLATED_CLINIC = { id: 'BIZ-WS', business_name: 'Wellington Street, Central' };
+  const TRANSLATED_CLINIC = { id: 'BIZ-WS', business_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)' };
   const TRANSLATED_CLINIC_ZH = '中環威靈頓街';
   // A clinic that is NOT in the table — must fall back to English, never crash.
   const UNKNOWN_CLINIC = { id: 'BIZ-XX', business_name: 'Some Future Clinic' };
@@ -4833,17 +4833,17 @@ describe('Clinic name translation (Phase 3b, yue/zh)', () => {
   describe('BOOK_SPECIFIC_CLINIC — clinic list', () => {
     test('yue session sees the translated Chinese clinic name in the clinic list', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
-        { clinic_id: 'BIZ-WS', clinic_name: 'Wellington Street, Central', practitioners: [PHYSIO] },
+        { clinic_id: 'BIZ-WS', clinic_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)', practitioners: [PHYSIO] },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'yue');
       const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
       expect(reply).toContain(TRANSLATED_CLINIC_ZH);
-      expect(reply).not.toContain('Wellington Street, Central');
+      expect(reply).not.toContain('Prohealth Sports & Spinal Physiotherapy Centres (WS)');
     });
 
     test('zh session sees the same translated Chinese clinic name (yue/zh share one table)', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
-        { clinic_id: 'BIZ-WS', clinic_name: 'Wellington Street, Central', practitioners: [PHYSIO] },
+        { clinic_id: 'BIZ-WS', clinic_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)', practitioners: [PHYSIO] },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'zh');
       const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
@@ -4852,11 +4852,11 @@ describe('Clinic name translation (Phase 3b, yue/zh)', () => {
 
     test('en session still sees the English clinic name (no regression)', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
-        { clinic_id: 'BIZ-WS', clinic_name: 'Wellington Street, Central', practitioners: [PHYSIO] },
+        { clinic_id: 'BIZ-WS', clinic_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)', practitioners: [PHYSIO] },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'en');
       const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
-      expect(reply).toContain('Wellington Street, Central');
+      expect(reply).toContain('Prohealth Sports & Spinal Physiotherapy Centres (WS)');
       expect(reply).not.toContain(TRANSLATED_CLINIC_ZH);
     });
 

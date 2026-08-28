@@ -243,6 +243,17 @@ const STRINGS = {
       registrationFailedFalsy: "Sorry, we couldn't complete registration right now.",
       registrationError: 'We hit an error while registering you. Please try again later.',
     },
+    listNav: {
+      previousLabel: '← Previous',
+      moreLabel: 'More →',
+      backLabel: '← Back',
+      prevNavText: 'P. Previous',
+      moreNavText: 'M. More',
+      backNavText: '0. Back',
+      tapToSelectInstruction: 'Tap to select, or type a number.',
+      replyWithNumberInstruction: 'Reply with number or option above.',
+      selectOptionButton: 'Select option',
+    },
   },
   yue: {
     common: {
@@ -471,6 +482,17 @@ const STRINGS = {
       registrationFailedFalsy: '唔好意思，而家未能完成登記。',
       registrationError: '登記時出咗少少問題，請遲啲再試。',
     },
+    listNav: {
+      previousLabel: '← 上一頁',
+      moreLabel: '更多 →',
+      backLabel: '← 返回',
+      prevNavText: 'P. 上一頁',
+      moreNavText: 'M. 更多',
+      backNavText: '0. 返回',
+      tapToSelectInstruction: '請點選，或者輸入數字。',
+      replyWithNumberInstruction: '請回覆數字或者上面嘅選項。',
+      selectOptionButton: '選擇選項',
+    },
   },
   zh: {
     common: {
@@ -698,6 +720,17 @@ const STRINGS = {
       registrationSuccess: '✅ 您已注册成功！',
       registrationFailedFalsy: '抱歉，暂时无法完成注册。',
       registrationError: '注册时遇到了一些问题，请稍后再试。',
+    },
+    listNav: {
+      previousLabel: '← 上一页',
+      moreLabel: '更多 →',
+      backLabel: '← 返回',
+      prevNavText: 'P. 上一页',
+      moreNavText: 'M. 更多',
+      backNavText: '0. 返回',
+      tapToSelectInstruction: '请点选，或输入数字。',
+      replyWithNumberInstruction: '请回复数字或上面的选项。',
+      selectOptionButton: '选择选项',
     },
   },
 };
