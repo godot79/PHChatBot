@@ -23,6 +23,7 @@ function matchesLanguageLabel(text, code) {
 }
 const { t } = require('../config/strings');
 const { translateInsurerName } = require('../config/insurerTranslations');
+const { translateServiceName } = require('../config/serviceTranslations');
 const { translateClinicName } = require('../config/clinicTranslations');
 const { translatePractitionerName } = require('../config/practitionerTranslations');
 const { translateApptTypeName } = require('../config/apptTypeTranslations');
@@ -2660,8 +2661,8 @@ if (/^p(rev)?$/i.test(text)) {
         }
         {
           const menu = services.length <= 3
-            ? buttons(t(language, 'bookSoonest.funnelWhatType'), services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
-            : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: t(language, 'bookSoonest.funnelWhatType'), items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
+            ? buttons(t(language, 'bookSoonest.funnelWhatType'), services.map((s, i) => ({ id: String(i + 1), title: translateServiceName(s, language, this.logger).slice(0, 20) })))
+            : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: t(language, 'bookSoonest.funnelWhatType'), items: services, rowFn: (s) => ({ title: translateServiceName(s, language, this.logger).slice(0, 24) }), page });
           return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
@@ -2726,9 +2727,10 @@ if (/^p(rev)?$/i.test(text)) {
         const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
         const ptLabels = { new: t(language, 'bookSoonest.patientTypeNew'), follow_up: t(language, 'bookSoonest.patientTypeFollowUp') };
         const comboLabel = (c) => {
+          const durLabel = `${c.duration}${t(language, 'common.minutesSuffix')}`;
           const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
-          const durPart = !allSameDuration ? `${c.duration} min` : null;
-          return [ptPart, durPart].filter(Boolean).join(' ') || `${c.duration} min`;
+          const durPart = !allSameDuration ? durLabel : null;
+          return [ptPart, durPart].filter(Boolean).join(' ') || durLabel;
         };
         const bodyText = allSameDuration && !allSamePatientType
           ? t(language, 'bookSoonest.funnelNewOrReturning')
@@ -2763,11 +2765,11 @@ if (/^p(rev)?$/i.test(text)) {
 
   _formatPrefLabel(pref, language) {
     if (!pref) return null;
-    const parts = [pref.service];
+    const parts = [translateServiceName(pref.service, language, this.logger)];
     if (pref.patientType === 'new') parts.push(t(language, 'bookSoonest.patientTypeNew'));
     else if (pref.patientType === 'follow_up') parts.push(t(language, 'bookSoonest.patientTypeFollowUp'));
-    if (pref.insurer) parts.push(pref.insurer);
-    if (pref.duration) parts.push(`${pref.duration} min`);
+    if (pref.insurer) parts.push(translateInsurerName(pref.insurer, language, this.logger));
+    if (pref.duration) parts.push(`${pref.duration}${t(language, 'common.minutesSuffix')}`);
     return parts.filter(Boolean).join(' · ');
   }
 
