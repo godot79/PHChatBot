@@ -27,6 +27,7 @@ const STRINGS = {
       emailUs: 'Email us',
       messageOnWhatsApp: 'Message on WhatsApp',
       mainMenuButton: 'Main menu',
+      minutesSuffix: ' min',
     },
     noSlots: {
       transientFailure: "We're having trouble checking availability right now — this may be temporary. Please try again in a moment.",
@@ -266,6 +267,7 @@ const STRINGS = {
       emailUs: '電郵我哋',
       messageOnWhatsApp: '喺 WhatsApp 傳訊息',
       mainMenuButton: '主選單',
+      minutesSuffix: '分鐘',
     },
     noSlots: {
       transientFailure: '而家查詢時段有啲問題 — 可能係暫時性嘅。請等一陣再試多次。',
@@ -505,6 +507,7 @@ const STRINGS = {
       emailUs: '给我们发邮件',
       messageOnWhatsApp: '在 WhatsApp 上留言',
       mainMenuButton: '主菜单',
+      minutesSuffix: '分钟',
     },
     noSlots: {
       transientFailure: '目前查询可用时段时遇到问题——这可能是暂时的。请稍后再试。',
