@@ -74,6 +74,7 @@ class DatabaseManager {
           phone_number TEXT PRIMARY KEY,
           region TEXT,
           appt_preference TEXT,
+          physio_preference TEXT,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )`);
 
@@ -86,6 +87,7 @@ class DatabaseManager {
           }
         };
         this.db.run(`ALTER TABLE patient_state ADD COLUMN patient_id TEXT`, ignoreDuplicateColumn);
+        this.db.run(`ALTER TABLE patient_state ADD COLUMN language TEXT`, ignoreDuplicateColumn);
         this.db.run(`ALTER TABLE patient_state ADD COLUMN verified BOOLEAN DEFAULT 0`, ignoreDuplicateColumn);
         // preferred_insurer is a durable, cross-visit setting (unlike appt_preference,
         // which is a "last booking" shortcut cleared on logout) — deliberately not
@@ -348,22 +350,24 @@ class DatabaseManager {
   }
 
   async upsertPatientState(phone, updates) {
-    const { region, appt_preference, patient_id, verified, preferred_insurer } = updates;
+    const { region, appt_preference, patient_id, verified, language, preferred_insurer, physio_preference } = updates;
     const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
     return new Promise((resolve, reject) => {
       this.db.run(
-        `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, preferred_insurer, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, language, preferred_insurer, physio_preference, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(phone_number) DO UPDATE SET
            region = COALESCE(?, region),
            appt_preference = COALESCE(?, appt_preference),
            patient_id = COALESCE(?, patient_id),
            verified = COALESCE(?, verified),
+           language = COALESCE(?, language),
            preferred_insurer = COALESCE(?, preferred_insurer),
+           physio_preference = COALESCE(?, physio_preference),
            updated_at = CURRENT_TIMESTAMP`,
         [
-          phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, preferred_insurer ?? null,
-          region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, preferred_insurer ?? null,
+          phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null, preferred_insurer ?? null, physio_preference ?? null,
+          region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null, preferred_insurer ?? null, physio_preference ?? null,
         ],
         (err) => err ? reject(err) : resolve()
       );

@@ -83,6 +83,8 @@ jest.mock('../../src/core/DatabaseManager', () => {
             appt_preference TEXT,
             patient_id TEXT,
             verified BOOLEAN DEFAULT 0,
+            language TEXT,
+            physio_preference TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
           )`, (err) => {
             if (err) return rej(err);
@@ -207,21 +209,23 @@ jest.mock('../../src/core/DatabaseManager', () => {
     }
 
     async upsertPatientState (phone, updates) {
-      const { region, appt_preference, patient_id, verified } = updates;
+      const { region, appt_preference, patient_id, verified, language, physio_preference } = updates;
       const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
       return new Promise((res, rej) =>
         this.db.run(
-          `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, updated_at)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, language, physio_preference, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(phone_number) DO UPDATE SET
              region = COALESCE(?, region),
              appt_preference = COALESCE(?, appt_preference),
              patient_id = COALESCE(?, patient_id),
              verified = COALESCE(?, verified),
+             language = COALESCE(?, language),
+             physio_preference = COALESCE(?, physio_preference),
              updated_at = CURRENT_TIMESTAMP`,
           [
-            phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
-            region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue,
+            phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null, physio_preference ?? null,
+            region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null, physio_preference ?? null,
           ],
           (err) => (err ? rej(err) : res())
         )
@@ -594,7 +598,7 @@ describe('ChatbotEngine — state machine', () => {
 
   test('new user reply contains a welcome/verify cue', async () => {
     const r = await engine.handleMessage('hi', '+6530000002');
-    expect(r).toMatch(/welcome|hello|verify|email|hi|start/i);
+    expect(r).toMatch(/welcome|hello|verify|email|hi|start|select your language/i);
   });
 
   // ─── Unverified intro menu — display and routing ──────────────────────────────
@@ -604,7 +608,7 @@ describe('ChatbotEngine — state machine', () => {
       await engine.sessionManager.updateSession(s.id, {
         conversation_state: 'INTRO',
         verified: false,
-        context: JSON.stringify({ region: 'SG' }),
+        context: JSON.stringify({ region: 'SG', language: 'en' }),
       });
       return engine.sessionManager.getSession(s.id);
     }
@@ -2006,6 +2010,8 @@ describe('Booking menu and flow coverage', () => {
       ],
       practitioner_list: SIX_PHYSIOS,
       practitioner_page: 0,
+      physio_funnel_step: 'done',
+      physio_funnel_sel: { gender: null, category: null },
     };
 
     test('page 0 with 6 physios → shows first 5 + More button', async () => {
@@ -2052,6 +2058,7 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', {
         selection_step: 'choose_physio',
+        physio_funnel_step: 'done',
         selected_date: '2026-08-01',
         selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
         navigation_chain: [
@@ -2257,6 +2264,9 @@ describe('Booking menu and flow coverage', () => {
       practitioner_list: SIX_PHYSIOS,
       practitioner_page: 0,
       navigation_chain: [],
+      // Funnel already completed so pagination tests bypass the preference steps
+      physio_funnel_step: 'done',
+      physio_funnel_sel: { gender: null, category: null },
     };
 
     test('page 0 with 6 physios → shows first 5 + More button', async () => {
@@ -2317,7 +2327,7 @@ describe('Booking menu and flow coverage', () => {
     // rendering only a "0. Back" row with no explanation and no way to retry.
     test('0 practitioners → no_slots_prompt shown instead of a bare "0. Back" dead end', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
-      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' });
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toMatch(/no practitioners/i);
       expect(reply).toMatch(/try again/i);
@@ -2368,6 +2378,149 @@ describe('Booking menu and flow coverage', () => {
       await callHandler(engine, ['handleBookSpecificPhysio'], session, '0');
       const updated = await db.getSession(session.id);
       expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_PHYSIO — physio preference funnel ────────────────────────
+  describe('BOOK_SPECIFIC_PHYSIO — physio preference funnel', () => {
+    // Shared helper: two practitioners with distinct categories, sorted Amy < Zara
+    const TWO_PRAC_GROUPS = [
+      { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+        { id: 'PRAC-001', first_name: 'Amy',  last_name: 'Lee',  title: 'Ms' },  // female, sorted first
+        { id: 'PRAC-002', first_name: 'Zara', last_name: 'Wong', title: 'Mr' },  // male, sorted second
+      ]},
+    ];
+    // Physiotherapy only — causes category step to auto-advance
+    const SINGLE_CAT_TYPES = [
+      { id: 'AT-001', name: 'New Patient', category: 'Physiotherapy', duration_in_minutes: 60 },
+    ];
+
+    test('entry with no saved preference → shows gender question', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/preference.*physio|physio.*preference|male|female|no preference/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
+    });
+
+    test("'1' (Male) at gender step with two categories → shows category question", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Leo', last_name: 'Choi', title: 'Mr' },
+        ]},
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-P', name: 'New Patient',   category: 'Physiotherapy',        duration_in_minutes: 60 },
+        { id: 'AT-M', name: 'Massage Visit', category: 'Sports Massage Therapy', duration_in_minutes: 30 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');     // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, '1')); // Male
+      expect(reply).toMatch(/type of treatment|Physiotherapy|Sports Massage/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.gender).toBe('male');
+      expect(d.physio_funnel_step).toBe('category');
+    });
+
+    test("'3' (No preference) with single category → funnel completes and physio list shown", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PRAC_GROUPS);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue(SINGLE_CAT_TYPES);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, '3')); // No pref
+      // Category auto-advances (only Physiotherapy) → physio list shown
+      expect(reply).toMatch(/Amy|Zara|Choose a physio/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBeNull();
+    });
+
+    test('Male filter excludes female physios but keeps unknown-title practitioners', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Leo',    last_name: 'Choi',  title: 'Mr'   }, // male
+          { id: 'PRAC-002', first_name: 'Angela', last_name: 'Leung', title: 'Ms'   }, // female
+          { id: 'PRAC-003', first_name: 'Pinky',  last_name: 'Chan',  title: null   }, // unknown
+        ]},
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue(SINGLE_CAT_TYPES);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, '1')); // Male
+      // Leo (Mr) and Pinky (null) included; Angela (Ms) excluded
+      expect(reply).toMatch(/Leo|Pinky/i);
+      expect(reply).not.toMatch(/Angela/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('male');
+    });
+
+    test('category filter: selecting a category shows only practitioners offering it', async () => {
+      // Sorted: Anna Lee < Zara Wong
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Anna', last_name: 'Lee'  },
+          { id: 'PRAC-002', first_name: 'Zara', last_name: 'Wong' },
+        ]},
+      ]);
+      // Anna (first in sorted order) → Physiotherapy; Zara → Osteopathy
+      engine.clinikoAPI.getAppointmentTypes
+        .mockResolvedValueOnce([{ id: 'AT-P', name: 'New Patient',      category: 'Physiotherapy', duration_in_minutes: 60 }])
+        .mockResolvedValueOnce([{ id: 'AT-O', name: 'Osteopathy Initial', category: 'Osteopathy',   duration_in_minutes: 60 }]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificPhysio'], s2, '3');       // No pref → category q
+      const s3 = await db.getSession(session.id);
+      // Sorted categories: Osteopathy=1, Physiotherapy=2 → pick '2' for Physiotherapy
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s3, '2'));
+      expect(reply).toMatch(/Anna/i);
+      expect(reply).not.toMatch(/Zara/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.category).toBe('Physiotherapy');
+    });
+
+    test('saved physio_preference → shortcut offered', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: 'Physiotherapy' } }),
+      });
+      const s = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s, ''));
+      expect(reply).toMatch(/Female.*Physiotherapy|last time|same preference/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('shortcut');
+    });
+
+    test("shortcut 'yes' → funnel completes with saved preference without re-asking", async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue(TWO_PRAC_GROUPS);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue(SINGLE_CAT_TYPES);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: null } }),
+      });
+      const s = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificPhysio'], s, '');         // → shortcut q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, 'yes'));
+      // Funnel done — should show physio list (female filter: Amy only)
+      expect(reply).toMatch(/Amy|Choose a physio/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('female');
+    });
+
+    test('bad input at gender step → error prefix shown, still at gender step', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], s2, 'xyz'));
+      expect(reply).toMatch(/Please choose an option|preference|male|female/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
     });
   });
 
@@ -3719,6 +3872,7 @@ describe('Booking menu and flow coverage', () => {
         selection_step: 'choose_type', appt_type_page: 0,
         appointment_type_list: TYPE_LIST_1,
         funnel_catalogue: [FUNNEL_CAT_1],
+        physio_funnel_step: 'done',
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       const row1Name = reply.match(/^1\.\s+(.+)$/m)[1].trim();
@@ -3738,6 +3892,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '1');
       expect(typeof reply).toBe('string');
@@ -3750,6 +3906,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '99');
       expect(reply).toMatch(/invalid practitioner/i);
@@ -3761,6 +3919,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, 'm');
       expect(typeof reply).toBe('string');
@@ -3773,6 +3933,8 @@ describe('Booking menu and flow coverage', () => {
         selected_appt_type: TYPE_1,
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         appointment_type_list: TYPE_LIST_2,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
       expect(reply).toMatch(/select duration|30 min|60 min/i);
@@ -3909,6 +4071,238 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_SOONEST — gender preference funnel ─────────────────────────────────
+  describe('BOOK_SOONEST — gender preference funnel', () => {
+    // Mixed-gender practitioner pool used across tests
+    const FEMALE = { id: 'PRAC-F', first_name: 'Amy',  last_name: 'Lee',  title: 'Ms' };
+    const MALE   = { id: 'PRAC-M', first_name: 'Leo',  last_name: 'Chan', title: 'Mr' };
+    const UNKNOWN= { id: 'PRAC-U', first_name: 'Sasha',last_name: 'Wong', title: null  };
+
+    test('entering choose_physio for the first time shows gender question, not physio list', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/preference.*physio|male|female|no preference/i);
+      expect(reply).not.toMatch(/Amy|Leo/i); // physio list not shown yet
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
+    });
+
+    test("gender '2' (Female) filters list: only female + unknown-title physios shown", async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE, UNKNOWN],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');       // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s2, '2')); // Female
+      // Amy (Ms) and Sasha (null) included; Leo (Mr) excluded
+      expect(reply).toMatch(/Amy|Sasha/i);
+      expect(reply).not.toMatch(/Leo/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('female');
+      expect(d.physio_funnel_sel?.category).toBeNull(); // category skipped
+    });
+
+    test("gender '3' (No preference) shows full practitioner list unfiltered", async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');       // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s2, '3')); // No pref
+      expect(reply).toMatch(/Amy/i);
+      expect(reply).toMatch(/Leo/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.gender).toBeNull();
+    });
+
+    test('gender question text fallback is numbered so text-mode users know to type 1/2/3', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      const envelope = await callHandler(engine, ['handleBookSoonest'], session, '');
+      // _textFallback must include numbered items so users on plain-text WhatsApp can type a number
+      const fallback = String(envelope);
+      expect(fallback).toMatch(/1\.\s*Male/i);
+      expect(fallback).toMatch(/2\.\s*Female/i);
+      expect(fallback).toMatch(/3\.\s*No preference/i);
+    });
+
+    test('saved gender preference → shortcut offered showing gender only (no category)', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      // Saved pref has both gender and category — but category should NOT appear in shortcut label
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: 'Physiotherapy' } }),
+      });
+      const s = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s, ''));
+      expect(reply).toMatch(/Female/i);
+      expect(reply).toMatch(/same preference/i);
+      // Category should NOT appear in label since this is a gender-only flow
+      expect(reply).not.toMatch(/Physiotherapy/i);
+    });
+
+    test("shortcut 'yes' applies saved gender, category stays null, shows filtered list", async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE, UNKNOWN],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await db.updateSession(session.id, {
+        context: JSON.stringify({ physio_preference: { gender: 'female', category: 'Physiotherapy' } }),
+      });
+      const s = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSoonest'], s, '');             // → shortcut
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], s2, 'yes'));
+      // Female filter: Amy and Sasha visible, Leo not
+      expect(reply).toMatch(/Amy|Sasha/i);
+      expect(reply).not.toMatch(/Leo/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_sel?.category).toBeNull();
+    });
+
+    test('0/back from gender question → clears physio funnel state and returns to type selection', async () => {
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1,
+        practitioner_list: [FEMALE, MALE],
+        practitioner_page: 0,
+        appointment_type_list: TYPE_LIST_2,
+        navigation_chain: [],
+      });
+      await callHandler(engine, ['handleBookSoonest'], session, '');       // → gender q
+      const s2 = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSoonest'], s2, '0');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.physio_funnel_step).toBeUndefined();
+      expect(d.physio_funnel_sel).toBeUndefined();
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_DATE — gender preference funnel ───────────────────────────
+  describe('BOOK_SPECIFIC_DATE — gender preference funnel', () => {
+    const FEMALE_D = { id: 'PRAC-F2', first_name: 'Mei',   last_name: 'Tan',  title: 'Ms' };
+    const MALE_D   = { id: 'PRAC-M2', first_name: 'John',  last_name: 'Lim',  title: 'Mr' };
+    const UNKNOWN_D= { id: 'PRAC-U2', first_name: 'Casey', last_name: 'Park', title: null  };
+
+    const baseChoosePhysio = {
+      selection_step: 'choose_physio',
+      selected_date: '2026-08-05',
+      selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+      navigation_chain: [
+        { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_type', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+      ],
+      practitioner_list: [FEMALE_D, MALE_D, UNKNOWN_D],
+      practitioner_page: 0,
+    };
+
+    test('entering choose_physio shows gender question, not physio list', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseChoosePhysio);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/preference.*physio|male|female|no preference/i);
+      expect(reply).not.toMatch(/Mei|John|Casey/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('gender');
+    });
+
+    test("gender '1' (Male) filters list: only male + unknown-title physios shown", async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseChoosePhysio);
+      await callHandler(engine, ['handleBookSpecificDate'], session, '');   // → gender q
+      const s2 = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], s2, '1')); // Male
+      expect(reply).toMatch(/John|Casey/i);
+      expect(reply).not.toMatch(/Mei/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+      expect(d.physio_funnel_sel?.gender).toBe('male');
+      expect(d.physio_funnel_sel?.category).toBeNull();
+    });
+
+    test('back from choose_physio to choose_type clears physio_funnel_step (clearForwardStateForPopped)', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseChoosePhysio);
+      await callHandler(engine, ['handleBookSpecificDate'], session, '');   // → gender q (funnel_step = 'gender')
+      const s2 = await db.getSession(session.id);
+      // Press back while in the funnel
+      await callHandler(engine, ['handleBookSpecificDate'], s2, '0');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      // Should have navigated back to choose_type and cleared physio funnel state
+      expect(d.physio_funnel_step).toBeUndefined();
+      expect(d.physio_funnel_sel).toBeUndefined();
+    });
+  });
+
+  // ─── Text fallback alignment ──────────────────────────────────────────────────
+  describe('physio funnel — text fallback alignment', () => {
+    test('gender step interactive body includes numbered list for Mac Desktop fallback', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const envelope = await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+      // Interactive body must include numbers so Mac Desktop users can type 1/2/3
+      const body = envelope?.interactive?.body?.text || String(envelope);
+      expect(body).toMatch(/1\.\s*Male/i);
+      expect(body).toMatch(/2\.\s*Female/i);
+      expect(body).toMatch(/3\.\s*No preference/i);
+    });
+
+    test('category buttons (≤3 options) text fallback is numbered, not dot-separated titles', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth', practitioners: [
+          { id: 'PRAC-001', first_name: 'Leo', last_name: 'Choi', title: 'Mr' },
+        ]},
+      ]);
+      // Two categories → buttons (≤3), not list
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-P', name: 'New Patient',   category: 'Physiotherapy',        duration_in_minutes: 60 },
+        { id: 'AT-M', name: 'Massage Visit', category: 'Sports Massage Therapy', duration_in_minutes: 30 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');      // → gender q
+      const s2 = await db.getSession(session.id);
+      const catEnvelope = await callHandler(engine, ['handleBookSpecificPhysio'], s2, '3'); // No pref → category
+      // Must be numbered in both fallback and body — NOT "Physiotherapy · Sports Massage Therapy"
+      const fallback = String(catEnvelope);
+      expect(fallback).toMatch(/1\.\s*Physiotherapy|1\.\s*Sports Massage/i);
+      expect(fallback).not.toMatch(/Physiotherapy\s*·\s*Sports Massage/i);
+      // restore instance mocks — resetCliniko only sets prototype, not instance own property
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [{ id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' }] },
+      ]);
+    });
+  });
+
   // ─── BOOK_SOONEST — choose_clinic ────────────────────────────────────────────
   describe('BOOK_SOONEST — choose_clinic', () => {
     test('0 clinics with slots → cascades to no-slots or type-reset message', async () => {
@@ -4017,7 +4411,7 @@ describe('Booking menu and flow coverage', () => {
       await handlerPromise;
     });
 
-    test('0/back with >1 available physios → returns to physio list', async () => {
+    test('0/back with >1 available physios → returns to physio list and marks funnel done', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1, PHYSIO_2] },
       ]);
@@ -4030,6 +4424,30 @@ describe('Booking menu and flow coverage', () => {
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
       expect(reply).toMatch(/practitioner|jolinna|wei/i);
+      // funnel must be marked done so next physio selection isn't interrupted by gender question
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_funnel_step).toBe('done');
+    });
+
+    test('0/back from clinic preserves gender filter: only matching physios shown', async () => {
+      const MALE_P   = { id: 'PRAC-M', first_name: 'Leo',  last_name: 'Chan', title: 'Mr' };
+      const FEMALE_P = { id: 'PRAC-F', first_name: 'Amy',  last_name: 'Lee',  title: 'Ms' };
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [MALE_P, FEMALE_P] },
+      ]);
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_clinic',
+        appointment_type_list: TYPE_LIST_2,
+        selected_appt_type: TYPE_1,
+        selected_physio: MALE_P,
+        clinic_list: [CLINIC_1],
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: 'female', category: null },
+      });
+      const reply = await callHandler(engine, ['handleBookSoonest'], session, '0');
+      // Female filter: only Amy should appear
+      expect(reply).toMatch(/Amy/i);
+      expect(reply).not.toMatch(/Leo/i);
     });
   });
 
@@ -4123,6 +4541,8 @@ describe('Booking menu and flow coverage', () => {
         practitioner_list: [PHYSIO_1, PHYSIO_2],
         practitioner_page: 0,
         no_slots_prompt: { context: 'soonest' },
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, 'xyz');
       // Falls through the no_slots block, hits choose_physio render
@@ -5498,7 +5918,7 @@ describe('Global region-change interception', () => {
       conversation_state: state,
       verification_status: 'verified',
       verified: 1,
-      context: { region: 'SG' },
+      context: { region: 'SG', language: 'en' },
       data: JSON.stringify({ email: 'p@test.com' }),
     });
     return session.id;
@@ -5574,6 +5994,565 @@ describe('Global region-change interception', () => {
     const session = await getSession(phone);
     const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
     expect(ctx.region).toBeTruthy();
+  });
+
+  test('"region" reset preserves the previously-selected language (no redundant re-pick)', async () => {
+    const phone = '+6591000207';
+    await seedAt('BOOK_MANAGE_OPTIONS', phone); // seedAt sets language: 'en'
+    const reply = await engine.handleMessage('region', phone); // reset + region prompt
+    // Language already known → straight to region prompt, not a language prompt
+    expect(reply).toMatch(/select your region/i);
+    expect(reply).not.toMatch(/select your language/i);
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('en');
+  });
+});
+
+// =============================================================================
+// SUITE — Language selection (Cantonese/Mandarin support)
+// =============================================================================
+describe('Language selection (English/Cantonese/Mandarin)', () => {
+  let db, engine;
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    engine = new ChatbotEngine();
+    await engine.initialize();
+    db = engine.sessionManager.db;
+  });
+  afterAll(() => { if (engine.sessionManager.cleanupInterval) clearInterval(engine.sessionManager.cleanupInterval); db.close(); });
+  beforeEach(() => { resetCliniko(); resetWhatsApp(); });
+
+  const getSession = (phone) => engine.sessionManager.getSessionByPhone(phone);
+
+  async function seedUnverifiedNoLanguage(phone, extra = {}) {
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'HK', ...extra }),
+    });
+    return engine.sessionManager.getSession(s.id);
+  }
+
+  // Language selection is HK-only (Phase 3e region gate) — these tests use +852 numbers
+  // so region auto-detects to HK and the language prompt is actually offered.
+  test('brand-new HK session: first prompt is the trilingual language selector, after auto-detected region', async () => {
+    const reply = await engine.handleMessage('hi', '+85292000001');
+    expect(String(reply)).toMatch(/select your language/i);
+    expect(String(reply)).toMatch(/廣東話/);
+    expect(String(reply)).toMatch(/普通话/);
+  });
+
+  test('brand-new HK session: first-contact ack is not swallowed by the language gate on free-text input', async () => {
+    const reply = String(await engine.handleMessage('I need to book an appointment for Tuesday', '+85292000009'));
+    expect(reply).toMatch(/thanks for reaching out/i);
+    expect(reply).toMatch(/select your language/i);
+  });
+
+  test('brand-new HK session: a plain greeting still gets no ack prefix (language gate)', async () => {
+    const reply = String(await engine.handleMessage('hi', '+85292000010'));
+    expect(reply).not.toMatch(/thanks for reaching out/i);
+    expect(reply).toMatch(/select your language/i);
+  });
+
+  test('brand-new SG session: no language prompt at all — goes straight to main menu in English', async () => {
+    // Note: getRegionFromPhoneNumber treats any bare 10-digit number as India before checking
+    // the SG '65' prefix, so a real SG-shaped number needs 11 digits to auto-detect as SG here —
+    // pre-existing behavior in SessionManager.getRegionFromPhoneNumber, not touched by this change.
+    const phone = '+65921100011';
+    const reply = String(await engine.handleMessage('hi', phone));
+    expect(reply).not.toMatch(/select your language/i);
+    expect(reply).toMatch(/register as new patient/i);
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.region).toBe('SG');
+    expect(ctx.language).toBe('en');
+  });
+
+  test('numeric selection "2" sets Cantonese (yue) and persists on the session', async () => {
+    const phone = '+85292000002';
+    await seedUnverifiedNoLanguage(phone);
+    await engine.handleMessage('hi', phone); // language prompt
+    await engine.handleMessage('2', phone);  // pick Cantonese
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('yue');
+    expect(ctx.awaiting_language_selection).toBeFalsy();
+  });
+
+  test('substring selection ("mandarin"-style match) also works', async () => {
+    const phone = '+85292000003';
+    await seedUnverifiedNoLanguage(phone);
+    await engine.handleMessage('hi', phone);
+    const reply = await engine.handleMessage('普通话', phone);
+    expect(String(reply)).not.toMatch(/select your language/i);
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.language).toBe('zh');
+  });
+
+  test('language selection also persists to patient_state (durable store)', async () => {
+    const phone = '+85292000004';
+    await seedUnverifiedNoLanguage(phone);
+    await engine.handleMessage('hi', phone);
+    await engine.handleMessage('2', phone); // Cantonese
+    // upsertPatientState is fire-and-forget in the engine; give the microtask queue a tick
+    await new Promise((r) => setImmediate(r));
+    const patientState = await db.getPatientState(phone);
+    expect(patientState).toBeTruthy();
+    expect(patientState.language).toBe('yue');
+  });
+
+  test('once language is set, the region prompt itself is localized', async () => {
+    const phone = '+447700900099'; // unrecognized country code → region can't be auto-detected
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ language: 'yue' }), // language known, region not yet
+    });
+    const fresh = await engine.sessionManager.getSession(s.id);
+    const reply = await engine.handleIntroState(fresh, '');
+    expect(String(reply)).toMatch(/請選擇你所喺嘅地區/);
+  });
+
+  test('goToInteractiveMenu routes to intro when region is HK and language is not set (pre-existing session)', async () => {
+    const phone = '+85292000006';
+    const session = await seedUnverifiedNoLanguage(phone); // region: 'HK', no language key at all
+    const reply = String(await engine.goToInteractiveMenu(session));
+    expect(reply).toMatch(/select your language/i);
+    expect(reply).not.toMatch(/register as new patient/i);
+  });
+
+  test('goToInteractiveMenu with SG region and no language → goes straight to main menu (no language prompt)', async () => {
+    const phone = '+6592000006';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'SG' }), // no language key at all
+    });
+    const session = await engine.sessionManager.getSession(s.id);
+    const reply = String(await engine.goToInteractiveMenu(session));
+    expect(reply).not.toMatch(/select your language/i);
+    expect(reply).toMatch(/register as new patient/i);
+  });
+
+  test('soft "change language" from the verified HK main menu does not reset the session', async () => {
+    const phone = '+85292000007';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'BOOK_MANAGE_OPTIONS',
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'HK', language: 'en' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    const reply = await engine.handleMessage('language', phone);
+    expect(reply).toMatch(/select your language/i);
+    const session = await getSession(phone);
+    // Unlike "change region", the session itself must survive (same id)
+    expect(session.id).toBe(s.id);
+  });
+
+  test('global "change language" from a non-INTRO state does not reset the session (unlike region), HK only', async () => {
+    const phone = '+85292000008';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'SELECT_SLOT',
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'HK', language: 'en' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    const reply = await engine.handleMessage('change language', phone);
+    expect(reply).toMatch(/select your language/i);
+    const session = await getSession(phone);
+    expect(session.id).toBe(s.id);
+  });
+
+  test('"change language" is a no-op for a non-HK region (no language menu to change into)', async () => {
+    const phone = '+6592000012';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'SELECT_SLOT',
+      verification_status: 'verified',
+      verified: 1,
+      context: { region: 'SG', language: 'en' },
+      data: JSON.stringify({ email: 'p@test.com' }),
+    });
+    const reply = String(await engine.handleMessage('change language', phone));
+    expect(reply).not.toMatch(/select your language/i);
+  });
+
+  test('"Change Language" row appears in the verified main menu', async () => {
+    const phone = '+85292000009';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verification_status: 'verified',
+      verified: 1,
+      context: JSON.stringify({ region: 'HK', language: 'en' }),
+    });
+    const fresh = await engine.sessionManager.getSession(s.id);
+    const reply = await engine.renderMainMenu(fresh);
+    expect(String(reply)).toMatch(/change language/i);
+  });
+
+  test('region switch from HK (yue) to SG force-resets language to English', async () => {
+    const phone = '+85292000013';
+    const s = await engine.sessionManager.getOrCreateSession(phone, true);
+    await engine.sessionManager.updateSession(s.id, {
+      conversation_state: 'INTRO',
+      verified: false,
+      context: JSON.stringify({ region: 'HK', language: 'yue', awaiting_region_selection: true }),
+    });
+    const fresh = await engine.sessionManager.getSession(s.id);
+    await engine.handleIntroState(fresh, '2'); // regionCodes: [HK, SG, IN, PH] → '2' = SG
+    const session = await getSession(phone);
+    const ctx = typeof session.context === 'string' ? JSON.parse(session.context) : (session.context || {});
+    expect(ctx.region).toBe('SG');
+    expect(ctx.language).toBe('en');
+    await new Promise((r) => setImmediate(r));
+    const patientState = await db.getPatientState(phone);
+    expect(patientState.language).toBe('en');
+  });
+});
+
+// =============================================================================
+// SUITE — Phase 3b: clinic name translation (yue/zh)
+// =============================================================================
+describe('Clinic name translation (Phase 3b, yue/zh)', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+8529${String(++phoneSeq).padStart(6, '0')}`;
+
+  // A clinic that IS in the translation table (src/config/clinicTranslations.js)
+  const TRANSLATED_CLINIC = { id: 'BIZ-WS', business_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)' };
+  const TRANSLATED_CLINIC_ZH = '中環威靈頓街';
+  // A clinic that is NOT in the table — must fall back to English, never crash.
+  const UNKNOWN_CLINIC = { id: 'BIZ-XX', business_name: 'Some Future Clinic' };
+  const PHYSIO = { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' };
+  const APPT_TYPE = { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'] };
+  const SLOT = { practitioner_id: 'PRAC-001', business_id: 'BIZ-WS', appointment_type_id: 'AT-001', slot: '2026-08-20T02:00:00Z' };
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedAt(state, extraData = {}, language = 'yue') {
+    const phone = nextPhone();
+    const session = await seedVerified(db, phone, extraData);
+    await db.updateSession(session.id, { conversation_state: state, context: JSON.stringify({ region: 'HK', language }) });
+    return db.getSession(session.id);
+  }
+
+  describe('BOOK_SPECIFIC_CLINIC — clinic list', () => {
+    test('yue session sees the translated Chinese clinic name in the clinic list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-WS', clinic_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+      expect(reply).not.toContain('Prohealth Sports & Spinal Physiotherapy Centres (WS)');
+    });
+
+    test('zh session sees the same translated Chinese clinic name (yue/zh share one table)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-WS', clinic_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'zh');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+    });
+
+    test('en session still sees the English clinic name (no regression)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-WS', clinic_name: 'Prohealth Sports & Spinal Physiotherapy Centres (WS)', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'en');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain('Prohealth Sports & Spinal Physiotherapy Centres (WS)');
+      expect(reply).not.toContain(TRANSLATED_CLINIC_ZH);
+    });
+
+    test('a clinic name not in the translation table falls back to English for a yue session (never blocks booking)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-XX', clinic_name: 'Some Future Clinic', practitioners: [PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {}, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain('Some Future Clinic');
+    });
+  });
+
+  describe('BOOK_SPECIFIC_CLINIC — slot list header carries the translated clinic name', () => {
+    test('yue session: view_slots header shows the translated clinic name, not English', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SLOT]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'view_slots',
+        selected_clinic: TRANSLATED_CLINIC,
+        selected_physio: PHYSIO,
+        selected_appt_type: APPT_TYPE,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+    });
+  });
+
+  describe('Slot-selection confirmation summary carries the translated clinic name', () => {
+    test('yue session: "you have selected" header shows the translated clinic name', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT],
+        slot_page: 0,
+        prev_state_data: {
+          selected_appt_type: APPT_TYPE,
+          selected_physio: PHYSIO,
+          selected_clinic: TRANSLATED_CLINIC,
+        },
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, '1'));
+      expect(reply).toContain(TRANSLATED_CLINIC_ZH);
+    });
+  });
+});
+
+// =============================================================================
+// SUITE — Phase 3c: practitioner name translation (yue/zh)
+// =============================================================================
+describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+8528${String(++phoneSeq).padStart(6, '0')}`;
+
+  // A practitioner IS in the translation table (src/config/practitionerTranslations.js)
+  const TRANSLATED_PHYSIO = { id: 'PRAC-LEO', first_name: 'Leo', last_name: 'Choi' };
+  const TRANSLATED_PHYSIO_ZH = '蔡楚基';
+  // A practitioner NOT in the table — must fall back to English, never crash.
+  const UNKNOWN_PHYSIO = { id: 'PRAC-XX', first_name: 'Future', last_name: 'Hire' };
+  const CLINIC = { id: 'BIZ-001', business_name: 'Prohealth In Touch' }; // not in clinicTranslations, en-only fixture
+  const APPT_TYPE = { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'] };
+  const SLOT = { practitioner_id: 'PRAC-LEO', business_id: 'BIZ-001', appointment_type_id: 'AT-001', slot: '2026-08-20T02:00:00Z' };
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedAt(state, extraData = {}, language = 'yue') {
+    const phone = nextPhone();
+    const session = await seedVerified(db, phone, extraData);
+    await db.updateSession(session.id, { conversation_state: state, context: JSON.stringify({ region: 'HK', language }) });
+    return db.getSession(session.id);
+  }
+
+  describe('BOOK_SPECIFIC_PHYSIO — physio list', () => {
+    test('yue session sees the translated Chinese practitioner name in the physio list', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+      expect(reply).not.toContain('Leo Choi');
+    });
+
+    test('zh session sees the same translated Chinese practitioner name (yue/zh share one table)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'zh');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+    });
+
+    test('en session still sees the English practitioner name (no regression)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'en');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain('Leo Choi');
+      expect(reply).not.toContain(TRANSLATED_PHYSIO_ZH);
+    });
+
+    test('a practitioner not in the translation table falls back to English for a yue session (never blocks booking)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [UNKNOWN_PHYSIO] },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain('Future Hire');
+    });
+  });
+
+  describe('BOOK_SPECIFIC_PHYSIO — slot list header carries the translated practitioner name', () => {
+    test('yue session: view_slots header shows the translated practitioner name, not English', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SLOT]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'view_slots',
+        selected_physio: TRANSLATED_PHYSIO,
+        selected_clinic: CLINIC,
+        selected_appt_type: APPT_TYPE,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+    });
+  });
+
+  describe('Slot-selection confirmation summary carries the translated practitioner name', () => {
+    test('yue session: "you have selected" header shows the translated practitioner name', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT],
+        slot_page: 0,
+        prev_state_data: {
+          selected_appt_type: APPT_TYPE,
+          selected_physio: TRANSLATED_PHYSIO,
+          selected_clinic: CLINIC,
+        },
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, '1'));
+      expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
+    });
+  });
+});
+
+// =============================================================================
+// SUITE — Phase 3a: appointment-type name translation (yue/zh)
+// =============================================================================
+describe('Appointment-type name translation (Phase 3a, yue/zh)', () => {
+  let db, sm, engine;
+  let phoneSeq = 0;
+  const nextPhone = () => `+8527${String(++phoneSeq).padStart(6, '0')}`;
+
+  // A type IS in the translation table (src/config/apptTypeTranslations.js)
+  const TRANSLATED_TYPE = { id: 'AT-NP', name: 'New Patient', ids: ['AT-NP'], norm_name: 'new patient' };
+  const TRANSLATED_TYPE_YUE = '新症';
+  const TRANSLATED_TYPE_ZH = '新患者';
+  // A type NOT in the table (matches the flagged/excluded soft-tissue-release entry) —
+  // must fall back to English, never crash.
+  const UNKNOWN_TYPE = { id: 'AT-STR', name: 'Clinical Soft Tissue Release Treatment - Manual', ids: ['AT-STR'], norm_name: 'clinical soft tissue release treatment manual' };
+  const PHYSIO = { id: 'PRAC-001', first_name: 'Jolinna', last_name: 'Chan' };
+  const CLINIC = { id: 'BIZ-001', business_name: 'Prohealth In Touch' }; // not in clinicTranslations, en-only fixture
+  const SLOT = { practitioner_id: 'PRAC-001', business_id: 'BIZ-001', appointment_type_id: 'AT-NP', slot: '2026-08-20T02:00:00Z' };
+
+  beforeAll(async () => {
+    resetCliniko(); resetWhatsApp();
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm;
+  });
+  afterAll(() => {
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+  beforeEach(() => { jest.clearAllMocks(); resetCliniko(); resetWhatsApp(); });
+
+  async function seedAt(state, extraData = {}, language = 'yue') {
+    const phone = nextPhone();
+    const session = await seedVerified(db, phone, extraData);
+    await db.updateSession(session.id, { conversation_state: state, context: JSON.stringify({ region: 'HK', language }) });
+    return db.getSession(session.id);
+  }
+
+  describe('BOOK_HISTORY — appointment-type list', () => {
+    test('yue session sees the translated Chinese type name in the type list', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [TRANSLATED_TYPE],
+        appt_type_page: 0,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain(TRANSLATED_TYPE_YUE);
+      expect(reply).not.toContain('New Patient');
+    });
+
+    test('zh session sees the Mandarin wording, distinct from the Cantonese wording', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [TRANSLATED_TYPE],
+        appt_type_page: 0,
+      }, 'zh');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain(TRANSLATED_TYPE_ZH);
+      expect(reply).not.toContain(TRANSLATED_TYPE_YUE);
+    });
+
+    test('en session still sees the English type name (no regression)', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [TRANSLATED_TYPE],
+        appt_type_page: 0,
+      }, 'en');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain('New Patient');
+      expect(reply).not.toContain(TRANSLATED_TYPE_YUE);
+    });
+
+    test('the flagged/excluded soft-tissue-release type falls back to English for a yue session (never blocks booking)', async () => {
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO,
+        appointment_type_list: [UNKNOWN_TYPE],
+        appt_type_page: 0,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain('Clinical Soft Tissue Release Treatment - Manual');
+    });
+  });
+
+  describe('BOOK_HISTORY — slot list header carries the translated type name', () => {
+    test('yue session: view_slots header shows the translated type name, not English', async () => {
+      engine.clinikoAPI.getAvailableSlotsByBusinessAndDate.mockResolvedValue([SLOT]);
+      const session = await seedAt('BOOK_HISTORY', {
+        selection_step: 'view_slots',
+        selected_physio: PHYSIO,
+        selected_clinic: CLINIC,
+        selected_appt_type: TRANSLATED_TYPE,
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleBookHistory'], session, ''));
+      expect(reply).toContain(TRANSLATED_TYPE_YUE);
+    });
+  });
+
+  describe('Slot-selection confirmation summary carries the translated type name', () => {
+    test('yue session: "you have selected" header shows the translated type name', async () => {
+      const session = await seedAt('SELECT_SLOT', {
+        slot_list: [SLOT],
+        slot_page: 0,
+        prev_state_data: {
+          selected_appt_type: TRANSLATED_TYPE,
+          selected_physio: PHYSIO,
+          selected_clinic: CLINIC,
+        },
+      }, 'yue');
+      const reply = String(await callHandler(engine, ['handleSelectSlotState'], session, '1'));
+      expect(reply).toContain(TRANSLATED_TYPE_YUE);
+    });
   });
 });
 
@@ -6578,6 +7557,25 @@ describe('renderMainMenu — verified menu must include logout row', () => {
     const freshSession = await db.getSessionByPhone('+6560000005');
     expect(freshSession.verified).toBeFalsy();
   });
+
+  test('logout clears appt_preference but preserves physio_preference in patient_state', async () => {
+    const phone = '+6560000006';
+    // Seed patient_state with both preferences before login
+    await db.upsertPatientState(phone, {
+      region: 'HK',
+      appt_preference: JSON.stringify({ service: 'Physiotherapy', insurer: null }),
+      physio_preference: JSON.stringify({ gender: 'female', category: 'Physiotherapy' }),
+    });
+
+    const session = await verifiedSession(phone);
+    await engine.handleMessage('9', phone);
+
+    const ps = await db.getPatientState(phone);
+    expect(ps).not.toBeNull();
+    expect(ps.appt_preference).toBeNull();
+    expect(ps.physio_preference).not.toBeNull();
+    expect(JSON.parse(ps.physio_preference)).toEqual({ gender: 'female', category: 'Physiotherapy' });
+  });
 });
 
 // =============================================================================
@@ -6943,7 +7941,10 @@ describe('Cancellation blocked within 24 hours', () => {
       expect(payload.to).toContain('patient@example.com');
       expect(payload.subject).toMatch(/cancel blocked/i);
       expect(payload.text).not.toMatch(/successfully cancelled/i);
-      expect(payload.text).toContain('Dr. Jane Tan');
+      // getPractitionerDisplayName now prefers first_name+last_name over Cliniko's
+      // own display_name (which can be a title-prefixed or first-name-only value) —
+      // see fix/practitioner-display-name-precedence.
+      expect(payload.text).toContain('Jane Tan');
       expect(payload.text).toContain('Prohealth Novena');
       expect(String(reply)).toMatch(/front desk will be in touch/i);
 
@@ -7171,7 +8172,8 @@ describe('Reschedule blocked within 24 hours', () => {
       expect(payload.to).toContain('patient@example.com');
       expect(payload.subject).toMatch(/reschedule blocked/i);
       expect(payload.text).not.toMatch(/has been rescheduled|successfully rescheduled/i); // never claims it was actually rescheduled
-      expect(payload.text).toContain('Dr. Jane Tan');
+      // See fix/practitioner-display-name-precedence — first_name+last_name now wins.
+      expect(payload.text).toContain('Jane Tan');
       expect(payload.text).toContain('Prohealth Novena');
       expect(String(reply)).toMatch(/front desk will be in touch/i);
 
@@ -8426,7 +9428,7 @@ describe('goToInteractiveMenu — region guard', () => {
     await sm.updateSession(s.id, {
       conversation_state: 'INTRO',
       verified: false,
-      context: JSON.stringify({}),
+      context: JSON.stringify({ language: 'en' }),
     });
     return sm.getSession(s.id);
   }
@@ -8436,7 +9438,7 @@ describe('goToInteractiveMenu — region guard', () => {
     await sm.updateSession(s.id, {
       conversation_state: 'INTRO',
       verified: false,
-      context: JSON.stringify({ region }),
+      context: JSON.stringify({ region, language: 'en' }),
     });
     return sm.getSession(s.id);
   }
@@ -8457,19 +9459,45 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('SG number sends "hello" → main menu shown (region auto-detected, no extra region step)', async () => {
-    const reply = await engine.handleMessage('hello', '+6562000001');
+  test('SG number sends "hello" → main menu shown directly (region auto-detected as non-HK, no language prompt)', async () => {
+    // See note above: needs 11 digits to auto-detect as SG rather than the bare-10-digit India fallback.
+    const reply = await engine.handleMessage('hello', '+65621100001');
+    expect(typeof reply).toBe('string');
+    expect(reply).toMatch(/welcome|register|book/i);
+    // Neither region nor language selection should appear for a known non-HK region number
+    expect(reply).not.toMatch(/please select your region/i);
+    expect(reply).not.toMatch(/select your language/i);
+  });
+
+  test('HK number sends "hello" then picks language → main menu shown (region auto-detected, no extra region step)', async () => {
+    const r0 = await engine.handleMessage('hello', '+85262000001');
+    expect(String(r0)).toMatch(/select your language/i);
+    const reply = await engine.handleMessage('1', '+85262000001'); // pick English
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/welcome|register|book/i);
     // Region selection prompt must not appear for a known-region number
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('unknown-region number sends "hello" → region selection shown (not main menu)', async () => {
+  test('unknown-region number sends "hello" → region selection shown first (not language, not main menu)', async () => {
     const reply = await engine.handleMessage('hello', '+447700900001');
     expect(typeof reply).toBe('string');
     expect(reply).toMatch(/region|hong kong|singapore|india|philippines/i);
+    expect(reply).not.toMatch(/select your language/i);
     expect(reply).not.toMatch(/register as new patient/i);
+  });
+
+  test('unknown-region number picks HK → language selection shown next', async () => {
+    await engine.handleMessage('hello', '+447700900003');
+    const reply = await engine.handleMessage('1', '+447700900003'); // pick HK (first region option)
+    expect(String(reply)).toMatch(/select your language/i);
+  });
+
+  test('unknown-region number picks SG → main menu shown directly (no language prompt)', async () => {
+    await engine.handleMessage('hello', '+447700900004');
+    const reply = await engine.handleMessage('2', '+447700900004'); // pick SG (second region option)
+    expect(String(reply)).toMatch(/register as new patient/i);
+    expect(String(reply)).not.toMatch(/select your language/i);
   });
 
   test('verified user sends "hi" → bypasses region entirely, sees verified menu', async () => {
@@ -8487,21 +9515,38 @@ describe('goToInteractiveMenu — region guard', () => {
     expect(reply).not.toMatch(/please select your region/i);
   });
 
-  test('unknown-region multi-turn: hello → pick region → pick Register → first name (3 steps, not 4)', async () => {
+  test('unknown-region multi-turn (HK): hello → pick region → pick language → pick Register → first name (4 steps, not 5)', async () => {
     const phone = '+447700900002';
-    // Step 1: "hello" → should show region selection
+    // Step 1: "hello" → should show region selection (asked before language)
     const r1 = await engine.handleMessage('hello', phone);
     expect(String(r1)).toMatch(/region|hong kong|singapore/i);
 
-    // Step 2: "1" → picks first region (HK) → should show main unverified menu
+    // Step 2: "1" → picks first region (HK) → should show language selection
     const r2 = await engine.handleMessage('1', phone);
-    expect(String(r2)).toMatch(/register as new patient/i);
+    expect(String(r2)).toMatch(/select your language/i);
 
-    // Step 3: "1" → picks Register → should ask for first name (NOT show region/menu again)
+    // Step 3: "1" → picks English → should show main unverified menu
     const r3 = await engine.handleMessage('1', phone);
+    expect(String(r3)).toMatch(/register as new patient/i);
+
+    // Step 4: "1" → picks Register → should ask for first name (NOT show region/menu again)
+    const r4 = await engine.handleMessage('1', phone);
+    expect(String(r4)).toMatch(/first name/i);
+    expect(String(r4)).not.toMatch(/register as new patient/i);
+    expect(String(r4)).not.toMatch(/region|hong kong/i);
+  });
+
+  test('unknown-region multi-turn (SG): hello → pick region → straight to Register → first name (no language step)', async () => {
+    const phone = '+447700900005';
+    const r1 = await engine.handleMessage('hello', phone);
+    expect(String(r1)).toMatch(/region|hong kong|singapore/i);
+
+    const r2 = await engine.handleMessage('2', phone); // pick SG (second region option)
+    expect(String(r2)).toMatch(/register as new patient/i);
+    expect(String(r2)).not.toMatch(/select your language/i);
+
+    const r3 = await engine.handleMessage('1', phone); // pick Register
     expect(String(r3)).toMatch(/first name/i);
-    expect(String(r3)).not.toMatch(/register as new patient/i);
-    expect(String(r3)).not.toMatch(/region|hong kong/i);
   });
 });
 

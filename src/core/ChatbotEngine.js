@@ -8,14 +8,32 @@ const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
-const { REGION_SUPPORT_INFO, REGION_FEES } = require('../config/regions');
+const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage } = require('../config/regions');
+const { LANGUAGE_LABELS } = require('../config/languages');
+
+// LANGUAGE_LABELS entries may carry a "(English gloss)" suffix for readability
+// (e.g. "廣東話 (Cantonese)") — match against the base label and the gloss
+// separately, rather than the whole string, so typing "cantonese" alone still works.
+function matchesLanguageLabel(text, code) {
+  const label = LANGUAGE_LABELS[code].toLowerCase();
+  const glossMatch = label.match(/^(.*?)\s*\(([^)]+)\)\s*$/);
+  const base = (glossMatch ? glossMatch[1] : label).trim();
+  const gloss = glossMatch ? glossMatch[2].trim() : null;
+  return text.includes(base) || (!!gloss && text.includes(gloss));
+}
+const { t } = require('../config/strings');
+const { translateInsurerName } = require('../config/insurerTranslations');
+const { translateServiceName } = require('../config/serviceTranslations');
+const { translateClinicName } = require('../config/clinicTranslations');
+const { translatePractitionerName } = require('../config/practitionerTranslations');
+const { translateApptTypeName } = require('../config/apptTypeTranslations');
 const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
   getPractitionersForTypeName,
+  parseApptCategory,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
-  parseApptCategory,
   _markPartial,
 } = require('./_appointmentTypeHelpers');
 const { bulkAll } = require('./BulkContext');
@@ -151,7 +169,7 @@ function planForward(data, selection_step, optionsCount, onAuto) {
 const CLEAR_FIELDS_BY_STEP = {
   choose_date: ['selected_date', 'appointment_type_list', 'appt_type_page', 'selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
   choose_type: ['selected_appt_type', 'insurer_page', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
-  choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
+  choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type', 'physio_funnel_step', 'physio_funnel_sel', 'physio_categories'],
   choose_clinic: ['selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_appt_type: ['selected_appt_type']
 };
@@ -335,6 +353,23 @@ function formatSlotDateTime(dateOrIso, tz) {
   });
 }
 
+/**
+ * Format a Date or ISO string as a date-only string (no time), for the
+ * Specific Date flow's date-picker rows and prompt headers. Same fixed-locale
+ * rationale as formatSlotDateTime: dt.toLocaleDateString() with no locale arg
+ * depends on the server process's resolved locale, which is unset/minimal on
+ * Cloud Run — it silently renders Western numeric dates (e.g. "8/29/2026")
+ * inside otherwise fully-translated yue/zh prompts. e.g. "29 Aug 2026".
+ *
+ * @param {Date|string} dateOrIso
+ * @returns {string}
+ */
+function formatDateOnly(dateOrIso) {
+  const dt = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+  if (isNaN(dt.getTime())) return String(dateOrIso);
+  return dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
 function formatSlotItem(slot, idx, opts = {}) {
   const dt = new Date(slot.slot);
   return `${idx}. ${formatSlotDateTime(dt)}`; // no tz: standalone util not used in class methods
@@ -389,35 +424,48 @@ function deduplicateSlots(slots) {
 /**
  * Returns a displayable practitioner name from a practitioner object.
  * @param {Object|null|undefined} practitioner
+ * @param {string} [language] - defaults to 'en'; translated via practitionerTranslations when yue/zh
+ * @param {Object} [logger]
  * @returns {string}
  */
-function getPractitionerDisplayName(practitioner) {
+function getPractitionerDisplayName(practitioner, language, logger) {
   if (!practitioner) return 'Practitioner';
-  if (practitioner.display_name) return practitioner.display_name;
-  if (practitioner.first_name || practitioner.last_name)
-    return [practitioner.first_name, practitioner.last_name].filter(Boolean).join(' ');
-  return 'Practitioner';
+  // Prefer the structured first/last name over Cliniko's own display_name —
+  // Cliniko lets clinics set display_name to a first-name-only value per
+  // practitioner (confirmed live for several HK practitioners), which both
+  // undertranslates (yue/zh lookups are keyed by full name) and looks
+  // inconsistent in English. Only fall back to display_name when first/last
+  // are both unavailable.
+  const name = (practitioner.first_name || practitioner.last_name
+        ? [practitioner.first_name, practitioner.last_name].filter(Boolean).join(' ')
+        : practitioner.display_name) || 'Practitioner';
+  return translatePractitionerName(name, language || 'en', logger);
 }
 
 /**
  * Returns a displayable appointment type name from an appointment type object.
  * @param {Object|null|undefined} apptType
+ * @param {string} [language] - defaults to 'en'; translated via apptTypeTranslations when yue/zh
+ * @param {Object} [logger]
  * @returns {string}
  */
-function getAppointmentTypeDisplayName(apptType) {
+function getAppointmentTypeDisplayName(apptType, language, logger) {
   if (!apptType) return 'Appointment';
-  if (apptType.name) return apptType.name;
+  if (apptType.name) return translateApptTypeName(apptType.name, language || 'en', logger);
   return 'Appointment';
 }
 
 /**
  * Returns a displayable business name from a business object.
  * @param {Object|null|undefined} business
+ * @param {string} [language] - defaults to 'en'; translated via clinicTranslations when yue/zh
+ * @param {Object} [logger]
  * @returns {string}
  */
-function getBusinessDisplayName(business) {
+function getBusinessDisplayName(business, language, logger) {
   if (!business) return '';
-  return business.business_name || business.display_name || '';
+  const name = business.business_name || business.display_name || '';
+  return translateClinicName(name, language || 'en', logger);
 }
 
 /**
@@ -427,7 +475,7 @@ function getBusinessDisplayName(business) {
  * @param {ClinikoAPI} clinikoAPI
  * @returns {Promise<Array<Object>>} Enriched appointments
  */
-async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz) {
+async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz, language) {
   const practitionerIds = new Set();
   const apptTypeIds = new Set();
   const businessIds = new Set();
@@ -492,9 +540,9 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz) {
     const apptTypeObj = apptTypeMap[apptTypeId] || null;
     const businessObj = businessMap[businessId] || null;
 
-    appt._practitioner_display = getPractitionerDisplayName(practitionerObj);
-    appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj);
-    appt._business_display = getBusinessDisplayName(businessObj);
+    appt._practitioner_display = getPractitionerDisplayName(practitionerObj, language);
+    appt._appointment_type_display = getAppointmentTypeDisplayName(apptTypeObj, language);
+    appt._business_display = getBusinessDisplayName(businessObj, language);
     appt._display_dt = formatSlotDateTime(appt.starts_at, tz);
   }
 
@@ -511,7 +559,7 @@ async function enrichAppointmentsForDisplay(appointments, clinikoAPI, tz) {
  * Titles over 24 chars are truncated; the full text becomes the description.
  * fixedPageSize overrides the default variable sizing (use for date picker).
  */
-function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPageSize = null }) {
+function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPageSize = null, language = 'en' }) {
   if (!Array.isArray(items)) items = [];
 
   const hasPrev = page > 0;
@@ -533,29 +581,29 @@ function buildInteractiveSelectionList({ header, items, rowFn, page = 0, fixedPa
     return { id: String(localIdx), title: safeTitle, ...(description ? { description: String(description).slice(0, 72) } : {}) };
   });
 
-  if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
-  if (hasNext) rows.push({ id: 'next', title: 'More →' });
-  rows.push({ id: 'back', title: '← Back' });
+  if (hasPrev) rows.push({ id: 'prev', title: t(language, 'listNav.previousLabel') });
+  if (hasNext) rows.push({ id: 'next', title: t(language, 'listNav.moreLabel') });
+  rows.push({ id: 'back', title: t(language, 'listNav.backLabel') });
 
   const textLines = pageItems.map((item, i) => {
     const { title } = rowFn(item, i + 1);
     return `${i + 1}. ${title}`;
   });
-  if (hasPrev) textLines.push('P. Previous');
-  if (hasNext) textLines.push('M. More');
-  textLines.push('0. Back');
+  if (hasPrev) textLines.push(t(language, 'listNav.prevNavText'));
+  if (hasNext) textLines.push(t(language, 'listNav.moreNavText'));
+  textLines.push(t(language, 'listNav.backNavText'));
   const numberedList = textLines.join('\n');
-  const textFallback = header + '\n\n' + numberedList + '\n\nReply with number or option above.';
+  const textFallback = header + '\n\n' + numberedList + '\n\n' + t(language, 'listNav.replyWithNumberInstruction');
 
   // Include numbered options in the body so users can type a number if the
   // interactive picker doesn't fire (e.g. Mac WhatsApp Desktop).
-  const bodyText = (header + '\n\n' + numberedList + '\n\nTap to select, or type a number.').slice(0, 1024);
+  const bodyText = (header + '\n\n' + numberedList + '\n\n' + t(language, 'listNav.tapToSelectInstruction')).slice(0, 1024);
 
   const interactive = {
     type: 'list',
     body: { text: bodyText },
     action: {
-      button: 'Select option',
+      button: t(language, 'listNav.selectOptionButton'),
       sections: [{ rows }]
     }
   };
@@ -625,6 +673,17 @@ function sortPractitioners(practitioners) {
   return [...practitioners].sort((a, b) =>
     getPractitionerDisplayName(a).localeCompare(getPractitionerDisplayName(b))
   );
+}
+
+/**
+ * Derive gender from a practitioner's title field.
+ * Returns 'male', 'female', or null (unknown / no title).
+ */
+function practitionerGender(p) {
+  const t = (p && p.title) ? String(p.title).trim() : '';
+  if (t === 'Mr') return 'male';
+  if (t === 'Ms' || t === 'Miss' || t === 'Mrs') return 'female';
+  return null;
 }
 
 /**
@@ -716,6 +775,19 @@ class ChatbotEngine {
     return (context && context.region) || 'SG';
   }
 
+  /**
+   * Returns the language code for this session, or 'en' if not set.
+   * @param {object} session
+   * @returns {string}
+   */
+  _getSessionLanguage(session) {
+    let context = session.context;
+    if (context && typeof context === 'string') {
+      try { context = JSON.parse(context); } catch {}
+    }
+    return (context && context.language) || 'en';
+  }
+
   _regionTz(session) {
     return REGION_TZ[this._getSessionRegion(session)] || 'Asia/Singapore';
   }
@@ -738,7 +810,7 @@ class ChatbotEngine {
   // Interactive row IDs are global 1-based numbers matching the slot index.
   // Nav rows use IDs 'prev' and 'next'. Text fallback uses the old P/M format
   // so text-mode users see global numbers and type them as before.
-  _buildSlotList(slots, page, header, tz) {
+  _buildSlotList(slots, page, header, tz, language = 'en') {
     const start = this._slotPageStart(page);
     const count = this._slotPageCount(page);
     const hasPrev = page > 0;
@@ -749,15 +821,15 @@ class ChatbotEngine {
       id: String(start + i + 1),
       title: formatSlotDateTime(slot.slot || slot.starts_at || slot.appointment_start, tz),
     }));
-    if (hasPrev) rows.push({ id: 'prev', title: '← Previous' });
-    if (hasNext) rows.push({ id: 'next', title: 'More slots →' });
-    rows.push({ id: 'back', title: '← Back' });
+    if (hasPrev) rows.push({ id: 'prev', title: t(language, 'slotSelection.previousLabel') });
+    if (hasNext) rows.push({ id: 'next', title: t(language, 'slotSelection.moreLabel') });
+    rows.push({ id: 'back', title: t(language, 'slotSelection.backLabel') });
 
     const interactive = {
       type: 'list',
       body: { text: header },
       action: {
-        button: 'Select slot',
+        button: t(language, 'slotSelection.selectButton'),
         sections: [{ rows: rows.map(r => ({ id: r.id, title: r.title })) }]
       }
     };
@@ -765,8 +837,8 @@ class ChatbotEngine {
     const textLines = pageSlots.map((slot, i) =>
       `${start + i + 1}. ${formatSlotDateTime(slot.slot || slot.starts_at || slot.appointment_start, tz)}`
     ).join('\n');
-    const navText = [hasPrev ? 'P. Previous slots' : null, hasNext ? 'M. More slots' : null].filter(Boolean).join('\n');
-    const textFallback = header + '\n\n' + textLines + (navText ? '\n' + navText : '') + '\n\nReply with the number to pick a slot, or 0️⃣ Back.';
+    const navText = [hasPrev ? t(language, 'slotSelection.prevNavText') : null, hasNext ? t(language, 'slotSelection.moreNavText') : null].filter(Boolean).join('\n');
+    const textFallback = header + '\n\n' + textLines + (navText ? '\n' + navText : '') + '\n\n' + t(language, 'slotSelection.replyToPickInstruction');
 
     return new MessageEnvelope(interactive, textFallback);
   }
@@ -781,8 +853,7 @@ class ChatbotEngine {
       menu = await this.renderMainMenu(session);
     }
     return (
-      "We encountered an unexpected error processing your request. " +
-      "You can continue using the menu below, or contact support if the issue persists.\n\n" +
+      t(this._getSessionLanguage(session), 'common.unexpectedError') + "\n\n" +
       menu +
       "\n\n" + getSupportInfo(this._getSessionRegion(session))
     );
@@ -847,12 +918,12 @@ class ChatbotEngine {
     if (!updatedSession.verified) {
       await this.sessionManager.updateSession(updatedSession.id, { conversation_state: this.STATES.INTRO });
       const fresh = await this.sessionManager.getSession(updatedSession.id);
-      // If no region is set, route through handleIntroState so region selection is shown first.
+      // If no region or language is set, route through handleIntroState so that gate is shown first.
       // Bypassing this caused unknown-region users to see the main menu twice: once from
       // goToInteractiveMenu (no region), then again after handleIntroState consumed their
       // first menu selection as a region pick.
       const ctx = (() => { try { return typeof fresh.context === 'string' ? JSON.parse(fresh.context) : (fresh.context || {}); } catch { return {}; } })();
-      if (!ctx.region) {
+      if (!ctx.region || !ctx.language) {
         return await this.handleIntroState(fresh, '');
       }
       return await this.renderMainMenu(fresh);
@@ -868,13 +939,14 @@ class ChatbotEngine {
     return await this.renderMainMenu(fresh);
   }
   async renderBookingMethodMenu(session) {
-    return list('How would you like to book?', 'Choose method', [
-      { id: '1', title: 'By last visit' },
-      { id: '2', title: 'Soonest available', description: 'Searches all physios — can take a minute' },
-      { id: '3', title: 'Specific date' },
-      { id: '4', title: 'Specific physio' },
-      { id: '5', title: 'Specific clinic' },
-      { id: '0', title: '← Back' },
+    const language = this._getSessionLanguage(session);
+    return list(t(language, 'bookingMenu.title'), t(language, 'bookingMenu.subtitle'), [
+      { id: '1', title: t(language, 'bookingMenu.byLastVisit') },
+      { id: '2', title: t(language, 'bookingMenu.soonest'), description: t(language, 'bookingMenu.soonestDesc') },
+      { id: '3', title: t(language, 'bookingMenu.specificDate') },
+      { id: '4', title: t(language, 'bookingMenu.specificPhysio') },
+      { id: '5', title: t(language, 'bookingMenu.specificClinic') },
+      { id: '0', title: t(language, 'bookingMenu.back') },
     ]);
   }
 
@@ -903,24 +975,28 @@ class ChatbotEngine {
       }
     }
 
+    const language = this._getSessionLanguage(session);
+
     if (session.verified) {
-      const body = `${region}What would you like to do?`;
+      const body = `${region}${t(language, 'mainMenu.verifiedBody')}`;
       return list(body, 'Select option', [
-        { id: '1',           title: 'Book Appointment' },
-        { id: '2',           title: 'Cancel Appointment' },
-        { id: '3',           title: 'Reschedule' },
-        { id: 'preferences', title: 'Change Preferences' },
-        { id: 'region',      title: 'Change Country' },
-        { id: '9',           title: 'Logout & Delete My Data' },
+        { id: '1',           title: t(language, 'mainMenu.book') },
+        { id: '2',           title: t(language, 'mainMenu.cancel') },
+        { id: '3',           title: t(language, 'mainMenu.reschedule') },
+        { id: 'preferences', title: t(language, 'mainMenu.changePreferences') },
+        { id: 'region',      title: t(language, 'mainMenu.changeCountry') },
+        { id: 'language',    title: t(language, 'mainMenu.changeLanguage') },
+        { id: '9',           title: t(language, 'mainMenu.logout') },
       ]);
     } else {
-      const body = `👋 *Welcome to Prohealth Asia*\n\n${region}*New here? Tap Register below 👇*\nAlready a patient? Tap Book or Manage.`;
+      const body = `${t(language, 'mainMenu.welcomeHeader')}${region}${t(language, 'mainMenu.unverifiedPrompt')}`;
       return list(body, 'Select option', [
-        { id: '1',      title: 'Register as new patient' },
-        { id: '2',      title: 'Book or Manage' },
-        { id: '3',      title: 'View Fees' },
-        { id: '4',      title: 'View Locations' },
-        { id: 'region', title: 'Change Country' },
+        { id: '1',        title: t(language, 'mainMenu.register') },
+        { id: '2',        title: t(language, 'mainMenu.bookOrManage') },
+        { id: '3',        title: t(language, 'mainMenu.viewFees') },
+        { id: '4',        title: t(language, 'mainMenu.viewLocations') },
+        { id: 'region',   title: t(language, 'mainMenu.changeCountry') },
+        { id: 'language', title: t(language, 'mainMenu.changeLanguage') },
       ]);
     }
   }
@@ -961,6 +1037,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       let session = await this.sessionManager.getOrCreateSession(phoneNumber);
       if (!session) {
         this.logger.warn(`Failed to create session for ${phoneNumber}`);
+        // No session exists yet, so no language preference to read — English is unavoidable here.
         return 'Sorry, there was an issue starting your session. Please try again.';
       }
 
@@ -997,10 +1074,31 @@ async handleMessageEnvelope(message, phoneNumber) {
       // than INTRO, reset the session (logout) and prompt for region on a clean session.
       // From INTRO, fall through to handleIntroState which already handles region selection.
       if ((_globalText === 'region' || _globalText === 'change region') && currentState !== this.STATES.INTRO) {
+        let priorCtx = session.context;
+        if (priorCtx && typeof priorCtx === 'string') { try { priorCtx = JSON.parse(priorCtx); } catch { priorCtx = {}; } }
+        const priorLanguage = (priorCtx && priorCtx.language) || null;
         const phone = session.phone_number || session.phoneNumber;
         await this.sessionManager.deleteSessionAndData(session.id);
         const freshSession = await this.sessionManager.getOrCreateSession(phone, true);
-        return await this.handleIntroState(freshSession, 'region');
+        // Carry the language preference across the reset — changing region shouldn't
+        // force the user to re-pick a language they'd already chosen.
+        if (priorLanguage) {
+          await this.sessionManager.updateSession(freshSession.id, { context: { language: priorLanguage } });
+        }
+        const updatedFresh = await this.sessionManager.getSession(freshSession.id);
+        return await this.handleIntroState(updatedFresh, 'region');
+      }
+
+      // Global language-change interception: unlike region, language doesn't affect Cliniko
+      // tenant/API routing, so this does NOT reset the session — it just re-prompts in place.
+      if ((_globalText === 'language' || _globalText === 'change language') && currentState !== this.STATES.INTRO) {
+        let ctx = session.context;
+        if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
+        ctx = ctx || {};
+        ctx.awaiting_language_selection = true;
+        await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context: ctx });
+        const updated = await this.sessionManager.getSession(session.id);
+        return await this.handleIntroState(updated, 'language');
       }
 
       if (!this.stateHandlers[currentState]) {
@@ -1027,6 +1125,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       if (session) {
         return await this.renderErrorWithMenu(session);
       }
+      // Session lookup itself failed, so no language preference to read — English is unavoidable here.
       return (
           "We're currently experiencing a technical issue and could not start your session. " +
           "Please try again later. If the problem continues, " +
@@ -1062,6 +1161,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       PH: 'Philippines 🇵🇭'
     };
     const regionCodes = Object.keys(regionLabels);
+    const languageCodes = Object.keys(LANGUAGE_LABELS);
 
     let context = (session.context && typeof session.context === 'string')
       ? JSON.parse(session.context)
@@ -1087,7 +1187,8 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
     }
 
-    // Show region selection if needed
+    // Show region selection if needed — must resolve before language, since Cantonese/Mandarin
+    // are only offered for HK (see below); every other region skips the language prompt entirely.
     if (!context.region || text === 'region' || text === 'change region' || context.awaiting_region_selection) {
       context.awaiting_region_selection = true;
       if (/^\d+$/.test(text)) {
@@ -1095,24 +1196,88 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (idx >= 0 && idx < regionCodes.length) {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
+          if (context.region !== 'HK' && context.language !== 'en') {
+            context.language = 'en';
+            delete context.awaiting_language_selection;
+          }
           await this.sessionManager.updateSession(session.id, { context });
-          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
-          return await renderMenuFresh();
+          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region, language: context.language }).catch(() => {});
+          // Re-enter (rather than jump to the main menu) so the HK language gate below still runs if needed
+          return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
+        if (context.region !== 'HK' && context.language !== 'en') {
+          context.language = 'en';
+          delete context.awaiting_language_selection;
+        }
         await this.sessionManager.updateSession(session.id, { context });
-        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region }).catch(() => {});
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region, language: context.language }).catch(() => {});
+        return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
+      }
+
+      await this.sessionManager.updateSession(session.id, { context });
+      return list(t(context.language || 'en', 'region.promptBody'), t(context.language || 'en', 'region.buttonLabel'),
+        regionCodes.map((code, i) => ({ id: String(i + 1), title: regionLabels[code] }))
+      );
+    }
+
+    // Non-HK regions never offer language selection — silently force English if not already,
+    // and ignore any stray language-change command instead of falling through to unmatched-text handling.
+    if (context.region !== 'HK') {
+      if (context.language !== 'en' || context.awaiting_language_selection) {
+        context.language = 'en';
+        delete context.awaiting_language_selection;
+        await this.sessionManager.updateSession(session.id, { context });
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: 'en' }).catch(() => {});
+      }
+      if (text === 'language' || text === 'change language') {
+        return await renderMenuFresh();
+      }
+    }
+
+    // Show language selection if needed — HK only.
+    if (context.region === 'HK' && (!context.language || text === 'language' || text === 'change language' || context.awaiting_language_selection)) {
+      context.awaiting_language_selection = true;
+      if (/^\d+$/.test(text)) {
+        const idx = parseInt(text, 10) - 1;
+        if (idx >= 0 && idx < languageCodes.length) {
+          context.language = languageCodes[idx];
+          delete context.awaiting_language_selection;
+          await this.sessionManager.updateSession(session.id, { context });
+          this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
+          return await renderMenuFresh();
+        }
+      } else if (text && languageCodes.some(code => matchesLanguageLabel(text, code))) {
+        const found = languageCodes.find(code => matchesLanguageLabel(text, code));
+        context.language = found;
+        delete context.awaiting_language_selection;
+        await this.sessionManager.updateSession(session.id, { context });
+        this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { language: context.language }).catch(() => {});
         return await renderMenuFresh();
       }
 
       await this.sessionManager.updateSession(session.id, { context });
-      return list('Please select your region:', 'Select region',
-        regionCodes.map((code, i) => ({ id: String(i + 1), title: regionLabels[code] }))
+      const languageList = list('Please select your language / 請選擇語言 / 请选择语言:', 'Select language',
+        languageCodes.map((code, i) => ({ id: String(i + 1), title: LANGUAGE_LABELS[code] }))
       );
+      // Greetings/menu commands and explicit language-change requests go straight to the
+      // list untouched — the ack/"let's start again" prefix is only for genuinely unmatched
+      // free text, mirroring the fallback prefix logic further down this method.
+      const isGreetingOrMenu = !text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text);
+      const isExplicitLanguageCommand = text === 'language' || text === 'change language';
+      if (!isGreetingOrMenu && !isExplicitLanguageCommand) {
+        const prefix = session._isFirstContactMessage
+          ? `Thanks for reaching out! To make sure I get your booking right, I'll collect a few details step by step — starting with your language.`
+          : `Let's start again — here are the options.`;
+        return prependTextToEnvelope(prefix, languageList);
+      }
+      return languageList;
     }
+
+    const language = context.language || 'en';
 
     // Region is set → show Intro main menu for non-verified user
     if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
@@ -1177,7 +1342,7 @@ async handleMessageEnvelope(message, phoneNumber) {
    * @param {string} message
    */
   async handleFallbackState(session, message) {
-    return prependTextToEnvelope(`I'm sorry, I didn't understand that.`, await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.fallbackNotUnderstood'), await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1196,6 +1361,7 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     const textRaw = (message || '').trim();
     const text = textRaw.toLowerCase();
+    const language = this._getSessionLanguage(session);
 
     // Back/menu at any time -> Intro + main menu
     if (['0', 'menu', 'back'].includes(text)) {
@@ -1206,11 +1372,11 @@ async handleMessageEnvelope(message, phoneNumber) {
 
     // Gateway screen — shown before asking for email, so new patients can self-register
     const GATEWAY_BUTTONS = buttons(
-      'To get started, are you registered with us?',
+      t(language, 'verifyFlow.gatewayPrompt'),
       [
-        { id: '1', title: "Yes, I'm registered" },
-        { id: '2', title: 'Register new patient' },
-        { id: '3', title: 'Forgot my details' },
+        { id: '1', title: t(language, 'verifyFlow.gatewayYesRegistered') },
+        { id: '2', title: t(language, 'verifyFlow.gatewayRegisterNew') },
+        { id: '3', title: t(language, 'verifyFlow.gatewayForgotDetails') },
       ]
     );
 
@@ -1224,7 +1390,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         data.gateway_prompt = false;
         data.awaiting_email = true;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        return 'Please enter the email address you registered with.\n\n(0️⃣ Back)';
+        return t(language, 'verifyFlow.enterRegisteredEmail');
       }
       if (text === '2') {
         await this.sessionManager.updateSession(session.id, {
@@ -1244,12 +1410,12 @@ async handleMessageEnvelope(message, phoneNumber) {
         });
         const updated = await this.sessionManager.getSession(session.id);
         return prependTextToEnvelope(
-          `Please contact us at ${info.email} and we'll help you recover your details.`,
+          t(language, 'verifyFlow.forgotDetailsContact', { email: info.email }),
           await this.renderMainMenu(updated)
         );
       }
       // Unknown input — re-render gateway with error prefix so text clients see the options
-      return prependTextToEnvelope("Sorry, please reply with 1, 2, or 3.", GATEWAY_BUTTONS);
+      return prependTextToEnvelope(t(language, 'verifyFlow.gatewayInvalidReply'), GATEWAY_BUTTONS);
     }
 
     // DOB parser: accepts "dd mm yyyy", "dd/mm/yyyy", "dd-mm-yyyy", "dd.mm.yyyy"
@@ -1262,11 +1428,11 @@ async handleMessageEnvelope(message, phoneNumber) {
     };
 
     const FAIL_PROMPT = buttons(
-      "We couldn't verify those details. Please check your email and date of birth and try again.",
+      t(language, 'verifyFlow.failPromptBody'),
       [
-        { id: '1', title: 'Try again' },
-        { id: '2', title: 'Email us' },
-        { id: '3', title: 'Main menu' }
+        { id: '1', title: t(language, 'verifyFlow.failPromptTryAgain') },
+        { id: '2', title: t(language, 'verifyFlow.failPromptEmailUs') },
+        { id: '3', title: t(language, 'verifyFlow.failPromptMainMenu') }
       ]
     );
 
@@ -1276,7 +1442,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         // Restart from email
         const fresh = { verify_error_prompt: false, awaiting_email: true };
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: JSON.stringify(fresh) });
-        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.restartEnterEmail');
       }
       if (text === '2') {
         const region = this._getSessionRegion(session);
@@ -1293,7 +1459,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         delete data.verify_error_prompt;
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, data: JSON.stringify(data) });
         const updated = await this.sessionManager.getSession(session.id);
-        return prependTextToEnvelope(`We've sent your details to our support team. They'll be in touch shortly.`, await this.renderMainMenu(updated));
+        return prependTextToEnvelope(t(language, 'verifyFlow.outreachSent'), await this.renderMainMenu(updated));
       }
       if (text === '3') {
         delete data.verify_error_prompt;
@@ -1302,7 +1468,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.renderMainMenu(updated);
       }
       // Unknown input in fail prompt — reprint with prefix
-      return prependTextToEnvelope("Please reply with 1, 2, or 3.", FAIL_PROMPT);
+      return prependTextToEnvelope(t(language, 'verifyFlow.failPromptInvalidReply'), FAIL_PROMPT);
     }
 
     // Step 1: ask for email
@@ -1310,28 +1476,28 @@ async handleMessageEnvelope(message, phoneNumber) {
       if (!data.awaiting_email) {
         data.awaiting_email = true;
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-        return 'To verify your identity, please enter the email address you used to register with us.\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.restartEnterEmail');
       }
       // Validate and store email
       const email = textRaw.toLowerCase();
       if (!email.includes('@') || !email.includes('.')) {
-        return 'That doesn\'t look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.invalidEmail');
       }
       data.verify_email = email;
       delete data.awaiting_email;
       data.awaiting_dob = true;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Thanks. Now please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
+      return t(language, 'verifyFlow.enterDob');
     }
 
     // Step 2: collect and validate DOB
     if (!data.verify_dob) {
       if (!textRaw) {
-        return 'Please enter your date of birth (e.g. 15 03 1985 or 15/03/1985).\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.enterDobRetry');
       }
       const parsed = parseDob(textRaw);
       if (!parsed) {
-        return 'That doesn\'t look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Back to menu)';
+        return t(language, 'verifyFlow.invalidDob');
       }
       data.verify_dob = parsed; // stored as YYYY-MM-DD
       delete data.awaiting_dob;
@@ -1369,7 +1535,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           this.sessionManager.db.upsertPatientState(phoneForState, { patient_id: patient.id, verified: true }).catch(() => {});
         }
         const updated = await this.sessionManager.getSession(session.id);
-        return prependTextToEnvelope('Verification successful!', await this.goToInteractiveMenu(updated));
+        return prependTextToEnvelope(t(language, 'verifyFlow.verificationSuccessful'), await this.goToInteractiveMenu(updated));
       }
 
       // Verification failed — show 3-option prompt, stay in VERIFY state
@@ -1379,11 +1545,11 @@ async handleMessageEnvelope(message, phoneNumber) {
       const support = getSupportInfo(region);
       this.logger.analyticsEvent({ event: 'verification_failed', reason: 'no_match', sessionId: session.id, region, ts: Date.now() });
       return buttons(
-        `We couldn't verify those details. Please check your email and date of birth and try again, or contact support.\n\n${support}`,
+        t(language, 'verifyFlow.noMatchBody', { support }),
         [
-          { id: '1', title: 'Try again' },
-          { id: '2', title: 'Email us' },
-          { id: '3', title: 'Main menu' }
+          { id: '1', title: t(language, 'verifyFlow.failPromptTryAgain') },
+          { id: '2', title: t(language, 'verifyFlow.failPromptEmailUs') },
+          { id: '3', title: t(language, 'verifyFlow.failPromptMainMenu') }
         ]
       );
 
@@ -1395,11 +1561,11 @@ async handleMessageEnvelope(message, phoneNumber) {
       // Distinct from the "wrong email/DOB" message above — this is a real
       // fetch failure (e.g. Cliniko rate-limited), not a non-matching patient.
       return buttons(
-        "We're having trouble verifying your details right now. Please try again in a moment.",
+        t(language, 'verifyFlow.apiErrorBody'),
         [
-          { id: '1', title: 'Try again' },
-          { id: '2', title: 'Email us' },
-          { id: '3', title: 'Main menu' }
+          { id: '1', title: t(language, 'verifyFlow.failPromptTryAgain') },
+          { id: '2', title: t(language, 'verifyFlow.failPromptEmailUs') },
+          { id: '3', title: t(language, 'verifyFlow.failPromptMainMenu') }
         ]
       );
     }
@@ -1424,6 +1590,19 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
       const updated = await this.sessionManager.getSession(session.id);
       return await this.handleIntroState(updated, 'region');
+    }
+
+    // Support language change from the verified main menu
+    if (text === 'language' || text === 'change language') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_language_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'language');
     }
 
     if (['0', 'menu', 'back'].includes(text)) {
@@ -1468,7 +1647,6 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
       return await this.handleRescheduleAppointmentState(session, '');
     }
-
     if (text) {
       const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOK_MANAGE_OPTIONS, session);
       const matched = NluRouter.isConfident(nlu);
@@ -1491,7 +1669,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOK_MANAGE_OPTIONS', intent: nlu.intent, confidence: nlu.confidence });
     }
 
-    return prependTextToEnvelope('Your response is not understood. Here are the options. Try again.', await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.optionsNotUnderstood'), await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -1606,6 +1784,19 @@ async handleMessageEnvelope(message, phoneNumber) {
       return await this.handleIntroState(updated, 'region');
     }
 
+    // Support language change while at booking method menu
+    if (text === 'language' || text === 'change language') {
+      let context = session.context;
+      if (context && typeof context === 'string') {
+        try { context = JSON.parse(context); } catch {}
+      }
+      context = context || {};
+      context.awaiting_language_selection = true;
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO, context });
+      const updated = await this.sessionManager.getSession(session.id);
+      return await this.handleIntroState(updated, 'language');
+    }
+
     if (['0', 'menu', 'back'].includes(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
       return await this.goToInteractiveMenu(session);
@@ -1635,7 +1826,6 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = null;
       return await this.handleBookSpecificClinic(session, '');
     }
-
     if (text) {
       const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOKING_METHOD_OPTIONS, session);
       const matched = NluRouter.isConfident(nlu);
@@ -1698,7 +1888,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOKING_METHOD_OPTIONS', intent: nlu.intent, confidence: nlu.confidence });
     }
 
-    return prependTextToEnvelope('Please reply with a valid booking method (1–5).', await this.renderBookingMethodMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.invalidBookingMethod'), await this.renderBookingMethodMenu(session));
   }
 
   /**
@@ -1752,7 +1942,7 @@ async handleMessageEnvelope(message, phoneNumber) {
   _buildNoSlotsSummary(session, data) {
     const src = (key) => data[key] || data.prev_state_data?.[key];
     const apptName = src('selected_appt_type')?.name || '';
-    const physio   = getPractitionerDisplayName(src('selected_physio'));
+    const physio   = getPractitionerDisplayName(src('selected_physio'), this._getSessionLanguage(session), this.logger);
     const clinicObj = src('selected_clinic');
     const clinic   = clinicObj?.business_name || (typeof clinicObj === 'string' ? clinicObj : '');
     const userPhone = session.phone_number || session.phoneNumber || '';
@@ -1832,7 +2022,8 @@ async handleMessageEnvelope(message, phoneNumber) {
    *   actually changes what gets picked, not just re-runs the same fetch.
    * @returns {Promise<object>} buttons() envelope
    */
-  async _noSlotsRetry(session, data, stateConst, { context, confirmedMessage, retryStep, result, retryLabel = 'Try Again' } = {}) {
+  async _noSlotsRetry(session, data, stateConst, { context, confirmedMessage, retryStep, result, retryLabel } = {}) {
+    const language = this._getSessionLanguage(session);
     const step = retryStep || data.selection_step;
     data.no_slots_prompt = { context, retry_step: step };
     session.conversation_state = stateConst;
@@ -1845,18 +2036,18 @@ async handleMessageEnvelope(message, phoneNumber) {
     // needing to tell us which shape it passed.
     const partial = !!(result && (result._partial || (Array.isArray(result) && result.some(r => Array.isArray(r) && r._partial))));
     const body = partial
-      ? "We're having trouble checking availability right now — this may be temporary. Please try again in a moment."
+      ? t(language, 'noSlots.transientFailure')
       : confirmedMessage;
     // If this might just be a transient fetch failure, "Try Again" is the
     // honest label regardless of what a confirmed-empty retryLabel would say
     // (e.g. 'Try another physio' implies this physio is confirmed unavailable,
     // which we can't actually assert here).
-    const label = partial ? 'Try Again' : retryLabel;
+    const label = partial ? t(language, 'common.tryAgain') : (retryLabel || t(language, 'common.tryAgain'));
 
     return buttons(body, [
       { id: '1', title: label },
-      { id: '2', title: 'Email us' },
-      { id: '3', title: 'Message on WhatsApp' },
+      { id: '2', title: t(language, 'common.emailUs') },
+      { id: '3', title: t(language, 'common.messageOnWhatsApp') },
     ]);
   }
 
@@ -1984,7 +2175,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: session.data
       });
-      return prependTextToEnvelope(`Thanks! Our ${region} support team will be in touch shortly.`, await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.supportTeamThanks', { region }), await this.renderMainMenu(session));
     }
 
     // 3 — message us (open WhatsApp with pre-filled context)
@@ -2000,7 +2191,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         conversation_state: this.STATES.BOOK_MANAGE_OPTIONS,
         data: session.data
       });
-      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.tapToMessageTeam', { region, link: waLink }), await this.renderMainMenu(session));
     }
 
     return null;
@@ -2083,7 +2274,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const patientId = session?.patient_id || data?.patient_id;
       if (!patientId) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY, data: null });
-        return 'Verify your details before booking from history.';
+        return t(this._getSessionLanguage(session), 'bookHistory.verifyRequired');
       }
 
       const nowISO = new Date().toISOString();
@@ -2129,7 +2320,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       const physios = Array.from(byPrac.values()).sort((a, b) => new Date(b.last_seen) - new Date(a.last_seen));
       if (!physios.length) {
         await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
-        return 'No prior physio visits found. Choose another booking method.';
+        return t(this._getSessionLanguage(session), 'bookHistory.noPriorVisits');
       }
 
       data.history_physio_list = physios;
@@ -2164,7 +2355,7 @@ async handleMessageEnvelope(message, phoneNumber) {
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid selection. Reply with a number from the list.';
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidNumericSelection');
         data.selected_physio = list[idx].practitioner;
         data.last_clinic_id = list[idx].last_clinic_id || '';
         data.selection_step = 'choose_type';
@@ -2173,14 +2364,15 @@ async handleMessageEnvelope(message, phoneNumber) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply = buildInteractiveSelectionList({
+      const language = this._getSessionLanguage(session);
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: list,
         rowFn: (p) => ({
-          title: getPractitionerDisplayName(p.practitioner) || '',
-          description: `Last seen: ${formatSlotDateTime(p.last_seen, this._regionTz(session))}`
+          title: getPractitionerDisplayName(p.practitioner, this._getSessionLanguage(session), this.logger) || '',
+          description: t(language, 'bookHistory.lastSeen', { date: formatSlotDateTime(p.last_seen, this._regionTz(session)) })
         }),
         page: data.history_physio_page || 0,
-        header: 'Choose a physio from your past visits:'
+        header: t(language, 'bookHistory.choosePhysio')
       });
       return reply;
     }
@@ -2239,18 +2431,18 @@ if (/^p(rev)?$/i.test(text)) {
         const localNum = parseInt(text, 10);
         const list = data.appointment_type_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid appointment type selection.';
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidApptTypeSelection');
         this._applyTypeSelection(data, list[idx]);
         navPush(data, 'choose_clinic', { had_multiple_options: (list.length > 1), auto: false });
         await sync({ conversation_state: this.STATES.BOOK_HISTORY });
         return await this.handleBookHistory(session, '');
       }
 
-      const reply2 = buildInteractiveSelectionList({
+      const reply2 = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
-        rowFn: (a) => ({ title: String(a.name) }),
+        rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
-        header: `Choose appointment type for ${getPractitionerDisplayName(data.selected_physio)}:`
+        header: t(this._getSessionLanguage(session), 'bookHistory.chooseApptType', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
       return reply2;
     }
@@ -2313,7 +2505,7 @@ if (/^p(rev)?$/i.test(text)) {
         const localNum = parseInt(text, 10);
         const list = data.clinic_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return 'Invalid clinic selection.';
+        if (localNum < 1 || localNum > Math.min(pageSize, list.length - pageStart) || !list[idx]) return t(this._getSessionLanguage(session), 'bookHistory.invalidClinicSelection');
         data.selected_clinic = list[idx];
         data.selection_step = 'view_slots';
         navPush(data, 'view_slots', { had_multiple_options: (list.length > 1), auto: false });
@@ -2321,11 +2513,11 @@ if (/^p(rev)?$/i.test(text)) {
         return await this.handleBookHistory(session, '');
       }
 
-      const reply3 = buildInteractiveSelectionList({
+      const reply3 = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
         rowFn: (c) => ({ title: String(c.business_name) }),
         page: data.clinic_page || 0,
-        header: 'Select a clinic:'
+        header: t(this._getSessionLanguage(session), 'bookHistory.selectClinic')
       });
       return reply3;
     }
@@ -2358,7 +2550,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_HISTORY, {
           context: 'history',
           result: raw,
-          confirmedMessage: 'No available slots for that combination.' + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookHistory.noSlotsForCombo') + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -2379,8 +2571,8 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
+      const header = `${getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger)} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // Fallback
@@ -2427,6 +2619,7 @@ if (/^p(rev)?$/i.test(text)) {
    * @returns {{ reply?: MessageEnvelope }} reply while asking; {} once resolved.
    */
   _stepTypeInsurer(session, data, text) {
+    const language = this._getSessionLanguage(session);
     const entries = data.selected_appt_type?.entries || [];
     const insurers = [...new Set(entries.map(e => e.insurer).filter(i => i !== null))].sort();
 
@@ -2448,6 +2641,9 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     const options = ['Self-pay', ...insurers];
+    const translatedOptions = options.map(o => o === 'Self-pay'
+      ? t(language, 'bookSoonest.funnelSelfPay')
+      : translateInsurerName(o, language, this.logger));
 
     // Same paging convention as _stepApptFunnel's insurer stage — a list beyond
     // a handful of insurers must page like every other interactive list here
@@ -2472,9 +2668,9 @@ if (/^p(rev)?$/i.test(text)) {
 
     const badInput = text !== '';
     const menu = options.length <= 3
-      ? buttons('How is this covered?', options.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
-      : buildInteractiveSelectionList({ header: 'How is this covered?', items: options, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
-    return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+      ? buttons(t(language, 'bookSoonest.funnelHowCovered'), translatedOptions.map((o, i) => ({ id: String(i + 1), title: o.slice(0, 20) })))
+      : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: t(language, 'bookSoonest.funnelHowCovered'), items: translatedOptions, rowFn: (o) => ({ title: o.slice(0, 24) }), page });
+    return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
   }
 
   /**
@@ -2484,27 +2680,30 @@ if (/^p(rev)?$/i.test(text)) {
    * Makes it clear the shortage is insurer-specific, not a hard "fully
    * booked" — and points at where to change it without hunting for it.
    */
-  _insurerNoMatchSuffix(selectedApptType) {
+  _insurerNoMatchSuffix(selectedApptType, language) {
     const insurer = selectedApptType && selectedApptType.insurer;
     if (!insurer) return '';
-    return ` No slots matched your *${insurer}* preference specifically — you can change or clear it anytime from Change Preferences in the main menu.`;
+    const displayInsurer = translateInsurerName(insurer, language || 'en', this.logger);
+    return ` ${t(language || 'en', 'insurerNoMatch.suffix', { insurer: displayInsurer })}`;
   }
 
   async _stepApptFunnel(session, data, text) {
     const catalogue = data.funnel_catalogue || [];
+    const language = this._getSessionLanguage(session);
     // True when text was a real user reply that failed to match — prepend error to re-shown menus.
-    const badInput = text !== '' && text !== 'yes' && text !== 'change';
+    // Must be let so it can be reset to false once a step consumes the text via text=''.
+    let badInput = text !== '' && text !== 'yes' && text !== 'change';
 
     // First entry: offer shortcut if preference exists, otherwise start at service
     if (!data.funnel_step) {
       const pref = session.context && session.context.appt_preference;
       if (pref && text === '') {
-        const label = this._formatPrefLabel(pref);
+        const label = this._formatPrefLabel(pref, language);
         if (label) {
           data.funnel_step = 'shortcut';
-          return { reply: buttons(`Last time: ${label}\nBook the same again?`, [
-            { id: 'yes', title: 'Yes, same' },
-            { id: 'change', title: 'Change' },
+          return { reply: buttons(t(language, 'bookSoonest.funnelLastTime', { label }), [
+            { id: 'yes', title: t(language, 'bookSoonest.funnelYesSame') },
+            { id: 'change', title: t(language, 'bookSoonest.funnelChange') },
           ]) };
         }
       }
@@ -2560,9 +2759,9 @@ if (/^p(rev)?$/i.test(text)) {
         }
         {
           const menu = services.length <= 3
-            ? buttons('What type of appointment?', services.map((s, i) => ({ id: String(i + 1), title: s.slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: 'What type of appointment?', items: services, rowFn: (s) => ({ title: s.slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+            ? buttons(t(language, 'bookSoonest.funnelWhatType'), services.map((s, i) => ({ id: String(i + 1), title: translateServiceName(s, language, this.logger).slice(0, 20) })))
+            : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: t(language, 'bookSoonest.funnelWhatType'), items: services, rowFn: (s) => ({ title: translateServiceName(s, language, this.logger).slice(0, 24) }), page });
+          return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
 
@@ -2577,6 +2776,9 @@ if (/^p(rev)?$/i.test(text)) {
         const filtered = catalogue.filter(t => t.service === sel.service);
         // _stepTypeInsurer handles the zero-insurer-variants case itself (resolves
         // to self-pay immediately, no prompt) — no need to duplicate that check here.
+        // NOTE (i18n merge, not yet translated): _stepTypeInsurer is currently
+        // hardcoded English ("How is this covered?", "Self-pay", etc.) across all
+        // 5 flows that call it. Flagged as a self-audit gap, not fixed in this merge.
         data.selected_appt_type = { entries: filtered.map(t => ({ id: String(t.id), insurer: t.insurer || null })) };
         // _stepTypeInsurer computes and applies its own bad-input prefix — don't
         // double-wrap with this loop's outer `badInput`.
@@ -2621,17 +2823,18 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const allSameDuration   = combos.every(c => c.duration    === combos[0].duration);
         const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
-        const ptLabels = { new: 'New Patient', follow_up: 'Follow-Up' };
+        const ptLabels = { new: t(language, 'bookSoonest.patientTypeNew'), follow_up: t(language, 'bookSoonest.patientTypeFollowUp') };
         const comboLabel = (c) => {
+          const durLabel = `${c.duration}${t(language, 'common.minutesSuffix')}`;
           const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
-          const durPart = !allSameDuration ? `${c.duration} min` : null;
-          return [ptPart, durPart].filter(Boolean).join(' ') || `${c.duration} min`;
+          const durPart = !allSameDuration ? durLabel : null;
+          return [ptPart, durPart].filter(Boolean).join(' ') || durLabel;
         };
         const bodyText = allSameDuration && !allSamePatientType
-          ? 'New or returning patient?'
+          ? t(language, 'bookSoonest.funnelNewOrReturning')
           : allSamePatientType && !allSameDuration
-            ? 'Select duration:'
-            : 'Select appointment type:';
+            ? t(language, 'bookSoonest.funnelSelectDuration')
+            : t(language, 'bookSoonest.funnelSelectApptType');
         const page = data.appt_type_page || 0;
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
@@ -2648,8 +2851,8 @@ if (/^p(rev)?$/i.test(text)) {
         {
           const menu = combos.length <= 3
             ? buttons(bodyText, combos.map((c, i) => ({ id: String(i + 1), title: comboLabel(c).slice(0, 20) })))
-            : buildInteractiveSelectionList({ header: bodyText, items: combos, rowFn: (c) => ({ title: comboLabel(c).slice(0, 24) }), page });
-          return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', menu) : menu };
+            : buildInteractiveSelectionList({ language: this._getSessionLanguage(session), header: bodyText, items: combos, rowFn: (c) => ({ title: comboLabel(c).slice(0, 24) }), page });
+          return { reply: badInput ? prependTextToEnvelope(t(language, 'bookSoonest.funnelPleaseChooseFromList'), menu) : menu };
         }
       }
 
@@ -2658,13 +2861,13 @@ if (/^p(rev)?$/i.test(text)) {
     return { resolved: null };
   }
 
-  _formatPrefLabel(pref) {
+  _formatPrefLabel(pref, language) {
     if (!pref) return null;
-    const parts = [pref.service];
-    if (pref.patientType === 'new') parts.push('New Patient');
-    else if (pref.patientType === 'follow_up') parts.push('Follow-Up');
-    if (pref.insurer) parts.push(pref.insurer);
-    if (pref.duration) parts.push(`${pref.duration} min`);
+    const parts = [translateServiceName(pref.service, language, this.logger)];
+    if (pref.patientType === 'new') parts.push(t(language, 'bookSoonest.patientTypeNew'));
+    else if (pref.patientType === 'follow_up') parts.push(t(language, 'bookSoonest.patientTypeFollowUp'));
+    if (pref.insurer) parts.push(translateInsurerName(pref.insurer, language, this.logger));
+    if (pref.duration) parts.push(`${pref.duration}${t(language, 'common.minutesSuffix')}`);
     return parts.filter(Boolean).join(' · ');
   }
 
@@ -2675,6 +2878,196 @@ if (/^p(rev)?$/i.test(text)) {
     if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
     if (ctx && typeof ctx === 'object') { ctx.appt_preference = pref; session.context = ctx; }
     this.sessionManager.db.upsertPatientState(phone, { appt_preference: JSON.stringify(pref) }).catch(() => {});
+  }
+
+  /**
+   * Progressive funnel for choosing a physio by gender and treatment category.
+   * Steps: gender → category (auto-skipped when only one option).
+   * Offers a "same as last time?" shortcut when a saved physio_preference exists.
+   *
+   * Returns { reply } while gathering input, or {} when the funnel is complete
+   * (data.physio_funnel_step === 'done', data.physio_funnel_sel populated).
+   */
+  async _stepPhysioFunnel(session, data, text, { skipCategory = false } = {}) {
+    const pracList = data.practitioner_list || [];
+
+    // First entry
+    if (!data.physio_funnel_step) {
+      let ctx = session.context;
+      if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = null; } }
+      const pref = ctx && ctx.physio_preference;
+      if (pref && text === '') {
+        // When skipCategory: only show gender in the shortcut label so it's not misleading
+        const displayPref = skipCategory ? { gender: pref.gender, category: null } : pref;
+        const label = this._formatPhysioPrefLabel(displayPref);
+        if (label) {
+          data.physio_funnel_step = 'shortcut';
+          return { reply: buttons(`Last time: ${label}\nSame preference?`, [
+            { id: 'yes', title: 'Yes' },
+            { id: 'change', title: 'Change' },
+          ]) };
+        }
+      }
+      data.physio_funnel_step = 'gender';
+      data.physio_funnel_sel = {};
+    }
+
+    if (data.physio_funnel_step === 'shortcut') {
+      if (text === 'yes') {
+        let ctx = session.context;
+        if (ctx && typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = null; } }
+        const pref = ctx && ctx.physio_preference;
+        if (pref) {
+          data.physio_funnel_sel = {
+            gender: pref.gender || null,
+            category: skipCategory ? null : (pref.category || null),
+          };
+          data.physio_funnel_step = 'done';
+          return {};
+        }
+      }
+      data.physio_funnel_step = 'gender';
+      data.physio_funnel_sel = {};
+      text = '';
+    }
+
+    if (data.physio_funnel_step === 'gender') {
+      const genderMap = ['male', 'female', null];
+      const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+      if (idx >= 0 && idx <= 2) {
+        data.physio_funnel_sel = { gender: genderMap[idx], category: null };
+        data.physio_funnel_step = 'category';
+        text = '';
+      } else {
+        const badInput = text !== '' && text !== 'yes' && text !== 'change';
+        const genderBody = 'Do you have a preference for your physio?\n\n1. Male\n2. Female\n3. No preference\n\nTap a button, or type a number.';
+        const menu = buttons(genderBody, [
+          { id: '1', title: 'Male' },
+          { id: '2', title: 'Female' },
+          { id: '3', title: 'No preference' },
+        ]);
+        menu._textFallback = 'Do you have a preference for your physio?\n\n1. Male\n2. Female\n3. No preference\n\nReply with the number.';
+        return { reply: badInput ? prependTextToEnvelope('Please choose an option.', menu) : menu };
+      }
+    }
+
+    if (data.physio_funnel_step === 'category') {
+      const sel = data.physio_funnel_sel || {};
+
+      // Gender-only flows skip the category step entirely
+      if (skipCategory) {
+        sel.category = null;
+        data.physio_funnel_sel = sel;
+        data.physio_funnel_step = 'done';
+        this._savePhysioPref(session, sel);
+        return {};
+      }
+
+      // Fetch and cache per-practitioner categories for the gender-filtered set
+      if (!data.physio_categories) {
+        const genderFiltered = pracList.filter(p => {
+          if (!sel.gender) return true;
+          const g = practitionerGender(p);
+          return g === null || g === sel.gender;
+        });
+        const allTypes = await Promise.all(
+          genderFiltered.map(p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }))
+        );
+        data.physio_categories = genderFiltered.map((p, i) => ({
+          id: String(p.id),
+          categories: [...new Set(
+            (allTypes[i] || [])
+              .filter(t => t && t.name && !/UWC/i.test(t.name) && !/online\s*booking/i.test(t.name))
+              .map(t => parseApptCategory(t.category).service)
+              .filter(Boolean)
+          )],
+        }));
+      }
+
+      const genderFiltered = pracList.filter(p => {
+        if (!sel.gender) return true;
+        const g = practitionerGender(p);
+        return g === null || g === sel.gender;
+      });
+      const catMap = new Map((data.physio_categories || []).map(pc => [pc.id, pc.categories]));
+      const allCats = [...new Set(genderFiltered.flatMap(p => catMap.get(String(p.id)) || []))].sort();
+
+      // Auto-advance: zero or one category — nothing meaningful to ask
+      if (allCats.length <= 1) {
+        sel.category = allCats[0] || null;
+        data.physio_funnel_sel = sel;
+        data.physio_funnel_step = 'done';
+        this._savePhysioPref(session, sel);
+        return {};
+      }
+
+      const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+      if (idx >= 0 && idx < allCats.length) {
+        sel.category = allCats[idx];
+        data.physio_funnel_sel = sel;
+        data.physio_funnel_step = 'done';
+        this._savePhysioPref(session, sel);
+        return {};
+      }
+
+      const badInput = text !== '';
+      let catMenu;
+      if (allCats.length <= 3) {
+        const catBody = 'What type of treatment?\n\n' + allCats.map((c, i) => `${i + 1}. ${c}`).join('\n') + '\n\nTap a button, or type a number.';
+        catMenu = buttons(catBody, allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 20) })));
+        catMenu._textFallback = 'What type of treatment?\n\n' + allCats.map((c, i) => `${i + 1}. ${c}`).join('\n') + '\n\nReply with the number.';
+      } else {
+        catMenu = list('What type of treatment?', 'Select type', allCats.map((c, i) => ({ id: String(i + 1), title: c.slice(0, 24) })));
+      }
+      return { reply: badInput ? prependTextToEnvelope('Please choose an option from the list.', catMenu) : catMenu };
+    }
+
+    return {};
+  }
+
+  /**
+   * Filter a practitioner list by the resolved physio preference (gender + category).
+   * Practitioners with unknown gender (null title) are included in either gender filter.
+   * Falls back to the full list if the filter would produce an empty result.
+   */
+  _applyPhysioFilter(fullList, sel, physioCategories) {
+    if (!sel || !fullList || !fullList.length) return fullList || [];
+    let result = fullList;
+
+    if (sel.gender) {
+      result = result.filter(p => {
+        const g = practitionerGender(p);
+        return g === null || g === sel.gender;
+      });
+    }
+
+    if (sel.category && physioCategories && physioCategories.length) {
+      const catMap = new Map(physioCategories.map(pc => [pc.id, pc.categories]));
+      result = result.filter(p => {
+        const cats = catMap.get(String(p.id)) || [];
+        return cats.length === 0 || cats.includes(sel.category);
+      });
+    }
+
+    return result.length > 0 ? result : fullList;
+  }
+
+  _savePhysioPref(session, sel) {
+    const phone = session.phone_number || session.phoneNumber;
+    const pref = { gender: sel.gender || null, category: sel.category || null };
+    let ctx = session.context;
+    if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
+    if (ctx && typeof ctx === 'object') { ctx.physio_preference = pref; session.context = ctx; }
+    this.sessionManager.db.upsertPatientState(phone, { physio_preference: JSON.stringify(pref) }).catch(() => {});
+  }
+
+  _formatPhysioPrefLabel(pref) {
+    if (!pref) return null;
+    const parts = [];
+    if (pref.gender === 'male') parts.push('Male');
+    else if (pref.gender === 'female') parts.push('Female');
+    if (pref.category) parts.push(pref.category);
+    return parts.length ? parts.join(' · ') : null;
   }
 
   /**
@@ -2829,6 +3222,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.appointment_type_list = list; data.appt_type_name_to_ids_norm = map; data.appt_type_page = 0;
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio;
         delete data.funnel_step; delete data.funnel_sel;
+        delete data.physio_funnel_step; delete data.physio_funnel_sel; delete data.physio_categories;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return await this.handleBookSoonest(session, '');
@@ -2840,13 +3234,15 @@ if (/^p(rev)?$/i.test(text)) {
         const physios = typeNorm ? await buildAvailablePhysiosForTypeName(typeNorm) : [];
         if (physios.length > 1) {
           data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
+          data.physio_funnel_step = 'done'; // skip funnel on back — pref already captured
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-          const reply = buildInteractiveSelectionList({
-            items: data.practitioner_list,
-            rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
+          const effectiveList = this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories);
+          const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+            items: effectiveList,
+            rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
             page: 0,
-            header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
+            header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || '' })
       });
           return reply;
         }
@@ -2926,7 +3322,7 @@ if (/^p(rev)?$/i.test(text)) {
       if (!(data.funnel_catalogue || []).length) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
           context: 'soonest',
-          confirmedMessage: 'No appointment types are available right now.',
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noApptTypesAvailable'),
         });
       }
 
@@ -2970,7 +3366,7 @@ if (/^p(rev)?$/i.test(text)) {
         if (!funnelResult.resolved) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SOONEST, {
             context: 'soonest',
-            confirmedMessage: 'No appointment types are available right now.',
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noApptTypesAvailable'),
           });
         }
         data.selected_appt_type = funnelResult.resolved;
@@ -2994,8 +3390,8 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_type',
           result: practitioners,
-          confirmedMessage: `No practitioners have available slots for ${data.selected_appt_type.name} in the next few days.`
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noPhysiosForType', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) })
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -3003,11 +3399,11 @@ if (/^p(rev)?$/i.test(text)) {
       await sync();
 
       if (practitioners.length > 1) {
-        const reply = buildInteractiveSelectionList({
+        const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
           items: data.practitioner_list,
-          rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
+          rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
           page: 0,
-          header: `Select a practitioner for ${data.selected_appt_type.name}:`
+          header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) })
       });
         return reply;
       }
@@ -3035,23 +3431,33 @@ if (/^p(rev)?$/i.test(text)) {
       const practitionerList = data.practitioner_list || [];
       const page = data.practitioner_page || 0;
 
+      // Gender-only preference funnel (no category step — type already chosen)
+      if (data.physio_funnel_step !== 'done') {
+        const fr = await this._stepPhysioFunnel(session, data, text, { skipCategory: true });
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+        if (fr.reply) return fr.reply;
+        return await this.handleBookSoonest(session, '');
+      }
+
+      const effectiveList = this._applyPhysioFilter(practitionerList, data.physio_funnel_sel, data.physio_categories);
+
       if (/^\d+$/.test(text)) {
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, practitionerList.length - pageStart) || !practitionerList[idx]) return 'Invalid practitioner selection. Reply with a number from the list.';
-        data.selected_physio = practitionerList[idx];
+        if (localNum < 1 || localNum > Math.min(pageSize, effectiveList.length - pageStart) || !effectiveList[idx]) return t(this._getSessionLanguage(session), 'bookSoonest.invalidPhysioSelection');
+        data.selected_physio = effectiveList[idx];
         data.selection_step = 'choose_clinic';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
         return await this.handleBookSoonest(session, '');
       }
 
-      const reply = buildInteractiveSelectionList({
-        items: practitionerList,
-        rowFn: (p) => ({ title: getPractitionerDisplayName(p) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+        items: effectiveList,
+        rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
         page,
-        header: `Select a practitioner for ${data.selected_appt_type?.name || ''}:`
+        header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || '' })
       });
       return reply;
     }
@@ -3103,8 +3509,8 @@ if (/^p(rev)?$/i.test(text)) {
             context: 'soonest',
             retryStep: 'choose_clinic',
             result: slotResults0,
-            confirmedMessage: `No slots found for ${data.selected_appt_type.name} with ${getPractitionerDisplayName(data.selected_physio)}.`
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForTypeAndPhysio', { type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger), physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
 
@@ -3126,17 +3532,17 @@ if (/^p(rev)?$/i.test(text)) {
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
         const idx = pageStart + localNum - 1;
-        if (localNum < 1 || localNum > Math.min(pageSize, clinics.length - pageStart) || !clinics[idx]) return 'Invalid clinic selection. Reply with a number from the list.';
+        if (localNum < 1 || localNum > Math.min(pageSize, clinics.length - pageStart) || !clinics[idx]) return t(this._getSessionLanguage(session), 'bookSoonest.invalidClinicSelection');
         data.selected_clinic = clinics[idx];
         await sync();
       }
 
       if (!data.selected_clinic) {
-        const reply = buildInteractiveSelectionList({
+        const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
           items: clinics,
           rowFn: (c) => ({ title: String(c.business_name) }),
           page,
-          header: `Clinics for ${getPractitionerDisplayName(data.selected_physio)}:`
+          header: t(this._getSessionLanguage(session), 'bookSoonest.selectClinic', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
         return reply;
       }
@@ -3171,8 +3577,8 @@ if (/^p(rev)?$/i.test(text)) {
           context: 'soonest',
           retryStep: 'choose_clinic',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name}.`
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSoonest.noSlotsForType', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) })
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -3191,18 +3597,18 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${data.selected_clinic.business_name}`;
-      return this._buildSlotList(filtered, 0, header, this._regionTz(session));
+      const header = `${getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger)} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
+      return this._buildSlotList(filtered, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // Fallback → show types again
     const apptTypes = data.appointment_type_list || [];
     const apptTypePage = data.appt_type_page || 0;
-    const reply = buildInteractiveSelectionList({
+    const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
       items: apptTypes,
-      rowFn: (a) => ({ title: String(a.name) }),
+      rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
       page: apptTypePage,
-      header: 'Choose appointment type:'
+      header: t(this._getSessionLanguage(session), 'bookSoonest.chooseApptType')
     });
     return reply;
   }
@@ -3394,16 +3800,16 @@ if (/^p(rev)?$/i.test(text)) {
           if ((data.appointment_type_list || []).length === 0) {
             return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
               context: 'date',
-              confirmedMessage: 'No appointment types available for that date.',
+              confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noApptTypesForDate'),
             });
           }
 
-          const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-          const reply = buildInteractiveSelectionList({
+          const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
+          const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
             items: data.appointment_type_list || [],
-            rowFn: (a) => ({ title: String(a.name) }),
+            rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
             page: 0,
-            header: `Select visit type for ${headerDate}:`
+            header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectVisitType', { date: headerDate })
       });
           return reply;
         }
@@ -3430,10 +3836,10 @@ if (/^p(rev)?$/i.test(text)) {
 
       // render date page
       const cur = Math.max(0, Math.min(Number(data.date_page) || 0, MAX_DATE_PAGES - 1));
-      return buildInteractiveSelectionList({
-        header: `Pick a date (Page ${cur + 1}/${MAX_DATE_PAGES}):`,
+      return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.pickDatePage', { current: cur + 1, total: MAX_DATE_PAGES }),
         items: candidates,
-        rowFn: (dt) => ({ title: dt.toLocaleDateString() }),
+        rowFn: (dt) => ({ title: formatDateOnly(dt) }),
         page: cur,
         fixedPageSize: MAX_DATE_ITEMS
       });
@@ -3490,7 +3896,7 @@ if (/^p(rev)?$/i.test(text)) {
       if ((data.appointment_type_list || []).length === 0) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
           context: 'date',
-          confirmedMessage: 'No appointment types available for that date.',
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noApptTypesForDate'),
         });
       }
 
@@ -3519,12 +3925,12 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = buildInteractiveSelectionList({
+      const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
-        rowFn: (a) => ({ title: String(a.name) }),
+        rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
-        header: `Select visit type for ${headerDate}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectVisitType', { date: headerDate })
       });
       return reply;
     }
@@ -3588,7 +3994,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
             context: 'date_physio_list',
             result: groups,
-            confirmedMessage: `No practitioners offer ${data.selected_appt_type?.name || 'this visit type'} right now.`,
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noPractitionersForType', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'this visit type' }),
           });
         }
       }
@@ -3597,7 +4003,9 @@ if (/^p(rev)?$/i.test(text)) {
       // date slot from the same message) exactly once, now that the real
       // type-filtered practitioner list exists to match it against — same
       // discipline as handleBookSpecificPhysio's own choose_physio consume
-      // block. Only autofills on a single unambiguous name match.
+      // block. Only autofills on a single unambiguous name match. Runs
+      // before the gender-preference funnel: a message that names a specific
+      // physio has already made the gender question moot.
       if (data.pending_nlu_slots && data.pending_nlu_slots.physio) {
         const pendingSlot = data.pending_nlu_slots.physio;
         delete data.pending_nlu_slots.physio;
@@ -3629,6 +4037,16 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
 
+      // Gender-only preference funnel (no category step — type already chosen)
+      if (data.physio_funnel_step !== 'done') {
+        const fr = await this._stepPhysioFunnel(session, data, text, { skipCategory: true });
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        if (fr.reply) return fr.reply;
+        return await this.handleBookSpecificDate(session, '');
+      }
+
+      const effectiveList = this._applyPhysioFilter(data.practitioner_list || [], data.physio_funnel_sel, data.physio_categories);
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (data.practitioner_page || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3643,23 +4061,22 @@ if (/^p(rev)?$/i.test(text)) {
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
-        const list = data.practitioner_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_physio = list[idx];
+        if (localNum >= 1 && localNum <= Math.min(pageSize, effectiveList.length - pageStart) && effectiveList[idx]) {
+          data.selected_physio = effectiveList[idx];
           data.selection_step = 'choose_clinic';
-          if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: list.length > 1, auto: false });
+          if (typeof navPush === 'function') navPush(data, 'choose_clinic', { had_multiple_options: effectiveList.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           return await this.handleBookSpecificDate(session, '');
         }
       }
 
-      const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = buildInteractiveSelectionList({
-        items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
+      const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+        items: effectiveList,
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
-        header: `Choose a physio for ${data.selected_appt_type?.name || 'visit'} on ${headerDate}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.choosePhysioForDate', { type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'visit', date: headerDate })
       });
       return reply;
     }
@@ -3693,7 +4110,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.clinic_page = 0;
 
         if (withSlots.length === 0) {
-          const noSlotsDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
+          const noSlotsDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
           // context 'date_inner' is intercepted by the special-case handler at
           // the top of this function (before _handleNoSlotsDecision even runs),
           // which navigates to choose_physio and clears the stale selection —
@@ -3701,10 +4118,10 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
             context: 'date_inner',
             retryStep: 'choose_physio',
-            retryLabel: 'Try another physio',
+            retryLabel: t(this._getSessionLanguage(session), 'bookSpecificDate.tryAnotherPhysio'),
             result: slotResults1,
-            confirmedMessage: `No slots on ${noSlotsDate} for ${data.selected_appt_type?.name || 'this visit type'} with ${getPractitionerDisplayName(data.selected_physio)}.`
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsForPhysioOnDate', { date: noSlotsDate, type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'this visit type', physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
 
@@ -3736,12 +4153,12 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const headerDate = new Date(`${data.selected_date}T00:00:00Z`).toLocaleDateString();
-      const reply = buildInteractiveSelectionList({
+      const headerDate = formatDateOnly(new Date(`${data.selected_date}T00:00:00Z`));
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
-        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name) }),
+        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
         page: data.clinic_page || 0,
-        header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)} on ${headerDate}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificDate.selectClinicForDate', { physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger), date: headerDate })
       });
       return reply;
     }
@@ -3775,8 +4192,8 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_DATE, {
           context: 'date',
           result: raw,
-          confirmedMessage: `No slots for ${data.selected_appt_type?.name} on that date at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificDate.noSlotsAtClinicForDate', { type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger), clinic: getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) || 'this clinic' })
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -3795,8 +4212,8 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)} • ${new Date(`${date}T00:00:00Z`).toLocaleDateString()}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      const header = `${getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger)} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)} • ${formatDateOnly(new Date(`${date}T00:00:00Z`))}`;
+      return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // fallback
@@ -3938,7 +4355,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
             context: 'physio_list',
             result: groups,
-            confirmedMessage: 'No practitioners are available right now.',
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noPractitionersAvailable'),
           });
         }
       }
@@ -3949,7 +4366,9 @@ if (/^p(rev)?$/i.test(text)) {
       // directly. Only autofills on a single unambiguous name match — a name
       // (unlike an appointment type) is short enough that multiple
       // substring hits are a real risk, so an ambiguous match falls through
-      // to the normal list rather than guessing.
+      // to the normal list rather than guessing. Runs before the gender-
+      // preference funnel: a message that names a specific physio has
+      // already made the gender question moot.
       if (data.pending_nlu_slots && data.pending_nlu_slots.physio) {
         const pendingSlot = data.pending_nlu_slots.physio;
         delete data.pending_nlu_slots.physio;
@@ -3981,38 +4400,49 @@ if (/^p(rev)?$/i.test(text)) {
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
 
+      // Run preference funnel (gender → category) before showing the list.
+      // Recurse with empty text once done so the list renders on a clean turn.
+      if (data.physio_funnel_step !== 'done') {
+        const fr = await this._stepPhysioFunnel(session, data, text);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+        if (fr.reply) return fr.reply;
+        return await this.handleBookSpecificPhysio(session, '');
+      }
+
+      // Filtered list based on preference (falls back to full list if filter is too narrow)
+      const effectiveList = this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories);
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
-if (/^p(rev)?$/i.test(text)) {
-  data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
-  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
-}
+      if (/^p(rev)?$/i.test(text)) {
+        data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
+      }
 
       if (/^\d+$/.test(text)) {
         const page = data.practitioner_page || 0;
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(text, 10);
-        const list = data.practitioner_list || [];
         const idx = pageStart + localNum - 1;
-        if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
-          data.selected_physio = list[idx];
+        if (localNum >= 1 && localNum <= Math.min(pageSize, effectiveList.length - pageStart) && effectiveList[idx]) {
+          data.selected_physio = effectiveList[idx];
           data.selection_step = 'choose_type';
-          if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: list.length > 1, auto: false });
+          if (typeof navPush === 'function') navPush(data, 'choose_type', { had_multiple_options: effectiveList.length > 1, auto: false });
           await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
           return await this.handleBookSpecificPhysio(session, '');
         }
       }
 
-      const reply = buildInteractiveSelectionList({
-        items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name||p.name)) }),
+      const phyReply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+        items: effectiveList,
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name||p.name)) }),
         page: data.practitioner_page || 0,
-        header: 'Choose a physio:'
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.choosePhysio')
       });
-      return reply;
+      return phyReply;
     }
 
     // ===== confirm_physio_suggestion (Phase 5 NLU slot suggestion): "Did you
@@ -4065,7 +4495,7 @@ if (/^p(rev)?$/i.test(text)) {
       if ((data.appointment_type_list || []).length === 0) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
           context: 'physio',
-          confirmedMessage: `No visit types found for ${getPractitionerDisplayName(data.selected_physio) || 'this practitioner'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noVisitTypesForPhysio', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) || 'this practitioner' }),
         });
       }
 
@@ -4093,11 +4523,11 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
-        rowFn: (a) => ({ title: String(a.name) }),
+        rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
-        header: `Select visit type for ${getPractitionerDisplayName(data.selected_physio)}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectVisitTypeForPhysio', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
       return reply;
     }
@@ -4151,10 +4581,10 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
             context: 'physio_inner',
             retryStep: 'choose_type',
-            retryLabel: 'Try another type',
+            retryLabel: t(this._getSessionLanguage(session), 'bookSpecificPhysio.tryAnotherType'),
             result: slotResults2,
-            confirmedMessage: `No slots available for ${getPractitionerDisplayName(data.selected_physio)} with ${data.selected_appt_type?.name || 'that visit type'}.`
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsForPhysioAndType', { physio: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger), type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'that visit type' })
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
 
@@ -4186,11 +4616,11 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
-        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : c.business_name) }),
+        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : c.business_name) }),
         page: data.clinic_page || 0,
-        header: `Select a clinic for ${getPractitionerDisplayName(data.selected_physio)}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificPhysio.selectClinicForPhysio', { name: getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) })
       });
       return reply;
     }
@@ -4227,8 +4657,8 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_PHYSIO, {
           context: 'physio',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName(data.selected_clinic) || 'this clinic'}.`
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'this appointment type', clinic: getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) || 'this clinic' })
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -4246,8 +4676,8 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName(data.selected_physio)} • ${getBusinessDisplayName(data.selected_clinic)}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      const header = `${getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger)} • ${getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger)} • ${getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger)}`;
+      return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // fallback
@@ -4392,7 +4822,7 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_list',
             result: groups,
-            confirmedMessage: 'No clinics are available right now.',
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noClinicsAvailable'),
           });
         }
       }
@@ -4422,11 +4852,11 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const reply = buildInteractiveSelectionList({
+      const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.clinic_list || [],
-        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c) : (c.business_name || c.display_name || c.id)) }),
+        rowFn: (c) => ({ title: String(getBusinessDisplayName ? getBusinessDisplayName(c, this._getSessionLanguage(session), this.logger) : (c.business_name || c.display_name || c.id)) }),
         page: data.clinic_page || 0,
-        header: 'Select a clinic:'
+        header: t(this._getSessionLanguage(session), 'bookSpecificClinic.selectClinic')
       });
       return reply;
     }
@@ -4509,7 +4939,7 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
           result: hadClinicTypeFailure ? _markPartial([]) : [],
-          confirmedMessage: `No appointment types found at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`,
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noApptTypesAtClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : 'this clinic' }),
         });
       }
 
@@ -4537,11 +4967,11 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const replyTypes = buildInteractiveSelectionList({
+      const replyTypes = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.appointment_type_list || [],
-        rowFn: (a) => ({ title: String(a.name) }),
+        rowFn: (a) => ({ title: String(translateApptTypeName(a.name, this._getSessionLanguage(session), this.logger)) }),
         page: data.appt_type_page || 0,
-        header: `Select visit type for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificClinic.selectVisitTypeForClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : '' })
       });
       return replyTypes;
     }
@@ -4631,8 +5061,8 @@ if (/^p(rev)?$/i.test(text)) {
           return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
             context: 'clinic_physio_list',
             result: [groups, hadPhysioTypeFailure ? _markPartial([]) : []],
-            confirmedMessage: `No practitioners at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'} offer ${data.selected_appt_type?.name || 'this visit type'} right now.`
-              + this._insurerNoMatchSuffix(data.selected_appt_type),
+            confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificClinic.noPractitionersAtClinicForType', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : 'this clinic', type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'this visit type' })
+              + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
           });
         }
       }
@@ -4662,11 +5092,11 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
-      const replyPhys = buildInteractiveSelectionList({
+      const replyPhys = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
         items: data.practitioner_list || [],
-        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p) : (p.display_name || p.name || p.id)) }),
+        rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name || p.name || p.id)) }),
         page: data.practitioner_page || 0,
-        header: `Choose a physio for ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}:`
+        header: t(this._getSessionLanguage(session), 'bookSpecificClinic.choosePhysioForClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : '' })
       });
       return replyPhys;
     }
@@ -4706,8 +5136,8 @@ if (/^p(rev)?$/i.test(text)) {
         return await this._noSlotsRetry(session, data, this.STATES.BOOK_SPECIFIC_CLINIC, {
           context: 'clinic',
           result: raw,
-          confirmedMessage: `No slots found for ${data.selected_appt_type?.name || 'this appointment type'} at ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : 'this clinic'}.`
-            + this._insurerNoMatchSuffix(data.selected_appt_type),
+          confirmedMessage: t(this._getSessionLanguage(session), 'bookSpecificPhysio.noSlotsAtClinicForPhysio', { type: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) || 'this appointment type', clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : 'this clinic' })
+            + this._insurerNoMatchSuffix(data.selected_appt_type, this._getSessionLanguage(session)),
         });
       }
 
@@ -4726,8 +5156,8 @@ if (/^p(rev)?$/i.test(text)) {
       session.conversation_state = this.STATES.SELECT_SLOT;
       session.data = JSON.stringify(slotData);
 
-      const header = `${data.selected_appt_type?.name} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic) : ''}`;
-      return this._buildSlotList(slots, 0, header, this._regionTz(session));
+      const header = `${getAppointmentTypeDisplayName ? getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) : ''} • ${getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio, this._getSessionLanguage(session), this.logger) : ''} • ${getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : ''}`;
+      return this._buildSlotList(slots, 0, header, this._regionTz(session), this._getSessionLanguage(session));
     }
 
     // fallback
@@ -4851,7 +5281,7 @@ if (/^p(rev)?$/i.test(text)) {
     if (!slots.length) {
       return await this._noSlotsRetry(session, data, this.STATES.SELECT_SLOT, {
         context: 'slot',
-        confirmedMessage: 'No available slots to show.',
+        confirmedMessage: t(this._getSessionLanguage(session), 'slotSelection.noSlotsToShow'),
       });
     }
 
@@ -4861,7 +5291,7 @@ if (/^p(rev)?$/i.test(text)) {
       const count = this._slotPageCount(page);
       const idx = parseInt(text, 10) - 1;
       if (isNaN(idx) || idx < start || idx >= Math.min(start + count, slots.length)) {
-        return 'Invalid slot selection. Please reply with a number from the list, or 0️⃣ to go back.';
+        return t(this._getSessionLanguage(session), 'slotSelection.invalidSlotSelection');
       }
       const selectedSlot = slots[idx];
       data.selected_slot = selectedSlot;
@@ -4879,33 +5309,33 @@ if (/^p(rev)?$/i.test(text)) {
 
       // Build concise confirmation with context in header
       const headerParts = [];
-      if (data.prev_state_data?.selected_appt_type?.name) headerParts.push(`${data.prev_state_data.selected_appt_type.name}`);
-      if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) headerParts.push(`${data.prev_state_data.selected_physio.display_name || data.prev_state_data.selected_physio.first_name}`);
-      if (data.prev_state_data?.selected_clinic?.business_name) headerParts.push(`${data.prev_state_data.selected_clinic.business_name}`);
-      const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || 'Appointment');
+      if (data.prev_state_data?.selected_appt_type?.name) headerParts.push(getAppointmentTypeDisplayName(data.prev_state_data.selected_appt_type, this._getSessionLanguage(session), this.logger));
+      if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) headerParts.push(getPractitionerDisplayName(data.prev_state_data.selected_physio, this._getSessionLanguage(session), this.logger));
+      if (data.prev_state_data?.selected_clinic?.business_name) headerParts.push(getBusinessDisplayName(data.prev_state_data.selected_clinic, this._getSessionLanguage(session), this.logger));
+      const header = headerParts.length ? headerParts.join(' • ') : (selectedSlot.practitioner_name || t(this._getSessionLanguage(session), 'slotSelection.defaultApptFallback'));
 
       return buttons(
-        `You have selected:\n\n• ${header}\n• ${formatSlotDateTime(dt, this._regionTz(session))}`,
+        t(this._getSessionLanguage(session), 'slotSelection.youHaveSelected', { header, datetime: formatSlotDateTime(dt, this._regionTz(session)) }),
         [
-          { id: 'yes', title: 'Confirm booking' },
-          { id: '0',   title: 'Go back' }
+          { id: 'yes', title: t(this._getSessionLanguage(session), 'slotSelection.confirmBookingButton') },
+          { id: '0',   title: t(this._getSessionLanguage(session), 'slotSelection.goBackButton') }
         ]
       );
     }
 
     // Build a single header if context exists
-    let header = 'Available slots:';
+    let header = t(this._getSessionLanguage(session), 'slotSelection.defaultHeader');
     if (data.prev_state_data?.selected_appt_type || data.prev_state_data?.selected_physio || data.prev_state_data?.selected_clinic) {
       const parts = [];
-      if (data.prev_state_data?.selected_appt_type?.name) parts.push(data.prev_state_data.selected_appt_type.name);
+      if (data.prev_state_data?.selected_appt_type?.name) parts.push(getAppointmentTypeDisplayName(data.prev_state_data.selected_appt_type, this._getSessionLanguage(session), this.logger));
       if (data.prev_state_data?.selected_physio?.display_name || data.prev_state_data?.selected_physio?.first_name) {
-        parts.push(data.prev_state_data.selected_physio.display_name || data.prev_state_data.selected_physio.first_name);
+        parts.push(getPractitionerDisplayName(data.prev_state_data.selected_physio, this._getSessionLanguage(session), this.logger));
       }
-      if (data.prev_state_data?.selected_clinic?.business_name) parts.push(data.prev_state_data.selected_clinic.business_name);
+      if (data.prev_state_data?.selected_clinic?.business_name) parts.push(getBusinessDisplayName(data.prev_state_data.selected_clinic, this._getSessionLanguage(session), this.logger));
       header = parts.join(' • ');
     }
 
-    return this._buildSlotList(slots, page, header, this._regionTz(session));
+    return this._buildSlotList(slots, page, header, this._regionTz(session), this._getSessionLanguage(session));
   }
   
   /**
@@ -4956,14 +5386,14 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.BOOKING_METHOD_OPTIONS,
         data: null
       });
-      return "No slot was selected. Please try booking again.";
+      return t(this._getSessionLanguage(session), 'bookingConfirmation.noSlotSelected');
     }
 
     // --- Debug: Enrichment ---
     let enrichedSlot = selectedSlot;
     try {
       const enrichableSlot = slotToEnrichable(selectedSlot);
-      const enrichedArr = await enrichAppointmentsForDisplay([enrichableSlot], this.clinikoAPI, this._regionTz(session));
+      const enrichedArr = await enrichAppointmentsForDisplay([enrichableSlot], this.clinikoAPI, this._regionTz(session), this._getSessionLanguage(session));
       if (enrichedArr && enrichedArr[0]) {
         enrichedSlot = enrichedArr[0];
         this.logger.debug('[handleConfirmBookingState] Slot enriched', { enriched: enrichedSlot });
@@ -4989,13 +5419,13 @@ if (/^p(rev)?$/i.test(text)) {
         } catch (e) {
           this.logger.error('[handleConfirmBookingState] Failed to set INTRO state after missing patient_id', e);
         }
-        return prependTextToEnvelope('Cannot proceed with booking. Please start again.', await this.renderMainMenu(session));
+        return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.cannotProceedBooking'), await this.renderMainMenu(session));
       }
 
       // Defensive: Check slot fields
       if (!selectedSlot.practitioner_id || !selectedSlot.business_id || !selectedSlot.appointment_type_id || !selectedSlot.slot) {
         this.logger.warn('[handleConfirmBookingState] Slot missing required fields', { slot: selectedSlot });
-        return "The selected slot is missing some details. Please try booking again.";
+        return t(this._getSessionLanguage(session), 'bookingConfirmation.slotMissingDetails');
       }
 
       // --- Debug: Attempt booking ---
@@ -5013,7 +5443,7 @@ if (/^p(rev)?$/i.test(text)) {
         this.logger.debug('[handleConfirmBookingState] Book appointment result', { result });
       } catch (e) {
         this.logger.error('[handleConfirmBookingState] Error in bookAppointment', e);
-        result = { success: false, message: "Booking failed due to a technical error." };
+        result = { success: false, message: t(this._getSessionLanguage(session), 'bookingConfirmation.technicalErrorFallback') };
       }
 
       if (result.success) {
@@ -5046,29 +5476,30 @@ if (/^p(rev)?$/i.test(text)) {
           this.logger.error('[Booking] Confirmation email send failed', { error: e?.message || e, sessionId: session.id });
         }
         // --- Debug: Booking success, show enriched details ---
-        const successText =
-          `✅ Your appointment is booked for:\n` +
-          `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
-          `🏥 *${enrichedSlot._business_display || ''}*\n` +
-          `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`;
+        const successText = t(this._getSessionLanguage(session), 'bookingConfirmation.bookingSuccess', {
+          practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name,
+          clinic: enrichedSlot._business_display || '',
+          datetime: formatSlotDateTime(dt, this._regionTz(session)),
+        });
         return [successText, await this.goToInteractiveMenu(session)];
       } else {
         // --- Debug: Booking failed, show error message ---
-        return [`❌ Could not book your appointment. ${result.message || ''}`, await this.goToInteractiveMenu(session)];
+        return [t(this._getSessionLanguage(session), 'bookingConfirmation.bookingFailed', { message: result.message || '' }), await this.goToInteractiveMenu(session)];
       }
     }
 
     // Unknown input — re-show confirmation with error prefix
     return prependTextToEnvelope(
-      "Please reply 'Yes' to confirm your booking, or '0' to go back.",
+      t(this._getSessionLanguage(session), 'bookingConfirmation.confirmPrompt'),
       buttons(
-        `You have selected:\n\n` +
-        `👨‍⚕️ *${enrichedSlot._practitioner_display || enrichedSlot.practitioner_name}*\n` +
-        `🏥 *${enrichedSlot._business_display || ''}*\n` +
-        `🗓️ ${formatSlotDateTime(dt, this._regionTz(session))}`,
+        t(this._getSessionLanguage(session), 'bookingConfirmation.selectedSummary', {
+          practitioner: enrichedSlot._practitioner_display || enrichedSlot.practitioner_name,
+          clinic: enrichedSlot._business_display || '',
+          datetime: formatSlotDateTime(dt, this._regionTz(session)),
+        }),
         [
-          { id: 'yes', title: 'Confirm booking' },
-          { id: '0',   title: 'Go back' }
+          { id: 'yes', title: t(this._getSessionLanguage(session), 'slotSelection.confirmBookingButton') },
+          { id: '0',   title: t(this._getSessionLanguage(session), 'slotSelection.goBackButton') }
         ]
       )
     );
@@ -5078,26 +5509,28 @@ if (/^p(rev)?$/i.test(text)) {
 
   async handleViewFeesState(session, message) {
     const region = this._getSessionRegion(session);
-    const feeData = REGION_FEES[region] || REGION_FEES.SG;
+    const language = this._getSessionLanguage(session);
+    const feeData = getRegionFeesForLanguage(region, language);
     const lines = feeData.items.map(item => `• ${item}`).join('\n');
-    const fees = `💰 *Fee Structure*\n\n${feeData.header}\n${lines}`;
+    const fees = `${t(language, 'viewFeesLocations.feeStructureHeader')}\n\n${feeData.header}\n${lines}`;
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
     return [fees, await this.renderMainMenu(fresh)];
   }
 
   async handleViewLocationsState(session, message) {
+    const language = this._getSessionLanguage(session);
     const clinics = await this.clinikoAPI.getClinics();
     // clinics._partial means the fetch failed (e.g. a 429) — not a confirmed
     // empty list. Don't tell the user "no clinics" when it's really "try again".
     let locationText;
     if (clinics._partial) {
-      locationText = "We're having trouble reaching our clinic system right now. Please try again in a moment.";
+      locationText = t(language, 'viewFeesLocations.clinicSystemTrouble');
     } else {
       const displayText = clinics.length
         ? clinics.map(c => formatClinicForWhatsApp(c)).join('\n\n')
-        : 'No clinic information is currently available.';
-      locationText = `Here are our clinic locations:\n\n${displayText}`;
+        : t(language, 'viewFeesLocations.noClinicInfo');
+      locationText = `${t(language, 'viewFeesLocations.locationsIntro')}\n\n${displayText}`;
     }
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
@@ -5118,6 +5551,7 @@ if (/^p(rev)?$/i.test(text)) {
     const log = this.logger.child({ component: 'RegisterPatient', sessionId: session?.id });
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     const text = (message || '').trim();
+    const language = this._getSessionLanguage(session);
 
     // Back/cancel to Intro from any step
     if (['0', 'back', 'menu'].includes(text.toLowerCase())) {
@@ -5156,13 +5590,13 @@ if (/^p(rev)?$/i.test(text)) {
           // Same format check as handleVerifyState's email step.
           const email = text.toLowerCase();
           if (!email.includes('@') || !email.includes('.')) {
-            return buttons("That doesn't look like a valid email. Please enter a valid email address to proceed.\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+            return buttons(t(language, 'registerFlow.invalidEmail'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
           }
           data.email = email;
         } else if (next === 'dob') {
           const parsed = parseDob(text);
           if (!parsed) {
-            return buttons("That doesn't look like a valid date. Please enter as DD MM YYYY or DD/MM/YYYY (e.g. 15 03 1985).\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+            return buttons(t(language, 'registerFlow.invalidDob'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
           }
           data.dob = parsed; // stored as YYYY-MM-DD
         } else {
@@ -5171,10 +5605,10 @@ if (/^p(rev)?$/i.test(text)) {
         await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
         log.info('Collected field', { field: next });
       }
-      if (!data.first_name) return buttons("Please tell me your first name:\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.last_name)  return buttons("Got it. What's your last name?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.email)      return buttons("Thanks. What's your email address?\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
-      if (!data.dob)        return buttons("Lastly, what's your date of birth? (e.g. 15 03 1985 or 15/03/1985)\n\n(0️⃣ Reply 0 to go back)", [{ id: '0', title: 'Back' }]);
+      if (!data.first_name) return buttons(t(language, 'registerFlow.askFirstName'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+      if (!data.last_name)  return buttons(t(language, 'registerFlow.askLastName'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+      if (!data.email)      return buttons(t(language, 'registerFlow.askEmail'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+      if (!data.dob)        return buttons(t(language, 'registerFlow.askDob'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
     }
 
     // All fields collected → register
@@ -5186,7 +5620,7 @@ if (/^p(rev)?$/i.test(text)) {
       });
       const updated = await this.sessionManager.getSession(session.id);
       log.warn('Missing email or phone for registration');
-      return prependTextToEnvelope('We need both email and phone number to complete registration.', await this.renderMainMenu(updated));
+      return prependTextToEnvelope(t(language, 'registerFlow.missingEmailOrPhone'), await this.renderMainMenu(updated));
     }
 
     const patient = {
@@ -5232,15 +5666,15 @@ if (/^p(rev)?$/i.test(text)) {
         const updated = await this.sessionManager.getSession(session.id);
         log.info('Registration success', { email: patient.email, patient_id: newPatientId });
         this.logger.analyticsEvent({ event: 'registration_completed', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
-        return prependTextToEnvelope(`✅ You've been registered!`, await this.renderMainMenu(updated));
+        return prependTextToEnvelope(t(language, 'registerFlow.registrationSuccess'), await this.renderMainMenu(updated));
       }
       log.warn('Registration returned falsy result');
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return prependTextToEnvelope("Sorry, we couldn't complete registration right now.", await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(language, 'registerFlow.registrationFailedFalsy'), await this.renderMainMenu(session));
     } catch (e) {
       log.error('Registration error', { err: e?.message || e });
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
-      return prependTextToEnvelope('We hit an error while registering you. Please try again later.', await this.renderMainMenu(session));
+      return prependTextToEnvelope(t(language, 'registerFlow.registrationError'), await this.renderMainMenu(session));
     }
   }
 
@@ -5259,7 +5693,7 @@ if (/^p(rev)?$/i.test(text)) {
     const patient_id = session.patient_id;
     if (!patient_id) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY });
-      return 'You need to be a registered patient to cancel appointments. Enter your email to verify your details first.';
+      return t(this._getSessionLanguage(session), 'cancelFlow.needVerification');
     }
 
     // Fetch future ACTIVE appts only; defensive local filter
@@ -5271,10 +5705,10 @@ if (/^p(rev)?$/i.test(text)) {
     const now = new Date();
     let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
-      return prependTextToEnvelope('No upcoming appointments found to cancel.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.noUpcomingAppointments'), await this.goToInteractiveMenu(session));
     }
 
-    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
+    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session), this._getSessionLanguage(session));
 
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.cancel_appt_list = futureAppts;
@@ -5295,11 +5729,11 @@ if (/^p(rev)?$/i.test(text)) {
       data: JSON.stringify(data)
     });
 
-    return buildInteractiveSelectionList({
-      header: 'Your upcoming appointments:',
+    return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+      header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
       items: futureAppts,
       rowFn: (appt) => ({
-        title: appt._practitioner_display || 'Appointment',
+        title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
         description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
       }),
       page: 0
@@ -5326,11 +5760,11 @@ if (/^p(rev)?$/i.test(text)) {
     const renderCancelList = async (page) => {
       data.cancel_appt_page = page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return buildInteractiveSelectionList({
-        header: 'Your upcoming appointments:',
+      return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+        header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
         items: appts,
         rowFn: (appt) => ({
-          title: appt._practitioner_display || 'Appointment',
+          title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
           description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
         }),
         page
@@ -5344,7 +5778,7 @@ if (/^p(rev)?$/i.test(text)) {
     const localNum = parseInt(text, 10);
     const idx = pageStart + localNum - 1;
     if (isNaN(localNum) || localNum < 1 || localNum > Math.min(pageSize, appts.length - pageStart) || !appts[idx]) {
-      return 'Invalid selection. Please reply with the number of the appointment you want to cancel, or "0" to go back.';
+      return t(this._getSessionLanguage(session), 'cancelFlow.invalidSelection');
     }
     data.selected_cancel_appt = appts[idx];
     data.selected_cancel_appt_idx = idx;
@@ -5370,13 +5804,15 @@ if (/^p(rev)?$/i.test(text)) {
    * @param {string} introText
    * @param {'cancelled'|'rescheduled'} action
    */
-  _renderAppointmentChangeBlockedPrompt(introText, action) {
+  _renderAppointmentChangeBlockedPrompt(introText, action, session) {
+    const language = this._getSessionLanguage(session);
+    const actionLabel = t(language, action === 'rescheduled' ? 'appointmentChangeBlocked.actionRescheduled' : 'appointmentChangeBlocked.actionCancelled');
     return buttons(
-      `${introText}\n\nThis appointment is within 24 hours, so it can't be ${action} here. Please contact our front desk directly — cancellation fees may apply.`,
+      t(language, 'appointmentChangeBlocked.promptBody', { intro: introText, action: actionLabel }),
       [
-        { id: '1', title: 'Main menu' },
-        { id: '2', title: 'Email us' },
-        { id: '3', title: 'Message on WhatsApp' },
+        { id: '1', title: t(language, 'common.mainMenuButton') },
+        { id: '2', title: t(language, 'common.emailUs') },
+        { id: '3', title: t(language, 'common.messageOnWhatsApp') },
       ]
     );
   }
@@ -5391,6 +5827,7 @@ if (/^p(rev)?$/i.test(text)) {
    * @param {boolean} isSingle (true if called from the "only one appt" shortcut)
   */
   async _cancelPresentConfirmation(session, data, isSingle) {
+    const language = this._getSessionLanguage(session);
     const appt = data.selected_cancel_appt;
     if (!appt) {
       // Clean up
@@ -5398,12 +5835,12 @@ if (/^p(rev)?$/i.test(text)) {
       delete data.selected_cancel_appt;
       delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
 
     const intro = isSingle
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : `You selected:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
+      ? t(language, 'cancelFlow.oneUpcomingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'cancelFlow.selectedIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
 
     if (this._isAppointmentChangeBlockedByPolicy(appt)) {
       data.cancel_blocked_prompt = true;
@@ -5411,16 +5848,16 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.CONFIRM_CANCEL,
         data: JSON.stringify(data)
       });
-      return this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled');
+      return this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled', session);
     }
 
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.CONFIRM_CANCEL,
       data: JSON.stringify(data)
     });
-    return buttons(`${intro}\n\nConfirm cancellation?`, [
-      { id: 'yes', title: 'Yes, cancel' },
-      { id: '0',   title: 'Go back' }
+    return buttons(`${intro}\n\n${t(language, 'cancelFlow.confirmCancellationQuestion')}`, [
+      { id: 'yes', title: t(language, 'cancelFlow.yesCancelButton') },
+      { id: '0',   title: t(language, 'slotSelection.goBackButton') }
     ]);
   }
 
@@ -5454,15 +5891,16 @@ if (/^p(rev)?$/i.test(text)) {
 
     // Require explicit yes — unknown input re-shows prompt with prefix
     if (text !== 'yes') {
+      const language = this._getSessionLanguage(session);
       const appt = data.selected_cancel_appt;
       const intro = appt
-        ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-        : 'Confirm cancellation?';
+        ? t(language, 'cancelFlow.cancellingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+        : t(language, 'cancelFlow.confirmCancellationQuestion');
       return prependTextToEnvelope(
-        "Please reply 'Yes' to confirm cancellation, or '0' to go back.",
-        buttons(`${intro}\n\nConfirm cancellation?`, [
-          { id: 'yes', title: 'Yes, cancel' },
-          { id: '0',   title: 'Go back' }
+        t(language, 'cancelFlow.replyYesOrBack'),
+        buttons(`${intro}\n\n${t(language, 'cancelFlow.confirmCancellationQuestion')}`, [
+          { id: 'yes', title: t(language, 'cancelFlow.yesCancelButton') },
+          { id: '0',   title: t(language, 'slotSelection.goBackButton') }
         ])
       );
     }
@@ -5471,7 +5909,7 @@ if (/^p(rev)?$/i.test(text)) {
     if (!appt || !appt.id) {
       delete data.cancel_appt_list; delete data.selected_cancel_appt; delete data.selected_cancel_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
 
     const result = await this.clinikoAPI.cancelSpecificAppointment(appt.id.toString());
@@ -5495,7 +5933,7 @@ if (/^p(rev)?$/i.test(text)) {
         appointment_type_id: extractIdFromClinikoRef(appt.appointment_type, 'appointment_types'),
         starts_at: appt.starts_at, ts: Date.now()
       });
-      return prependTextToEnvelope(`✅ Your appointment has been cancelled.`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.cancelSuccess'), await this.goToInteractiveMenu(session));
     }
 
     // Cancellation failed — send contact/failure email
@@ -5505,7 +5943,7 @@ if (/^p(rev)?$/i.test(text)) {
     } catch (e) {
       this.logger.error('[Cancel] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
-    return prependTextToEnvelope(`❌ Could not cancel your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(this._getSessionLanguage(session), 'cancelFlow.cancelFailed', { message: result?.message || '' }), await this.goToInteractiveMenu(session));
   }
 
   /**
@@ -5545,7 +5983,7 @@ if (/^p(rev)?$/i.test(text)) {
       const region = this._getSessionRegion(session);
       this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'cancel_blocked', sessionId: session.id, region, ts: Date.now() });
       await cleanup();
-      return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'appointmentChangeBlocked.frontDeskThanks', { region }), await this.goToInteractiveMenu(session));
     }
 
     // 3 — message us (open WhatsApp with pre-filled context)
@@ -5560,14 +5998,15 @@ if (/^p(rev)?$/i.test(text)) {
         this._buildAppointmentChangeBlockedSummary(session, appt, 'cancel')
       );
       await cleanup();
-      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.tapToMessageTeam', { region, link: waLink }), await this.goToInteractiveMenu(session));
     }
 
     // Unknown input — re-render the same blocked prompt with an error prefix
+    const language = this._getSessionLanguage(session);
     const intro = appt
-      ? `You are cancelling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : 'This appointment cannot be cancelled here.';
-    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled'));
+      ? t(language, 'cancelFlow.cancellingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'cancelFlow.cannotCancelHereFallback');
+    return prependTextToEnvelope(t(language, 'appointmentChangeBlocked.replyWith123'), this._renderAppointmentChangeBlockedPrompt(intro, 'cancelled', session));
   }
 
   // ========== RESCHEDULE WORKFLOW  ==========
@@ -5584,7 +6023,7 @@ if (/^p(rev)?$/i.test(text)) {
     const patient_id = session.patient_id;
     if (!patient_id) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.VERIFY });
-      return 'You need to be a registered patient to reschedule appointments. Enter your email to verify your details first.';
+      return t(this._getSessionLanguage(session), 'rescheduleFlow.needVerification');
     }
 
     // Fetch future ACTIVE appts only; defensive local filter
@@ -5596,10 +6035,10 @@ if (/^p(rev)?$/i.test(text)) {
     const now = new Date();
     let futureAppts = (appts || []).filter(a => new Date(a.starts_at) > now && !a.cancelled_at);
     if (!futureAppts.length) {
-      return prependTextToEnvelope('No upcoming appointments found to reschedule.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'rescheduleFlow.noUpcomingAppointments'), await this.goToInteractiveMenu(session));
     }
 
-    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session));
+    futureAppts = await enrichAppointmentsForDisplay(futureAppts, this.clinikoAPI, this._regionTz(session), this._getSessionLanguage(session));
 
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     data.reschedule_appt_list = futureAppts;
@@ -5620,11 +6059,11 @@ if (/^p(rev)?$/i.test(text)) {
       data: JSON.stringify(data)
     });
 
-    return buildInteractiveSelectionList({
-      header: 'Your upcoming appointments:',
+    return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+      header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
       items: futureAppts,
       rowFn: (appt) => ({
-        title: appt._practitioner_display || 'Appointment',
+        title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
         description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
       }),
       page: 0
@@ -5654,11 +6093,11 @@ if (/^p(rev)?$/i.test(text)) {
     const renderRescheduleList = async (page) => {
       data.reschedule_appt_page = page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return buildInteractiveSelectionList({
-        header: 'Your upcoming appointments:',
+      return buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
+        header: t(this._getSessionLanguage(session), 'cancelFlow.upcomingAppointmentsHeader'),
         items: appts,
         rowFn: (appt) => ({
-          title: appt._practitioner_display || 'Appointment',
+          title: appt._practitioner_display || t(this._getSessionLanguage(session), 'cancelFlow.appointmentFallback'),
           description: `${appt._appointment_type_display} — ${appt._display_dt}`.slice(0, 72)
         }),
         page
@@ -5672,7 +6111,7 @@ if (/^p(rev)?$/i.test(text)) {
     const localNum = parseInt(text, 10);
     const idx = pageStart + localNum - 1;
     if (isNaN(localNum) || localNum < 1 || localNum > Math.min(pageSize, appts.length - pageStart) || !appts[idx]) {
-      return 'Invalid selection. Please reply with the number of the appointment you want to reschedule, or "0" to go back.';
+      return t(this._getSessionLanguage(session), 'rescheduleFlow.invalidSelection');
     }
     data.selected_reschedule_appt = appts[idx];
     data.selected_reschedule_appt_idx = idx;
@@ -5685,19 +6124,20 @@ if (/^p(rev)?$/i.test(text)) {
    * Transitions to RESCHEDULE_CONFIRM_INTENT state.
    */
   async _rescheduleShowConfirm(session, data, isSingle) {
+    const language = this._getSessionLanguage(session);
     const appt = data.selected_reschedule_appt;
     if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
     data.is_single_reschedule_appt = isSingle;
 
     const intro = isSingle
-      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
-      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+      ? t(language, 'rescheduleFlow.oneUpcomingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.selectedToRescheduleIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
 
     if (this._isAppointmentChangeBlockedByPolicy(appt)) {
       data.reschedule_blocked_prompt = true;
@@ -5705,16 +6145,16 @@ if (/^p(rev)?$/i.test(text)) {
         conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
         data: JSON.stringify(data)
       });
-      return this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled');
+      return this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled', session);
     }
 
     await this.sessionManager.updateSession(session.id, {
       conversation_state: this.STATES.RESCHEDULE_CONFIRM_INTENT,
       data: JSON.stringify(data)
     });
-    return buttons(`${intro}\n\nWould you like to proceed?`, [
-      { id: 'yes', title: 'Yes, reschedule' },
-      { id: '0',   title: 'Go back' }
+    return buttons(`${intro}\n\n${t(language, 'rescheduleFlow.wouldYouLikeToProceed')}`, [
+      { id: 'yes', title: t(language, 'rescheduleFlow.yesRescheduleButton') },
+      { id: '0',   title: t(language, 'slotSelection.goBackButton') }
     ]);
   }
 
@@ -5723,13 +6163,14 @@ if (/^p(rev)?$/i.test(text)) {
    * Transitions to CONFIRM_RESCHEDULE state.
    */
   async _rescheduleFetchAndShowSlots(session, data) {
+    const language = this._getSessionLanguage(session);
     const appt = data.selected_reschedule_appt;
     if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
     const business_id = extractIdFromClinikoRef(appt.business, 'businesses');
     const practitioner_id = extractIdFromClinikoRef(appt.practitioner, 'practitioners');
@@ -5740,8 +6181,7 @@ if (/^p(rev)?$/i.test(text)) {
       delete data.selected_reschedule_appt_idx;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
       return (
-        'Sorry, this appointment does not have enough information to find available slots for rescheduling. ' +
-        'Please contact our clinic for assistance.\n\n' +
+        t(language, 'rescheduleFlow.notEnoughInfo') + '\n\n' +
         await this.goToInteractiveMenu(session)
       );
     }
@@ -5778,7 +6218,7 @@ if (/^p(rev)?$/i.test(text)) {
       return await this._noSlotsRetry(session, data, this.STATES.SELECT_APPOINTMENT_TO_RESCHEDULE, {
         context: 'reschedule',
         result: fetchFailed ? Object.assign([], { _partial: true }) : availableTimes,
-        confirmedMessage: 'Sorry, no available slots for rescheduling this appointment.',
+        confirmedMessage: t(language, 'rescheduleFlow.noSlotsForReschedule'),
       });
     }
     data.available_times = availableTimes;
@@ -5788,10 +6228,10 @@ if (/^p(rev)?$/i.test(text)) {
       data: JSON.stringify(data)
     });
     const intro = data.is_single_reschedule_appt
-      ? `You have one upcoming appointment:\n\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : `You selected to reschedule:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`;
-    const header = intro + '\n\nPlease choose a new slot:';
-    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session));
+      ? t(language, 'rescheduleFlow.oneUpcomingIntroPlain', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.selectedToRescheduleIntroPlain', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
+    const header = intro + '\n\n' + t(language, 'rescheduleFlow.chooseNewSlotSuffix');
+    return this._buildSlotList(availableTimes, 0, header, this._regionTz(session), language);
   }
 
   /**
@@ -5820,20 +6260,21 @@ if (/^p(rev)?$/i.test(text)) {
     }
 
     // Unknown input — re-show confirm prompt
+    const language = this._getSessionLanguage(session);
     if (!appt) {
       delete data.reschedule_appt_list;
       delete data.selected_reschedule_appt;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return prependTextToEnvelope('Could not find the selected appointment. Please try again.', await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'cancelFlow.couldNotFindAppointment'), await this.goToInteractiveMenu(session));
     }
     const intro = data.is_single_reschedule_appt
-      ? `You have one upcoming appointment:\n\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`
-      : `You selected to reschedule:\n*${appt._practitioner_display} — ${appt._appointment_type_display}*\n${appt._display_dt}`;
+      ? t(language, 'rescheduleFlow.oneUpcomingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.selectedToRescheduleIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt });
     return prependTextToEnvelope(
-      "Please reply 'Yes' to proceed, or '0' to go back.",
-      buttons(`${intro}\n\nWould you like to proceed?`, [
-        { id: 'yes', title: 'Yes, reschedule' },
-        { id: '0',   title: 'Go back' }
+      t(language, 'rescheduleFlow.replyYesOrBack'),
+      buttons(`${intro}\n\n${t(language, 'rescheduleFlow.wouldYouLikeToProceed')}`, [
+        { id: 'yes', title: t(language, 'rescheduleFlow.yesRescheduleButton') },
+        { id: '0',   title: t(language, 'slotSelection.goBackButton') }
       ])
     );
   }
@@ -5876,7 +6317,7 @@ if (/^p(rev)?$/i.test(text)) {
       const region = this._getSessionRegion(session);
       this.logger.analyticsEvent({ event: 'handoff_frontdesk', reason: 'reschedule_blocked', sessionId: session.id, region, ts: Date.now() });
       await cleanup();
-      return prependTextToEnvelope(`Thanks! Our ${region} front desk will be in touch shortly.`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'appointmentChangeBlocked.frontDeskThanks', { region }), await this.goToInteractiveMenu(session));
     }
 
     // 3 — message us (open WhatsApp with pre-filled context)
@@ -5891,14 +6332,15 @@ if (/^p(rev)?$/i.test(text)) {
         this._buildAppointmentChangeBlockedSummary(session, appt, 'reschedule')
       );
       await cleanup();
-      return prependTextToEnvelope(`Tap to message our ${region} team:\n${waLink}`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(this._getSessionLanguage(session), 'noSlots.tapToMessageTeam', { region, link: waLink }), await this.goToInteractiveMenu(session));
     }
 
     // Unknown input — re-render the same blocked prompt with an error prefix
+    const language = this._getSessionLanguage(session);
     const intro = appt
-      ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}`
-      : 'This appointment cannot be rescheduled here.';
-    return prependTextToEnvelope('Please reply with 1, 2, or 3.', this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled'));
+      ? t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt })
+      : t(language, 'rescheduleFlow.cannotRescheduleHereFallback');
+    return prependTextToEnvelope(t(language, 'appointmentChangeBlocked.replyWith123'), this._renderAppointmentChangeBlockedPrompt(intro, 'rescheduled', session));
   }
 
   /**
@@ -5912,6 +6354,7 @@ if (/^p(rev)?$/i.test(text)) {
    */
   async handleConfirmRescheduleState(session, message) {
     const text = (message || '').trim();
+    const language = this._getSessionLanguage(session);
     let data = typeof session.data === 'string' ? JSON.parse(session.data || '{}') : (session.data || {});
     const appt = data.selected_reschedule_appt;
     const availableTimes = data.available_times || [];
@@ -5923,9 +6366,9 @@ if (/^p(rev)?$/i.test(text)) {
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const rescheduleHeader = appt
-        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
-        : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
+        ? t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt }) + '\n\n' + t(language, 'rescheduleFlow.chooseNewSlotSuffix')
+        : t(language, 'rescheduleFlow.chooseNewSlotSuffix');
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), language);
     }
 
     // Pagination — previous
@@ -5934,9 +6377,9 @@ if (/^p(rev)?$/i.test(text)) {
       data.slot_page = slot_page;
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CONFIRM_RESCHEDULE, data: JSON.stringify(data) });
       const rescheduleHeader = appt
-        ? `You are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}\n\nPlease choose a new slot:`
-        : 'Please choose a new slot:';
-      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session));
+        ? t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt }) + '\n\n' + t(language, 'rescheduleFlow.chooseNewSlotSuffix')
+        : t(language, 'rescheduleFlow.chooseNewSlotSuffix');
+      return this._buildSlotList(availableTimes, slot_page, rescheduleHeader, this._regionTz(session), language);
     }
 
     // Back
@@ -5951,8 +6394,8 @@ if (/^p(rev)?$/i.test(text)) {
     const count = this._slotPageCount(slot_page);
     const idx = parseInt(text, 10) - 1;
     if (isNaN(idx) || idx < start || idx >= Math.min(start + count, availableTimes.length) || !availableTimes[idx]) {
-      return 'Invalid slot selection. Please reply with the number of your chosen slot, "M" for more, or "0" to go back.' +
-        (appt ? `\n\nYou are rescheduling:\n${appt._practitioner_display} — ${appt._appointment_type_display}\n${appt._display_dt}` : '');
+      return t(language, 'rescheduleFlow.invalidSlotSelection') +
+        (appt ? '\n\n' + t(language, 'rescheduleFlow.youAreReschedulingIntro', { physio: appt._practitioner_display, type: appt._appointment_type_display, date: appt._display_dt }) : '');
     }
 
     const slot = availableTimes[idx];
@@ -5972,7 +6415,7 @@ if (/^p(rev)?$/i.test(text)) {
     if (!business_id || !practitioner_id || !appointment_type_id || !patient_id || !starts_at) {
       delete data.reschedule_appt_list; delete data.selected_reschedule_appt; delete data.selected_reschedule_appt_idx; delete data.available_times; delete data.slot_page;
       await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
-      return 'Could not retrieve all necessary details for rescheduling. Please try again later or contact the clinic.';
+      return t(language, 'rescheduleFlow.missingDetails');
     }
 
     const payload = {
@@ -6003,7 +6446,7 @@ if (/^p(rev)?$/i.test(text)) {
         appointment_id: appt.id, practitioner_id: payload.practitioner_id, business_id: payload.business_id,
         appointment_type_id: payload.appointment_type_id, starts_at: payload.starts_at, ts: Date.now()
       });
-      return prependTextToEnvelope(`✅ Your appointment has been rescheduled to:\n${formatSlotDateTime(starts_at, this._regionTz(session))}`, await this.goToInteractiveMenu(session));
+      return prependTextToEnvelope(t(language, 'rescheduleFlow.rescheduleSuccess', { datetime: formatSlotDateTime(starts_at, this._regionTz(session)) }), await this.goToInteractiveMenu(session));
     }
 
     // Reschedule failed — send contact/failure email
@@ -6014,7 +6457,7 @@ if (/^p(rev)?$/i.test(text)) {
     } catch (e) {
       this.logger.error('[Reschedule] Failure email send failed', { error: e?.message || e, sessionId: session.id });
     }
-    return prependTextToEnvelope(`❌ Could not reschedule your appointment. ${result?.message || ''}`, await this.goToInteractiveMenu(session));
+    return prependTextToEnvelope(t(language, 'rescheduleFlow.rescheduleFailed', { message: result?.message || '' }), await this.goToInteractiveMenu(session));
   }
 
   /**
