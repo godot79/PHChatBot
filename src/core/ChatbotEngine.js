@@ -1634,11 +1634,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
     }
 
-    if (text === '1' || text.includes('book')) {
-      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
-      this.logger.analyticsEvent({ event: 'booking_flow_started', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
-      return await this.renderBookingMethodMenu(session);
-    }
+    // 'cancel'/'resched' checked before the 'book' substring check below —
+    // "cancel my booking"/"reschedule... booked for tomorrow" both contain
+    // "book" and were being caught by that check first, dead-ending the
+    // exact free-text cancel/reschedule phrasing this NLU layer exists to
+    // catch (2026-09-07 prod incident: free-text cancel misrouted into
+    // registration). Live-confirmed against real HK prod phrasing.
     if (text === '2' || text.includes('cancel')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.CANCEL_APPOINTMENT });
       return await this.handleCancelAppointmentState(session, '');
@@ -1646,6 +1647,18 @@ async handleMessageEnvelope(message, phoneNumber) {
     if (text === '3' || text.includes('resched')) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.RESCHEDULE_APPOINTMENT });
       return await this.handleRescheduleAppointmentState(session, '');
+    }
+    // Word-boundary match — live-confirmed the reorder above wasn't
+    // sufficient on its own: "booked"/"booking" (usually describing an
+    // EXISTING appointment, e.g. "I have a session booked... need to
+    // reschedule") still matched this bare-substring check even when the
+    // message contained neither "cancel" nor "resched", so it never got a
+    // chance to fall through to the NLU layer below. "book" as a bare word
+    // ("I want to book...") still matches; "booked"/"booking" no longer do.
+    if (text === '1' || /\bbook\b/.test(text)) {
+      await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS });
+      this.logger.analyticsEvent({ event: 'booking_flow_started', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now() });
+      return await this.renderBookingMethodMenu(session);
     }
     if (text) {
       const nlu = await NluRouter.classifyIntent(text, this.STATES.BOOK_MANAGE_OPTIONS, session);
@@ -1811,7 +1824,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = null;
       return await this.handleBookSoonest(session, '');
     }
-    if (text === '3' || text.includes('date')) {
+    // Word-boundary match, not .includes() — 'date' as a bare substring
+    // false-positives on "update"/"validate"/"mandate" etc., misrouting
+    // unrelated free text into this funnel with data wiped before the NLU
+    // layer below ever gets a chance. Live-confirmed risk (see 'clinic' fix
+    // just below — same class, "clinical" contains "clinic").
+    if (text === '3' || /\bdate\b/.test(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_DATE, data: null });
       session.data = null;
       return await this.handleBookSpecificDate(session, '');
@@ -1821,7 +1839,9 @@ async handleMessageEnvelope(message, phoneNumber) {
       session.data = null;
       return await this.handleBookSpecificPhysio(session, '');
     }
-    if (text === '5' || text.includes('clinic')) {
+    // Word-boundary match — 'clinic' as a bare substring false-positives on
+    // "clinical" (e.g. "clinical pilates", "clinical assessment").
+    if (text === '5' || /\bclinic\b/.test(text)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: null });
       session.data = null;
       return await this.handleBookSpecificClinic(session, '');
@@ -3712,6 +3732,43 @@ if (/^p(rev)?$/i.test(text)) {
         data.selection_step = 'choose_date';
         data.date_page = 0;
         data.pending_nlu_slots = { ...(data.pending_nlu_slots || {}), date: dateSlot };
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        return await this.handleBookSpecificDate(session, '');
+      }
+    }
+
+    // =====================================================================
+    // Phase 7 gap fix: mid-flow physio correction. Phase 7 routes every
+    // combined physio+date NLU message into this handler (it's the only
+    // funnel with steps for both slots — see the Phase 7 root-asymmetry
+    // note), but this handler only ever had a date-correction block above.
+    // A later "actually can I see someone else" here silently did nothing.
+    // Mirrors handleBookSpecificPhysio's own physio-correction block, but
+    // only fires at 'choose_clinic' — the one step after choose_physio in
+    // *this* funnel's order (date -> type -> insurer -> physio -> clinic),
+    // which puts appointment-type selection upstream of physio here, unlike
+    // handleBookSpecificPhysio's own funnel. So unlike that block's clear
+    // set, this must NOT clear selected_appt_type/appointment_type_list —
+    // the type was already confirmed before physio in this funnel, and
+    // choose_physio's own practitioner-list build filters by that type.
+    // =====================================================================
+    const DATE_FUNNEL_PHYSIO_CORRECTION_STEPS = ['choose_clinic'];
+    if (data.selected_physio && DATE_FUNNEL_PHYSIO_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
+      const currentPhysioName = normName(getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : (data.selected_physio.display_name || data.selected_physio.name || ''));
+      const result = await NluRouter.classifyIntent(raw, this.STATES.BOOK_SPECIFIC_DATE, { existingSlots: { physio: currentPhysioName } });
+      const physioSlot = result.slots && result.slots.physio;
+      if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && physioSlot && physioSlot.value && normName(physioSlot.value) !== currentPhysioName
+          && (NluRouter.isSlotAutofillable(physioSlot) || NluRouter.isSlotSuggestable(physioSlot))) {
+        this.logger.analyticsEvent({ event: 'nlu_midflow_correction', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: this.STATES.BOOK_SPECIFIC_DATE, slot: 'physio', confidence: physioSlot.confidence });
+        delete data.selected_physio;
+        delete data.practitioner_list;
+        delete data.practitioner_page;
+        delete data.clinic_list;
+        delete data.clinic_page;
+        delete data.selected_clinic;
+        data.navigation_chain = [];
+        data.selection_step = 'choose_physio';
+        data.pending_nlu_slots = { ...(data.pending_nlu_slots || {}), physio: physioSlot };
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
         return await this.handleBookSpecificDate(session, '');
       }
