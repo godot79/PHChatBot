@@ -26,6 +26,7 @@ const { bulkAll } = require('../../src/core/BulkContext');
 const ClinikoAPI = require('../../src/api/ClinikoAPI');
 const {
   getAllAppointmentTypesForAllPractitioners,
+  getPractitionersForTypeName,
   parseApptCategory,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
@@ -69,20 +70,48 @@ jest.mock('../../src/core/DatabaseManager', () => {
     async initialize () {
       this.db = new sqlite3.Database(':memory:');
       return new Promise((res, rej) => {
-        this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
-          id TEXT PRIMARY KEY,
-          phone_number TEXT NOT NULL,
-          patient_id TEXT,
-          verification_status TEXT DEFAULT 'pending',
-          conversation_state TEXT DEFAULT 'INTRO',
-          context TEXT DEFAULT '{}',
-          data TEXT,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
-          expires_at DATETIME,
-          verified BOOLEAN DEFAULT 0
-        )`, (err) => { if (err) return rej(err); this.isInitialized = true; res(); });
+        this.db.serialize(() => {
+          this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            phone_number TEXT NOT NULL,
+            patient_id TEXT,
+            verification_status TEXT DEFAULT 'pending',
+            conversation_state TEXT DEFAULT 'INTRO',
+            context TEXT DEFAULT '{}',
+            data TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME,
+            verified BOOLEAN DEFAULT 0
+          )`);
+          // Real (in-memory) patient_state table — same shape as production —
+          // so tests can exercise the actual getPatientState/upsertPatientState
+          // persistence path (pickup + amend across sessions), not a stub.
+          this.db.run(`CREATE TABLE IF NOT EXISTS patient_state (
+            phone_number TEXT PRIMARY KEY,
+            region TEXT,
+            appt_preference TEXT,
+            patient_id TEXT,
+            verified BOOLEAN,
+            language TEXT,
+            preferred_insurer TEXT,
+            physio_preference TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )`, (err) => { if (err) return rej(err); this.isInitialized = true; res(); });
+        });
       });
+    }
+
+    // Not exercised by these tests (no prior-session reseed scenario needed) —
+    // returning empty just makes getOrCreateSession's prior-session lookup a
+    // safe no-op, same as a phone number with no session history.
+    async query () { return []; }
+
+    async getSessionByPhone (phoneNumber) {
+      return new Promise((res, rej) =>
+        this.db.get('SELECT * FROM sessions WHERE phone_number = ? ORDER BY last_activity DESC LIMIT 1', [phoneNumber],
+          (err, row) => (err ? rej(err) : res(row || null)))
+      );
     }
 
     async createSession (phoneNumber, patientId = null, durationMinutes = 30) {
@@ -124,10 +153,37 @@ jest.mock('../../src/core/DatabaseManager', () => {
       return new Promise((res, rej) => this.db.close(err => err ? rej(err) : res()));
     }
 
-    // No-op — this test's sessions table has no patient_state; _saveFunnelPref
-    // calls this defensively (.catch(() => {})) to persist the "book same again"
-    // shortcut preference, which is out of scope for these tests.
-    async upsertPatientState () { return null; }
+    async getPatientState (phone) {
+      return new Promise((res, rej) =>
+        this.db.get('SELECT * FROM patient_state WHERE phone_number = ?', [phone],
+          (err, row) => (err ? rej(err) : res(row || null)))
+      );
+    }
+
+    async upsertPatientState (phone, updates) {
+      const { region, appt_preference, patient_id, verified, language, preferred_insurer, physio_preference } = updates;
+      const verifiedValue = verified === undefined ? null : (verified ? 1 : 0);
+      return new Promise((res, rej) => {
+        this.db.run(
+          `INSERT INTO patient_state (phone_number, region, appt_preference, patient_id, verified, language, preferred_insurer, physio_preference, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(phone_number) DO UPDATE SET
+             region = COALESCE(?, region),
+             appt_preference = COALESCE(?, appt_preference),
+             patient_id = COALESCE(?, patient_id),
+             verified = COALESCE(?, verified),
+             language = COALESCE(?, language),
+             preferred_insurer = COALESCE(?, preferred_insurer),
+             physio_preference = COALESCE(?, physio_preference),
+             updated_at = CURRENT_TIMESTAMP`,
+          [
+            phone, region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null, preferred_insurer ?? null, physio_preference ?? null,
+            region ?? null, appt_preference ?? null, patient_id ?? null, verifiedValue, language ?? null, preferred_insurer ?? null, physio_preference ?? null,
+          ],
+          (err) => (err ? rej(err) : res())
+        );
+      });
+    }
   }
 
   return DatabaseManager;
@@ -1357,5 +1413,174 @@ describe('physio gender preference funnel — live data', () => {
       // At least one type should exist across sampled practitioners
       expect(typesByPractitioner.some(types => types.length > 0)).toBe(true);
     }
+  }, 120000);
+});
+
+// =============================================================================
+// 13. Gender-funnel handler coverage across BOOK_SOONEST / BOOK_SPECIFIC_DATE
+//     (skipCategory:true — gender is the only funnel question in these two
+//     flows) + patient_state persistence: picked up on a brand-new session,
+//     and amendable via the "same preference?" shortcut's "change" path.
+//     BOOK_SPECIFIC_PHYSIO's gender+category path already has dedicated live
+//     coverage above and extensive mocked coverage in chatbot.integration
+//     .test.js — this block focuses on the two flows and the cross-session
+//     persistence behavior that weren't exercised live yet.
+// =============================================================================
+describe('physio preference funnel — live handler + persistence coverage', () => {
+  let engine, db, sm;
+  let liveApptTypeName = null; // real type name offered by multiple practitioners
+  let liveApptTypePractitioners = []; // real practitioners offering that type
+
+  beforeAll(async () => {
+    if (!LIVE) return;
+    db = new DatabaseManager(); await db.initialize();
+    sm = new SessionManager(db); await sm.initialize();
+    engine = new ChatbotEngine();
+    engine.sessionManager = sm; // real ClinikoAPI stays on engine — live HTTP calls
+
+    const groups = cachedPractitioners || await hk(() => api.getPractitionersByClinic());
+    const allRawTypes = cachedRawTypes || await hk(() => getAllAppointmentTypesForAllPractitioners(api, groups));
+    const nameCounts = new Map();
+    for (const t of allRawTypes || []) {
+      if (!t?.name || /UWC/i.test(t.name)) continue;
+      nameCounts.set(t.name, (nameCounts.get(t.name) || 0) + 1);
+    }
+    liveApptTypeName = [...nameCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    if (liveApptTypeName) {
+      liveApptTypePractitioners = await hk(() => getPractitionersForTypeName(groups, api, liveApptTypeName));
+    }
+  }, 90000);
+
+  afterAll(() => {
+    if (!LIVE) return;
+    if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
+    db.close();
+  });
+
+  function newPhone() {
+    return `+8529${Math.floor(1000000 + Math.random() * 8999999)}`;
+  }
+
+  async function seedSpecificDateAtChoosePhysio(phone) {
+    const id = await db.createSession(phone, null, 30);
+    await db.updateSession(id, {
+      verification_status: 'verified',
+      verified: 1,
+      conversation_state: 'BOOK_SPECIFIC_DATE',
+      data: JSON.stringify({
+        email: 'live-test@example.com',
+        selection_step: 'choose_physio',
+        selected_date: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+        selected_appt_type: { name: liveApptTypeName },
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
+      }),
+    });
+    return db.getSession(id);
+  }
+
+  async function seedSoonestAtChoosePhysio(phone) {
+    const id = await db.createSession(phone, null, 30);
+    await db.updateSession(id, {
+      verification_status: 'verified',
+      verified: 1,
+      conversation_state: 'BOOK_SOONEST',
+      data: JSON.stringify({
+        email: 'live-test@example.com',
+        selection_step: 'choose_physio',
+        selected_appt_type: { name: liveApptTypeName },
+        funnel_catalogue: [{}], // pre-seeded non-empty so the handler skips rebuilding it
+        // handleBookSoonest's choose_physio step (unlike Specific-Date/Specific-Physio)
+        // doesn't lazily fetch practitioners itself — it expects the prior choose_type
+        // step to have already populated this. Seed it with the real live set directly.
+        practitioner_list: liveApptTypePractitioners,
+        practitioner_page: 0,
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
+      }),
+    });
+    return db.getSession(id);
+  }
+
+  maybeIt('BOOK_SPECIFIC_DATE: male / female / no-preference each complete the funnel and render a physio list', async () => {
+    if (!liveApptTypeName) { console.warn('[live] no real appointment type name found — skipping'); return; }
+    for (const choice of ['1', '2', '3']) {
+      const session = await seedSpecificDateAtChoosePhysio(newPhone());
+      const genderReply = await hk(() => engine.handleBookSpecificDate(session, ''));
+      expect(String(genderReply)).toMatch(/male|female|no preference/i);
+      const s2 = await db.getSession(session.id);
+      const listReply = await hk(() => engine.handleBookSpecificDate(s2, choice));
+      const finalData = JSON.parse((await db.getSession(session.id)).data || '{}');
+      // skipCategory:true means gender is the only question — must be 'done' in one turn
+      expect(finalData.physio_funnel_step).toBe('done');
+      const names = [...String(listReply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+      expect(names.length).toBeGreaterThan(0);
+    }
+  }, 120000);
+
+  maybeIt('BOOK_SOONEST: male / female / no-preference each complete the funnel and render a physio list', async () => {
+    if (!liveApptTypeName) { console.warn('[live] no real appointment type name found — skipping'); return; }
+    for (const choice of ['1', '2', '3']) {
+      const session = await seedSoonestAtChoosePhysio(newPhone());
+      const genderReply = await hk(() => engine.handleBookSoonest(session, ''));
+      expect(String(genderReply)).toMatch(/male|female|no preference/i);
+      const s2 = await db.getSession(session.id);
+      const listReply = await hk(() => engine.handleBookSoonest(s2, choice));
+      const finalData = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(finalData.physio_funnel_step).toBe('done');
+      const names = [...String(listReply).matchAll(/^[1-9]\d*\.\s+(.+)$/gm)].map(m => m[1].trim());
+      expect(names.length).toBeGreaterThan(0);
+    }
+  }, 120000);
+
+  maybeIt('a saved physio_preference is picked up as a shortcut on a brand-new session, and "change" amends it for good', async () => {
+    if (!liveApptTypeName) { console.warn('[live] no real appointment type name found — skipping'); return; }
+    const phone = newPhone();
+
+    // Turn 1 (first-ever session for this phone) — no saved pref, straight to gender question.
+    const session1 = await seedSpecificDateAtChoosePhysio(phone);
+    const firstReply = await hk(() => engine.handleBookSpecificDate(session1, ''));
+    expect(String(firstReply)).toMatch(/male|female|no preference/i);
+    expect(String(firstReply)).not.toMatch(/last time/i);
+
+    // Answer Male — completes the (skipCategory) funnel and persists physio_preference.
+    const s1b = await db.getSession(session1.id);
+    await hk(() => engine.handleBookSpecificDate(s1b, '1'));
+    const ps1 = await db.getPatientState(phone);
+    expect(ps1).toBeTruthy();
+    expect(JSON.parse(ps1.physio_preference)).toMatchObject({ gender: 'male' });
+
+    // Turn 2 — a genuinely new session for the same phone (not a resumed one).
+    // getOrCreateSession(forceNew) is the real pickup path: it loads patient_state
+    // and merges physio_preference into the new session's context.
+    const session2 = await sm.getOrCreateSession(phone, true);
+    expect(session2.context?.physio_preference).toMatchObject({ gender: 'male' });
+    await db.updateSession(session2.id, {
+      conversation_state: 'BOOK_SPECIFIC_DATE',
+      data: JSON.stringify({
+        email: 'live-test@example.com',
+        selection_step: 'choose_physio',
+        selected_date: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+        selected_appt_type: { name: liveApptTypeName },
+        navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
+      }),
+    });
+    const session2b = await db.getSession(session2.id);
+    const shortcutReply = await hk(() => engine.handleBookSpecificDate(session2b, ''));
+    expect(String(shortcutReply)).toMatch(/last time/i);
+    expect(String(shortcutReply)).toMatch(/male/i);
+
+    // "Change" instead of "yes" — must re-ask gender, not silently keep the old value.
+    const session2c = await db.getSession(session2.id);
+    const changeReply = await hk(() => engine.handleBookSpecificDate(session2c, 'change'));
+    expect(String(changeReply)).toMatch(/male|female|no preference/i);
+
+    // Answer Female this time — must overwrite, not merge with, the saved Male preference.
+    const session2d = await db.getSession(session2.id);
+    await hk(() => engine.handleBookSpecificDate(session2d, '2'));
+    const ps2 = await db.getPatientState(phone);
+    expect(JSON.parse(ps2.physio_preference)).toMatchObject({ gender: 'female' });
+
+    // Turn 3 — yet another new session must now pick up the amended (Female) value.
+    const session3 = await sm.getOrCreateSession(phone, true);
+    expect(session3.context?.physio_preference).toMatchObject({ gender: 'female' });
   }, 120000);
 });
