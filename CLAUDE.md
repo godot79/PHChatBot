@@ -49,6 +49,8 @@ Post-merge staging deploy verification (confirming the `chatbot-webhook-staging`
 - After dev + testing in the feature branch: merge it to `main` in the staging directory, then deploy that staging-directory `main` to the `chatbot-webhook-staging` Cloud Run service.
 - Once the staging deploy is confirmed working: push the staging directory's `main` upstream to `origin/main`.
 - This (`PHChatBot`) directory is deploy-only for production: `git pull` from upstream, then deploy that pulled state to the `chatbot-webhook` (prod) service with no further changes made here.
+- `~/CodingProjects/PHChatBotSG` is deploy-only for the Singapore production number, mirroring `PHChatBot` exactly: `git pull` from upstream, then deploy that pulled state to the `chatbot-webhook-sg` Cloud Run service with no further changes made here. Its `.env` carries SG-specific WhatsApp credentials (`WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_WEBHOOK_SECRET`) — gitignored, never touched by `git pull`, must not be copied from HK's `.env`.
+- **HK prod (`chatbot-webhook`) and SG prod (`chatbot-webhook-sg`) must always be deployed from the same commit.** Never push a fix to one without deploying the identical commit to the other in the same session — check `git log -1` in both `PHChatBot` and `PHChatBotSG` match before considering a prod push complete. After any prod deploy to either service, tag the released commit (e.g. `prod-YYYY-MM-DD`) and push the tag, so both services' released version is always identifiable later.
 
 ## Repo review mode
 When asked to review the repo:
