@@ -1325,7 +1325,7 @@ describe('physio gender preference funnel — live data', () => {
     for (const p of sample) {
       const types = await hk(() => api.getAppointmentTypes({ practitioner_id: p.id }));
       expect(Array.isArray(types)).toBe(true);
-      const categories = [...new Set(types.map(t => parseApptCategory(t.name)).filter(Boolean))];
+      const categories = [...new Set(types.map(t => parseApptCategory(t.category).service).filter(Boolean))];
       console.log(`[live] ${p.first_name} ${p.last_name}: ${types.length} types, categories: ${categories.join(', ') || '(none parsed)'}`);
       // Each type must have at least a name
       for (const t of types) {
@@ -1351,7 +1351,7 @@ describe('physio gender preference funnel — live data', () => {
         p => api.getAppointmentTypes({ practitioner_id: p.id })
       ));
       const categorySet = new Set(
-        typesByPractitioner.flat().map(t => parseApptCategory(t.name)).filter(Boolean)
+        typesByPractitioner.flat().map(t => parseApptCategory(t.category).service).filter(Boolean)
       );
       console.log(`[live] ${gender} filter: ${filtered.length}/${allPractitioners.length} practitioners, sample categories: ${[...categorySet].join(', ') || '(none parsed)'}`);
       // At least one type should exist across sampled practitioners
