@@ -1324,9 +1324,24 @@ describe('physio gender preference funnel — live data', () => {
 
   beforeAll(async () => {
     if (!LIVE) return;
+    // Same convention as the "ClinikoAPI caching" block above: several
+    // preceding describe blocks in this file (burst/concurrent-load tests)
+    // deliberately hammer Cliniko and can leave the account still
+    // rate-limited when this block starts. Poll for real recovery instead
+    // of guessing a fixed cooldown — confirmed necessary: this block's tests
+    // pass cleanly in isolation but flaked as part of the full-file run.
+    await waitForClinikoRecovery();
     const groups = await hk(() => api.getPractitionersByClinic());
     allPractitioners = groups.flatMap(g => g.practitioners);
-  }, 60000);
+  }, 130000);
+
+  // Same reasoning as the handler+persistence block below: the beforeAll check
+  // only covers state at block start, and this block's own appointment-type
+  // fetch tests can retrip the limit against each other mid-block.
+  beforeEach(async () => {
+    if (!LIVE) return;
+    await waitForClinikoRecovery();
+  }, 130000);
 
   maybeIt('every practitioner title field is recognised or null (no unknown values)', async () => {
     const KNOWN_TITLES = new Set(['Mr', 'Ms', 'Miss', 'Mrs', 'Dr', 'Prof', null, undefined, '']);
@@ -1433,6 +1448,13 @@ describe('physio preference funnel — live handler + persistence coverage', () 
 
   beforeAll(async () => {
     if (!LIVE) return;
+    // Same convention as "ClinikoAPI caching" / "physio gender preference
+    // funnel" above — this block runs late in the file, after several
+    // describe blocks that deliberately hammer Cliniko. Poll for real
+    // recovery instead of guessing a fixed cooldown; confirmed necessary
+    // (all tests here pass in isolation but 4 flaked as part of the full run).
+    await waitForClinikoRecovery();
+
     db = new DatabaseManager(); await db.initialize();
     sm = new SessionManager(db); await sm.initialize();
     engine = new ChatbotEngine();
@@ -1449,13 +1471,25 @@ describe('physio preference funnel — live handler + persistence coverage', () 
     if (liveApptTypeName) {
       liveApptTypePractitioners = await hk(() => getPractitionersForTypeName(groups, api, liveApptTypeName));
     }
-  }, 90000);
+  }, 150000);
 
   afterAll(() => {
     if (!LIVE) return;
     if (sm.cleanupInterval) clearInterval(sm.cleanupInterval);
     db.close();
   });
+
+  // The beforeAll recovery check only covers the state at block start — this
+  // block's own tests each drive multiple real practitioner sweeps (3 gender
+  // choices x 2 flows, then the persistence round-trip), which can retrip the
+  // account's rate limit against each other before the block finishes.
+  // Confirmed live: without a per-test check, 3/3 tests in this block failed
+  // when run after the rest of the file despite the beforeAll wait already
+  // passing. Poll again before each test, same measurement-based convention.
+  beforeEach(async () => {
+    if (!LIVE) return;
+    await waitForClinikoRecovery();
+  }, 130000);
 
   function newPhone() {
     return `+8529${Math.floor(1000000 + Math.random() * 8999999)}`;
