@@ -16,6 +16,7 @@ Production repo: Cloud Run WhatsApp booking bot with Meta webhooks and Cliniko i
 - Never make unrelated improvements.
 - When the user has already answered prior uncertainty questions, do not re-ask them. Convert confirmed answers into the smallest concrete next action.
 - At the start of each session working in this repo, check the `project-deferred-items` memory for open/known-but-deferred issues before starting new work — surface anything relevant rather than waiting to be asked.
+- After every commit in this repo, update the `project-branch-health` memory (commit/tip, test status, what changed, what's still pending) before ending the turn — do not batch this up for later or wait to be asked.
 
 ## How to investigate a suspected bug (do not guess)
 Never diagnose from a symptom alone ("tests are flaky," "this looks like network flakiness," "add a retry"). Measure the actual behavior first, form a hypothesis from the data, calibrate a fix against real numbers, then verify the fix with the same measurement method that found the problem. Guessing-then-patching is not acceptable even if the patch happens to help.
