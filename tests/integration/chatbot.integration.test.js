@@ -3438,6 +3438,7 @@ describe('Booking menu and flow coverage', () => {
         selected_date: candidateIso,
         selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
         navigation_chain: [],
+        physio_funnel_step: 'done',
       });
       const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
       expect(reply).toMatch(/choose a physio/i);
@@ -3613,6 +3614,7 @@ describe('Booking menu and flow coverage', () => {
         practitioner_list: AMBIGUOUS_PHYSIOS,
         pending_nlu_slots: { physio: { value: 'Phy', confidence: 0.99 } },
         navigation_chain: [],
+        physio_funnel_step: 'done',
       });
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toMatch(/choose a physio/i);
@@ -3640,6 +3642,7 @@ describe('Booking menu and flow coverage', () => {
         selection_step: 'confirm_physio_suggestion',
         suggested_physio: UNIQUE_PHYSIO,
         navigation_chain: [{ selection_step: 'confirm_physio_suggestion', had_multiple_options: true, auto: false }],
+        physio_funnel_step: 'done',
       });
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'change_physio'));
       expect(reply).toMatch(/choose a physio/i);
