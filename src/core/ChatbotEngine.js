@@ -2071,6 +2071,22 @@ async handleMessageEnvelope(message, phoneNumber) {
     ]);
   }
 
+  /**
+   * Phase 8: shared mid-flow "restart" check for the three BOOK_SPECIFIC_*
+   * mid-flow-correction call sites. Called with the NLU result already
+   * classified there (no extra API call) — if the user wants to abandon
+   * the current funnel entirely rather than correct one slot, clears the
+   * funnel and returns to the booking-method menu, same as the existing
+   * literal 'menu' branch each of those handlers already has.
+   * Returns the envelope to send, or null if this wasn't a restart.
+   */
+  async _maybeHandleMidflowRestart(session, result, stateConst) {
+    if (!result || result.intent !== 'restart_menu' || !NluRouter.isConfident(result)) return null;
+    this.logger.analyticsEvent({ event: 'nlu_midflow_restart', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: stateConst });
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOKING_METHOD_OPTIONS, data: null });
+    return await this.goToInteractiveMenu(session);
+  }
+
   async _handleNoSlotsDecision(session, data, stateConst, backHandler, incomingText) {
     const text = (incomingText || '').trim().toLowerCase();
     if (!data.no_slots_prompt) return null;
@@ -3723,6 +3739,8 @@ if (/^p(rev)?$/i.test(text)) {
     const isStepControlToken = (t) => t === '' || /^\d+$/.test(t) || /^m(ore)?$|^next$/i.test(t) || /^p(rev)?$/i.test(t);
     if (data.selected_date && MIDFLOW_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
       const result = await NluRouter.classifyIntent(raw, this.STATES.BOOK_SPECIFIC_DATE, { existingSlots: { date: data.selected_date } });
+      const restartReply = await this._maybeHandleMidflowRestart(session, result, this.STATES.BOOK_SPECIFIC_DATE);
+      if (restartReply) return restartReply;
       const dateSlot = result.slots && result.slots.date;
       if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && dateSlot && dateSlot.value && dateSlot.value !== data.selected_date
           && (NluRouter.isSlotAutofillable(dateSlot) || NluRouter.isSlotSuggestable(dateSlot))) {
@@ -3756,6 +3774,8 @@ if (/^p(rev)?$/i.test(text)) {
     if (data.selected_physio && DATE_FUNNEL_PHYSIO_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
       const currentPhysioName = normName(getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : (data.selected_physio.display_name || data.selected_physio.name || ''));
       const result = await NluRouter.classifyIntent(raw, this.STATES.BOOK_SPECIFIC_DATE, { existingSlots: { physio: currentPhysioName } });
+      const restartReply = await this._maybeHandleMidflowRestart(session, result, this.STATES.BOOK_SPECIFIC_DATE);
+      if (restartReply) return restartReply;
       const physioSlot = result.slots && result.slots.physio;
       if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && physioSlot && physioSlot.value && normName(physioSlot.value) !== currentPhysioName
           && (NluRouter.isSlotAutofillable(physioSlot) || NluRouter.isSlotSuggestable(physioSlot))) {
@@ -4369,6 +4389,8 @@ if (/^p(rev)?$/i.test(text)) {
     if (data.selected_physio && MIDFLOW_PHYSIO_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
       const currentPhysioName = normName(getPractitionerDisplayName ? getPractitionerDisplayName(data.selected_physio) : (data.selected_physio.display_name || data.selected_physio.name || ''));
       const result = await NluRouter.classifyIntent(textRaw, this.STATES.BOOK_SPECIFIC_PHYSIO, { existingSlots: { physio: currentPhysioName } });
+      const restartReply = await this._maybeHandleMidflowRestart(session, result, this.STATES.BOOK_SPECIFIC_PHYSIO);
+      if (restartReply) return restartReply;
       const physioSlot = result.slots && result.slots.physio;
       if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && physioSlot && physioSlot.value && normName(physioSlot.value) !== currentPhysioName
           && (NluRouter.isSlotAutofillable(physioSlot) || NluRouter.isSlotSuggestable(physioSlot))) {
@@ -4829,6 +4851,8 @@ if (/^p(rev)?$/i.test(text)) {
     if (data.selected_appt_type && MIDFLOW_TYPE_CORRECTION_STEPS.includes(data.selection_step) && !isStepControlToken(text)) {
       const currentTypeNorm = normName(data.selected_appt_type.name || '');
       const result = await NluRouter.classifyIntent(textRaw, this.STATES.BOOK_SPECIFIC_CLINIC, { existingSlots: { appointmentType: currentTypeNorm } });
+      const restartReply = await this._maybeHandleMidflowRestart(session, result, this.STATES.BOOK_SPECIFIC_CLINIC);
+      if (restartReply) return restartReply;
       const typeSlot = result.slots && result.slots.appointmentType;
       if (NluRouter.MIDFLOW_CORRECTION_INTENTS.includes(result.intent) && typeSlot && typeSlot.value && normName(typeSlot.value) !== currentTypeNorm
           && (NluRouter.isSlotAutofillable(typeSlot) || NluRouter.isSlotSuggestable(typeSlot))) {
@@ -5666,6 +5690,57 @@ if (/^p(rev)?$/i.test(text)) {
       if (!data.last_name)  return buttons(t(language, 'registerFlow.askLastName'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
       if (!data.email)      return buttons(t(language, 'registerFlow.askEmail'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
       if (!data.dob)        return buttons(t(language, 'registerFlow.askDob'), [{ id: '0', title: t(language, 'registerFlow.backButton') }]);
+    }
+
+    // Phase 8: duplicate-registration guard. Once all 4 fields are in,
+    // search Cliniko by first name + last name + DOB before creating a new
+    // patient record — Cliniko's /patients search has no phone filter
+    // (checked against the public API docs), so name+DOB is the best
+    // available signal. Runs once per registration attempt; a "No, continue"
+    // reply sets duplicate_check_confirmed so it never re-checks.
+    if (!data.duplicate_check_confirmed) {
+      const DUPLICATE_PROMPT = buttons(
+        t(language, 'registerFlow.duplicateFoundPrompt'),
+        [
+          { id: '1', title: t(language, 'registerFlow.duplicateYesRegistered') },
+          { id: '2', title: t(language, 'registerFlow.duplicateNoContinue') },
+        ]
+      );
+      if (data.duplicate_check_prompted) {
+        if (text === '1') {
+          // "Yes, I'm already registered" — hand off to the existing
+          // email+DOB verify flow instead of creating a second record.
+          await this.sessionManager.updateSession(session.id, {
+            conversation_state: this.STATES.VERIFY,
+            data: JSON.stringify({ awaiting_email: true })
+          });
+          return t(language, 'verifyFlow.restartEnterEmail');
+        }
+        if (text === '2') {
+          delete data.duplicate_check_prompted;
+          data.duplicate_check_confirmed = true;
+          await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+        } else {
+          return DUPLICATE_PROMPT;
+        }
+      } else {
+        let matches = [];
+        try {
+          matches = await this.clinikoAPI.findPatientsByNameAndDob(data.first_name, data.last_name, data.dob);
+        } catch (e) {
+          // Fail open — an outage here must not block a genuine new patient
+          // from registering.
+          log.warn('Duplicate-check lookup failed, proceeding without it', { err: e?.message || e });
+          matches = [];
+        }
+        if (Array.isArray(matches) && matches.length > 0) {
+          data.duplicate_check_prompted = true;
+          await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+          return DUPLICATE_PROMPT;
+        }
+        data.duplicate_check_confirmed = true;
+        await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      }
     }
 
     // All fields collected → register

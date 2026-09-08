@@ -369,6 +369,7 @@ function resetCliniko () {
   ClinikoAPI.prototype.getAppointmentTypeById       = jest.fn().mockResolvedValue({ id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' });
   ClinikoAPI.prototype.getAvailableSlotsByBusinessAndDate = jest.fn().mockResolvedValue([SOONEST_SLOT]);
   ClinikoAPI.prototype.registerNewPatient           = jest.fn().mockResolvedValue({ id: 'NEW-PATIENT-DEFAULT' });
+  ClinikoAPI.prototype.findPatientsByNameAndDob     = jest.fn().mockResolvedValue([]);
 }
 
 function resetWhatsApp () {
@@ -3449,6 +3450,52 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── Phase 7 gap fix — mid-flow physio correction inside handleBookSpecificDate
+  // (choose_clinic, the step after choose_physio in this funnel's order) ─────────
+  describe('BOOK_SPECIFIC_DATE — mid-flow physio correction at choose_clinic (Phase 7 gap fix)', () => {
+    function firstCandidateDate() {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() + 1);
+      while (d.getDay() === 0) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    function ymdLocal(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    const ORIGINAL_PHYSIO = { id: 'PRAC-010', first_name: 'Zoe', last_name: 'Zephyr' };
+    const baseData = {
+      selection_step: 'choose_clinic',
+      selected_date: ymdLocal(firstCandidateDate()),
+      selected_physio: ORIGINAL_PHYSIO,
+      selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
+      navigation_chain: [
+        { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+        { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+      ],
+    };
+
+    // Phase 8: mid-flow restart. This handler's earlier date-correction block
+    // (MIDFLOW_CORRECTION_STEPS includes 'choose_clinic' too) also gates on
+    // this same step and calls classifyIntent first — queue a non-restart
+    // reply for that call, then the restart reply for this block's own call.
+    test('a high-confidence restart_menu classification at choose_clinic clears the funnel and returns to the booking-method menu', async () => {
+      NluRouter.classifyIntent
+        .mockResolvedValueOnce({ intent: null, slots: {}, confidence: 0 })
+        .mockResolvedValueOnce({ intent: 'restart_menu', slots: {}, confidence: 0.9 });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'actually never mind, forget this, start over'));
+      expect(reply).not.toMatch(/choose a clinic/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_physio).toBeUndefined();
+    });
+  });
+
   // ─── Phase 6 — mid-flow date correction (BOOK_SPECIFIC_DATE, past choose_date) ─
   describe('BOOK_SPECIFIC_DATE — mid-flow date correction (Phase 6)', () => {
     const config = require('../../src/config/anthropic.js');
@@ -3548,6 +3595,30 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       expect(d.selected_date).toBe(secondIso);
       expect(d.selection_step).toBe('choose_type');
+    });
+
+    // Phase 8: mid-flow restart — "actually never mind, start over" at any
+    // of the correction-listener steps clears the whole funnel and returns
+    // to the booking-method menu, same as the existing literal 'menu' text.
+    test('a high-confidence restart_menu classification clears the funnel and returns to the booking-method menu', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'restart_menu', slots: {}, confidence: 0.9 });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'actually never mind, forget this, start over'));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBeUndefined();
+    });
+
+    test('a low-confidence restart_menu classification does not clear the funnel', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'restart_menu', slots: {}, confidence: 0.2 });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'hmm not sure'));
+      expect(reply).toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_date).toBe(firstIso);
     });
   });
 
@@ -3734,6 +3805,18 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       expect(String(d.selected_physio?.id)).toBe('PRAC-011');
       expect(d.selection_step).toBe('choose_type');
+    });
+
+    // Phase 8: mid-flow restart.
+    test('a high-confidence restart_menu classification clears the funnel and returns to the booking-method menu', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'restart_menu', slots: {}, confidence: 0.9 });
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', baseData);
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'actually never mind, forget this, start over'));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_physio).toBeUndefined();
     });
   });
 
@@ -5295,6 +5378,19 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
       expect(appliedIds).toContain('AT-002');
+    });
+
+    // Phase 8: mid-flow restart.
+    test('a high-confidence restart_menu classification clears the funnel and returns to the booking-method menu', async () => {
+      mockTwoTypesTwoPhysios();
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'restart_menu', slots: {}, confidence: 0.9 });
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', { ...baseData, practitioner_list: [PHYSIO_1, PHYSIO_2] });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, 'actually never mind, forget this, start over'));
+      expect(reply).not.toMatch(/choose a physio/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('BOOKING_METHOD_OPTIONS');
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type).toBeUndefined();
     });
   });
 
@@ -6907,6 +7003,69 @@ describe('Dead-end standardization', () => {
       const analyticsSpy = jest.spyOn(engine.logger, 'analyticsEvent'); analyticsSpy.mockClear();
       await callHandler(engine, ['handleRegisterPatientState'], session, 'not a date');
       expect(analyticsSpy).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'registration_completed' }));
+    });
+  });
+
+  // ─── Register new patient — duplicate-registration guard (Phase 8) ───────────
+  // Cliniko's /patients search has no phone filter, so name+DOB is the check —
+  // see findPatientsByNameAndDob in ClinikoAPI.js.
+  describe('Register new patient — duplicate-registration guard (Phase 8)', () => {
+    test('no name+DOB match → registration proceeds straight through, no prompt shown', async () => {
+      engine.clinikoAPI.findPatientsByNameAndDob.mockResolvedValueOnce([]);
+      engine.clinikoAPI.registerNewPatient.mockResolvedValueOnce({ id: 'NEW-PATIENT-010' });
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '15 03 1990');
+      expect(reply).toMatch(/registered/i);
+      expect(reply).not.toMatch(/already registered/i);
+      expect(engine.clinikoAPI.findPatientsByNameAndDob).toHaveBeenCalledWith('Jane', 'Tan', '1990-03-15');
+      expect(engine.clinikoAPI.registerNewPatient).toHaveBeenCalled();
+    });
+
+    test('a name+DOB match shows the duplicate prompt instead of registering immediately', async () => {
+      engine.clinikoAPI.findPatientsByNameAndDob.mockResolvedValueOnce([{ id: 'EXISTING-001' }]);
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '15 03 1990');
+      expect(reply).toMatch(/already registered/i);
+      expect(engine.clinikoAPI.registerNewPatient).not.toHaveBeenCalled();
+    });
+
+    test('"Yes, I\'m registered" (reply 1) routes to the verify flow instead of creating a record', async () => {
+      const session = await seedAt('REGISTER_PATIENT', {
+        first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com', dob: '1990-03-15', duplicate_check_prompted: true,
+      });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '1');
+      expect(reply).toMatch(/email/i);
+      expect(engine.clinikoAPI.registerNewPatient).not.toHaveBeenCalled();
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('VERIFY');
+    });
+
+    test('"No, continue" (reply 2) proceeds with registration', async () => {
+      engine.clinikoAPI.registerNewPatient.mockResolvedValueOnce({ id: 'NEW-PATIENT-011' });
+      const session = await seedAt('REGISTER_PATIENT', {
+        first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com', dob: '1990-03-15', duplicate_check_prompted: true,
+      });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '2');
+      expect(reply).toMatch(/registered/i);
+      expect(engine.clinikoAPI.registerNewPatient).toHaveBeenCalled();
+    });
+
+    test('an unrecognised reply while the duplicate prompt is showing just re-shows the prompt', async () => {
+      const session = await seedAt('REGISTER_PATIENT', {
+        first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com', dob: '1990-03-15', duplicate_check_prompted: true,
+      });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, 'huh?');
+      expect(reply).toMatch(/already registered/i);
+      expect(engine.clinikoAPI.registerNewPatient).not.toHaveBeenCalled();
+    });
+
+    test('a Cliniko lookup failure fails open — registration proceeds without the check', async () => {
+      engine.clinikoAPI.findPatientsByNameAndDob.mockRejectedValueOnce(new Error('cliniko down'));
+      engine.clinikoAPI.registerNewPatient.mockResolvedValueOnce({ id: 'NEW-PATIENT-012' });
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '15 03 1990');
+      expect(reply).toMatch(/registered/i);
+      expect(engine.clinikoAPI.registerNewPatient).toHaveBeenCalled();
     });
   });
 

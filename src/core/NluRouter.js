@@ -36,6 +36,14 @@ const KNOWN_INTENTS = [
   // tapping menu options 3/4.
   'view_fees',
   'view_locations',
+  // Phase 8: "actually, forget this, start over" said mid-funnel — wired
+  // only at the same mid-flow-correction call sites as
+  // MIDFLOW_CORRECTION_INTENTS below (BOOK_SPECIFIC_DATE/PHYSIO/CLINIC),
+  // gated the same way (only once past the first selection in that funnel).
+  // Deliberately NOT in MIDFLOW_CORRECTION_INTENTS — a restart clears the
+  // whole funnel and returns to the booking-method menu, it doesn't re-stash
+  // a slot value.
+  'restart_menu',
 ];
 
 // Phase 6: intents that still mean "the user is booking/adjusting a slot in
@@ -71,7 +79,7 @@ const TODAY_ISO = () => new Date().toISOString().slice(0, 10);
 // tell a genuine correction ("actually make it Thursday") from an
 // unrelated/ambiguous message instead of always extracting slots cold.
 function buildSystemPrompt(existingSlots) {
-  let prompt = `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan".`;
+  let prompt = `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan". Classify as "restart_menu" only when the user clearly wants to abandon the current booking selection entirely and start over (e.g. "actually never mind, let's start over", "cancel that, take me back to the menu") — not for a correction to one detail (that's a book_specific_* intent with a new slot value instead).`;
   if (existingSlots && Object.keys(existingSlots).length > 0) {
     const known = Object.entries(existingSlots).map(([k, v]) => `${k}=${v}`).join(', ');
     prompt += ` The user is already partway through booking with these selections already made: ${known}. Only extract a slot for one of these if the message clearly states a *different* value for it (a correction, e.g. "actually Thursday" or "no, Dr Chan instead") — otherwise omit that slot.`;

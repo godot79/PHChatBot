@@ -243,6 +243,9 @@ const STRINGS = {
       registrationSuccess: "✅ You've been registered!",
       registrationFailedFalsy: "Sorry, we couldn't complete registration right now.",
       registrationError: 'We hit an error while registering you. Please try again later.',
+      duplicateFoundPrompt: "We found an existing record matching this name and date of birth. Are you already registered with us?",
+      duplicateYesRegistered: "Yes, I'm registered",
+      duplicateNoContinue: 'No, continue registering',
     },
     listNav: {
       previousLabel: '← Previous',
@@ -483,6 +486,9 @@ const STRINGS = {
       registrationSuccess: '✅ 你已經登記成功！',
       registrationFailedFalsy: '唔好意思，而家未能完成登記。',
       registrationError: '登記時出咗少少問題，請遲啲再試。',
+      duplicateFoundPrompt: '我哋搵到一個同呢個名同出生日期相符嘅記錄。你係咪已經登記咗？',
+      duplicateYesRegistered: '係，我已經登記咗',
+      duplicateNoContinue: '唔係，繼續登記',
     },
     listNav: {
       previousLabel: '← 上一頁',
@@ -723,6 +729,9 @@ const STRINGS = {
       registrationSuccess: '✅ 您已注册成功！',
       registrationFailedFalsy: '抱歉，暂时无法完成注册。',
       registrationError: '注册时遇到了一些问题，请稍后再试。',
+      duplicateFoundPrompt: '我们找到一条与该姓名和出生日期相符的记录。您是否已经注册过？',
+      duplicateYesRegistered: '是的，我已注册',
+      duplicateNoContinue: '不是，继续注册',
     },
     listNav: {
       previousLabel: '← 上一页',
