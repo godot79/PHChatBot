@@ -1898,6 +1898,7 @@ describe('Booking menu and flow coverage', () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', {
         selection_step: 'choose_physio',
+        physio_funnel_step: 'done',
         selected_date: '2026-08-01',
         selected_appt_type: { name: 'Return Visit', ids: ['AT-001'], norm: 'return visit' },
         navigation_chain: [
@@ -2166,7 +2167,7 @@ describe('Booking menu and flow coverage', () => {
     // rendering only a "0. Back" row with no explanation and no way to retry.
     test('0 practitioners → no_slots_prompt shown instead of a bare "0. Back" dead end', async () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([]);
-      const session = await seedAt('BOOK_SPECIFIC_PHYSIO');
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' });
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toMatch(/no practitioners/i);
       expect(reply).toMatch(/try again/i);
@@ -3095,6 +3096,7 @@ describe('Booking menu and flow coverage', () => {
         selection_step: 'choose_type', appt_type_page: 0,
         appointment_type_list: TYPE_LIST_1,
         funnel_catalogue: [FUNNEL_CAT_1],
+        physio_funnel_step: 'done',
       });
       const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
       const row1Name = reply.match(/^1\.\s+(.+)$/m)[1].trim();
@@ -5359,7 +5361,7 @@ describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
       ]);
-      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'yue');
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'yue');
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
       expect(reply).not.toContain('Leo Choi');
@@ -5369,7 +5371,7 @@ describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
       ]);
-      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'zh');
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'zh');
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toContain(TRANSLATED_PHYSIO_ZH);
     });
@@ -5378,7 +5380,7 @@ describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [TRANSLATED_PHYSIO] },
       ]);
-      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'en');
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'en');
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toContain('Leo Choi');
       expect(reply).not.toContain(TRANSLATED_PHYSIO_ZH);
@@ -5388,7 +5390,7 @@ describe('Practitioner name translation (Phase 3c, yue/zh)', () => {
       engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [UNKNOWN_PHYSIO] },
       ]);
-      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {}, 'yue');
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', { physio_funnel_step: 'done' }, 'yue');
       const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
       expect(reply).toContain('Future Hire');
     });

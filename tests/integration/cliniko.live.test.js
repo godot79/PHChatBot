@@ -1341,11 +1341,15 @@ describe('physio gender preference funnel — live data', () => {
       // applyGenderFilter falls back to full list when nothing matches — should always be non-empty
       expect(filtered.length).toBeGreaterThan(0);
 
-      // Sample up to 3 practitioners to keep API calls manageable
+      // Sample up to 3 practitioners to keep API calls manageable. Goes
+      // through bulkAll, same as every real caller (fix/fanout-batching-
+      // consistency) — no documented reason exists for this funnel to bypass
+      // the shared throttle/pacing, so it doesn't.
       const sample = filtered.slice(0, 3);
-      const typesByPractitioner = await Promise.all(
-        sample.map(p => hk(() => api.getAppointmentTypes({ practitioner_id: p.id })))
-      );
+      const typesByPractitioner = await hk(() => bulkAll(
+        sample,
+        p => api.getAppointmentTypes({ practitioner_id: p.id })
+      ));
       const categorySet = new Set(
         typesByPractitioner.flat().map(t => parseApptCategory(t.name)).filter(Boolean)
       );
