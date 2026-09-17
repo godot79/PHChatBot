@@ -1,0 +1,74 @@
+[
+  {
+    "id": "handler_history_1",
+    "note": "touches handleBookHistory — 'book like last time' phrasing at BOOK_MANAGE_OPTIONS",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["can I book with the same physio as my last visit please"]
+  },
+  {
+    "id": "handler_history_2",
+    "note": "touches handleBookHistory — Cantonese phrasing, different wording",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["想同上次一樣嘅治療師再約"]
+  },
+  {
+    "id": "handler_soonest_1",
+    "note": "touches handleBookSoonest via book_soonest intent",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["what's the earliest slot you have available for physio?"]
+  },
+  {
+    "id": "handler_soonest_2",
+    "note": "touches handleBookSoonest via book_by_type routing (type named, no method decided)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["I need a clinical pilates session as soon as possible"]
+  },
+  {
+    "id": "handler_specific_date_1",
+    "note": "touches handleBookSpecificDate — date-only, no physio",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["do you have anything available this coming Saturday"]
+  },
+  {
+    "id": "handler_specific_date_2",
+    "note": "touches handleBookSpecificDate then a free-text type answer at choose_type (Phase 9 fix)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["can I get an appointment next Wednesday", "sports massage please"]
+  },
+  {
+    "id": "handler_specific_physio_1",
+    "note": "touches handleBookSpecificPhysio — physio-only, no date",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["I'd like to book with Jolinna Chan"]
+  },
+  {
+    "id": "handler_specific_physio_2",
+    "note": "touches handleBookSpecificPhysio then a free-text type answer at choose_type (Phase 9 fix)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["book me with Dickson please", "new patient assessment"]
+  },
+  {
+    "id": "handler_specific_clinic_1",
+    "note": "touches handleBookSpecificClinic — clinic name mentioned",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["can I book something at your Central clinic"]
+  },
+  {
+    "id": "handler_specific_clinic_2",
+    "note": "touches handleBookSpecificClinic — Quarry Bay, different phrasing",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["is there any availability at the Quarry Bay branch this week"]
+  },
+  {
+    "id": "handler_mixed_gibberish",
+    "note": "off-topic/gibberish control case across the same entry point, fail-closed check",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["asdkjf random keyboard mash 88221"]
+  },
+  {
+    "id": "handler_mixed_ambiguous",
+    "note": "genuinely ambiguous booking request with no clear method — should stay a safe generic match",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["can someone just fit me in whenever"]
+  }
+]
