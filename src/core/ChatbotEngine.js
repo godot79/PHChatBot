@@ -793,6 +793,23 @@ class ChatbotEngine {
   }
 
   /**
+   * SG-only: when the (name, category) collision fix produces two type-list
+   * entries with the same display name (e.g. "Physiotherapist" as both a real
+   * Physiotherapy type and a Sports Massage type), the patient can't tell them
+   * apart in the WhatsApp list. Append "(<service>)" to each colliding entry,
+   * using the same Cliniko category data the bucketing fix already relies on.
+   */
+  _disambiguateSGTypeNames(list) {
+    const nameCounts = new Map();
+    for (const entry of list) nameCounts.set(entry.name, (nameCounts.get(entry.name) || 0) + 1);
+    return list.map(entry => (
+      nameCounts.get(entry.name) > 1 && entry.service
+        ? { ...entry, name: `${entry.name} (${entry.service})` }
+        : entry
+    ));
+  }
+
+  /**
    * Returns the language code for this session, or 'en' if not set.
    * @param {object} session
    * @returns {string}
@@ -2297,26 +2314,29 @@ async handleMessageEnvelope(message, phoneNumber) {
         const physioId = String(data.selected_physio?.id || data.selected_physio);
         const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physioId });
 
-        const buckets = new Map(); // norm -> { displayName, entries: [{id, insurer}] }
+        const isSG = this._getSessionRegion(session) === 'SG';
+        const buckets = new Map(); // bucketKey -> { displayName, entries: [{id, insurer}] }
         for (const t of types || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
           const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
-          const { insurer } = parseApptCategory(t.category);
-          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
+          const { insurer, service } = parseApptCategory(t.category);
+          const bucketKey = isSG ? `${n} ${service || ''}` : n;
+          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+          buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
 
-        data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({
-            name: v.displayName,
-            norm_name: normName(v.displayName),
-            ids: v.entries.map(e => e.id),
-            entries: v.entries,
-          }))
-        );
+        let typeList = Array.from(buckets.values()).map(v => ({
+          name: v.displayName,
+          norm_name: normName(v.displayName),
+          ids: v.entries.map(e => e.id),
+          entries: v.entries,
+          service: v.service,
+        }));
+        if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
+        data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
         data.appt_type_name_to_ids_norm = Object.fromEntries(
           (data.appointment_type_list || []).map(x => [x.norm_name, x.ids])
@@ -3031,18 +3051,22 @@ if (/^p(rev)?$/i.test(text)) {
       const groups = await this.clinikoAPI.getPractitionersByClinic();
       const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
       data.funnel_catalogue = buildFunnelCatalogue(allTypes);
-      const buckets = new Map(); // norm -> { displayName, ids:Set }
+      const isSG = this._getSessionRegion(session) === 'SG';
+      const buckets = new Map(); // bucketKey -> { displayName, ids:Set }
       for (const t of allTypes || []) {
         if (!t || !t.name) continue;
         if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
         const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
         const n = normName(display);
-        if (!buckets.has(n)) buckets.set(n, { displayName: display, ids: new Set() });
-        buckets.get(n).ids.add(String(t.id));
+        const { service } = parseApptCategory(t.category);
+        const bucketKey = isSG ? `${n} ${service || ''}` : n;
+        if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, ids: new Set(), service });
+        buckets.get(bucketKey).ids.add(String(t.id));
       }
-      const list = Array.from(buckets.values())
-        .map(b => ({ name: b.displayName, id: Array.from(b.ids)[0], norm_name: normName(b.displayName) }))
+      let list = Array.from(buckets.values())
+        .map(b => ({ name: b.displayName, id: Array.from(b.ids)[0], norm_name: normName(b.displayName), service: b.service }))
         .sort((a, b) => a.name.localeCompare(b.name));
+      if (isSG) list = this._disambiguateSGTypeNames(list);
       const map = {}; for (const [n, b] of buckets.entries()) map[n] = Array.from(b.ids);
       return { list, map };
     };
@@ -3581,19 +3605,22 @@ if (/^p(rev)?$/i.test(text)) {
           if (!Array.isArray(data.appointment_type_list)) {
             const groups = await this.clinikoAPI.getPractitionersByClinic();
             const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+            const isSG = this._getSessionRegion(session) === 'SG';
             const buckets = new Map();
             for (const t of allTypes || []) {
               if (!t || !t.name) continue;
               if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
               const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
               const n = normName(display);
-              if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
-              const { insurer } = parseApptCategory(t.category);
-              buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
+              const { insurer, service } = parseApptCategory(t.category);
+              const bucketKey = isSG ? `${n} ${service || ''}` : n;
+              if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+              buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
             }
-            data.appointment_type_list = Array.from(buckets.values())
-              .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
-              data.appointment_type_list = sortAppointmentTypes(data.appointment_type_list);
+            let typeList = Array.from(buckets.values())
+              .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+            if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
+            data.appointment_type_list = sortAppointmentTypes(typeList);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
           }
 
@@ -3652,19 +3679,22 @@ if (/^p(rev)?$/i.test(text)) {
       if (!Array.isArray(data.appointment_type_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+        const isSG = this._getSessionRegion(session) === 'SG';
         const buckets = new Map();
         for (const t of allTypes || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
-          const { insurer } = parseApptCategory(t.category);
-          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
+          const { insurer, service } = parseApptCategory(t.category);
+          const bucketKey = isSG ? `${n} ${service || ''}` : n;
+          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+          buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
-        data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
-        );
+        let typeList = Array.from(buckets.values())
+          .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+        if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
+        data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
       }
@@ -4095,19 +4125,22 @@ if (/^p(rev)?$/i.test(text)) {
     if (data.selection_step === 'choose_type') {
       if (!Array.isArray(data.appointment_type_list)) {
         const apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(data.selected_physio.id) });
+        const isSG = this._getSessionRegion(session) === 'SG';
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
           const n = normName(display);
-          if (!buckets.has(n)) buckets.set(n, { displayName: display, entries: [] });
-          const { insurer } = parseApptCategory(t.category);
-          buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
+          const { insurer, service } = parseApptCategory(t.category);
+          const bucketKey = isSG ? `${n} ${service || ''}` : n;
+          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+          buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
-        data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries }))
-        );
+        let typeList = Array.from(buckets.values())
+          .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+        if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
+        data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO });
       }
@@ -4469,20 +4502,23 @@ if (/^p(rev)?$/i.test(text)) {
           p => this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(p.id) })
         );
         hadClinicTypeFailure = !!clinicTypesByPractitioner._partial || clinicTypesByPractitioner.some(types => types && types._partial);
+        const isSG = this._getSessionRegion(session) === 'SG';
         for (const types of clinicTypesByPractitioner) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
             const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
             const n = normName(display);
-            if (!buckets.has(n)) buckets.set(n, { display, entries: [] });
-            const { insurer } = parseApptCategory(t.category);
-            buckets.get(n).entries.push({ id: String(t.id), insurer: insurer || null });
+            const { insurer, service } = parseApptCategory(t.category);
+            const bucketKey = isSG ? `${n} ${service || ''}` : n;
+            if (!buckets.has(bucketKey)) buckets.set(bucketKey, { display, entries: [], service });
+            buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
           }
         }
-        data.appointment_type_list = sortAppointmentTypes(
-          Array.from(buckets.values()).map(v => ({ name: v.display, norm_name: normName(v.display), ids: v.entries.map(e => e.id), entries: v.entries }))
-        );
+        let typeList = Array.from(buckets.values())
+          .map(v => ({ name: v.display, norm_name: normName(v.display), ids: v.entries.map(e => e.id), entries: v.entries, service: v.service }));
+        if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
+        data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
 
         const fwd = typeof planForward === 'function' ? planForward(data, 'choose_type', data.appointment_type_list.length, () => {
