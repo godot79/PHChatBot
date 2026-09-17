@@ -4937,6 +4937,139 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_SPECIFIC_DATE — NLU appointment-type slot (Phase 9) ────────────────
+  describe('BOOK_SPECIFIC_DATE — NLU appointment-type slot (Phase 9)', () => {
+    const config = require('../../src/config/anthropic.js');
+
+    const mockTwoTypesAtOnePhysio = () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+      ]);
+    };
+
+    test('high-confidence slot → auto-fills type, skips the type list entirely', async () => {
+      mockTwoTypesAtOnePhysio();
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        selected_date: '2026-08-01',
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('medium-confidence slot → shows a "did you mean" suggestion, does not auto-fill', async () => {
+      mockTwoTypesAtOnePhysio();
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        selected_date: '2026-08-01',
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: mid } },
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      expect(reply).toMatch(/return visit/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_type_suggestion');
+      expect(d.suggested_appt_type?.ids).toContain('AT-002');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('low-confidence slot → falls straight through to the unchanged type list', async () => {
+      mockTwoTypesAtOnePhysio();
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        selected_date: '2026-08-01',
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotSuggestThreshold - 0.01 } },
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('confirming a suggestion applies it, same as a manual selection', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'confirm_type_suggestion',
+        selected_date: '2026-08-01',
+        suggested_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+        navigation_chain: [
+          { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+          { selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false },
+        ],
+      });
+      await callHandler(engine, ['handleBookSpecificDate'], session, 'confirm_type');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.ids).toContain('AT-001');
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    test('declining a suggestion shows the normal type list, no type applied', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'confirm_type_suggestion',
+        selected_date: '2026-08-01',
+        suggested_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)',    norm: 'return visit (existing clients)',    ids: ['AT-002'] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [
+          { selection_step: 'choose_date', had_multiple_options: true, auto: false },
+          { selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false },
+        ],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'change_type'));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    // Reproduces the live-found bug: the entry message carries no type slot
+    // (so the list is already built and rendered by the time the user answers
+    // it), and the answer to THAT rendering is free text, not a number.
+    test('free-text answer to an already-rendered type list autofills, does not re-show the same menu', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_appointment', slots: { appointmentType: { value: 'return visit', confidence: 0.95 } }, confidence: 0.6 });
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_type',
+        selected_date: '2026-08-01',
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'], norm: 'initial 60 min visit (new clients)', entries: [{ id: 'AT-001', insurer: null }] },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)',    ids: ['AT-002'], norm: 'return visit (existing clients)',    entries: [{ id: 'AT-002', insurer: null }] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_date', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, 'physiotherapy return visit please'));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
+    });
+  });
+
   // ─── BOOK_SPECIFIC_PHYSIO — choose_type baseline ─────────────────────────────
   describe('BOOK_SPECIFIC_PHYSIO — choose_type', () => {
     const physioTypeStepData = () => ({
@@ -5029,6 +5162,136 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data || '{}');
       expect(d.no_slots_prompt?.context).toBe('physio');
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_PHYSIO — NLU appointment-type slot (Phase 9) ──────────────
+  describe('BOOK_SPECIFIC_PHYSIO — NLU appointment-type slot (Phase 9)', () => {
+    const config = require('../../src/config/anthropic.js');
+
+    const mockTwoTypesForPhysio = () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)' },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)' },
+      ]);
+    };
+
+    test('high-confidence slot → auto-fills type, skips the type list entirely', async () => {
+      mockTwoTypesForPhysio();
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotAutofillThreshold } },
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('medium-confidence slot → shows a "did you mean" suggestion, does not auto-fill', async () => {
+      mockTwoTypesForPhysio();
+      const mid = (config.slotSuggestThreshold + config.slotAutofillThreshold) / 2;
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: mid } },
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/did you mean/i);
+      expect(reply).toMatch(/return visit/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('confirm_type_suggestion');
+      expect(d.suggested_appt_type?.ids).toContain('AT-002');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('low-confidence slot → falls straight through to the unchanged type list', async () => {
+      mockTwoTypesForPhysio();
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        pending_nlu_slots: { appointmentType: { value: 'return visit', confidence: config.slotSuggestThreshold - 0.01 } },
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, ''));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.pending_nlu_slots?.appointmentType).toBeUndefined();
+    });
+
+    test('confirming a suggestion applies it, same as a manual selection', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'confirm_type_suggestion',
+        selected_physio: PHYSIO_1,
+        suggested_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+        navigation_chain: [
+          { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+          { selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false },
+        ],
+      });
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, 'confirm_type');
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selected_appt_type?.ids).toContain('AT-001');
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    test('declining a suggestion shows the normal type list, no type applied', async () => {
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'confirm_type_suggestion',
+        selected_physio: PHYSIO_1,
+        suggested_appt_type: { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm: 'initial 60 min visit (new clients)', ids: ['AT-001'] },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)',    norm: 'return visit (existing clients)',    ids: ['AT-002'] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [
+          { selection_step: 'choose_physio', had_multiple_options: true, auto: false },
+          { selection_step: 'confirm_type_suggestion', had_multiple_options: true, auto: false },
+        ],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'change_type'));
+      expect(reply).toMatch(/initial|return visit|visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      expect(d.selection_step).toBe('choose_type');
+      expect(d.selected_appt_type).toBeUndefined();
+      expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    // Reproduces the live-found bug: the entry message carries no type slot
+    // (so the list is already built and rendered by the time the user answers
+    // it), and the answer to THAT rendering is free text, not a number.
+    test('free-text answer to an already-rendered type list autofills, does not re-show the same menu', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_appointment', slots: { appointmentType: { value: 'return visit', confidence: 0.95 } }, confidence: 0.6 });
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', ids: ['AT-001'], norm: 'initial 60 min visit (new clients)', entries: [{ id: 'AT-001', insurer: null }] },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)',    ids: ['AT-002'], norm: 'return visit (existing clients)',    entries: [{ id: 'AT-002', insurer: null }] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificPhysio'], session, 'physiotherapy return visit please'));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
     });
   });
 
@@ -5280,6 +5543,29 @@ describe('Booking menu and flow coverage', () => {
       expect(d.selection_step).toBe('choose_type');
       expect(d.selected_appt_type).toBeUndefined();
       expect(d.suggested_appt_type).toBeUndefined();
+    });
+
+    // Phase 9, same live-found bug as BOOK_SPECIFIC_DATE/PHYSIO: the entry
+    // message carries no type slot (list already built/rendered), and the
+    // answer to THAT rendering is free text, not a number.
+    test('free-text answer to an already-rendered type list autofills, does not re-show the same menu', async () => {
+      NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_appointment', slots: { appointmentType: { value: 'return visit', confidence: 0.95 } }, confidence: 0.6 });
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        appointment_type_list: [
+          { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', norm_name: 'initial 60 min visit (new clients)', ids: ['AT-001'], entries: [{ id: 'AT-001', insurer: null }] },
+          { id: 'AT-002', name: 'Return Visit (Existing Clients)',    norm_name: 'return visit (existing clients)',    ids: ['AT-002'], entries: [{ id: 'AT-002', insurer: null }] },
+        ],
+        appt_type_page: 0,
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, 'physiotherapy return visit please'));
+      expect(reply).not.toMatch(/select visit type/i);
+      const updated = await db.getSession(session.id);
+      const d = JSON.parse(updated.data || '{}');
+      const appliedIds = d.selected_appt_type?.ids || d.prev_state_data?.selected_appt_type?.ids;
+      expect(appliedIds).toContain('AT-002');
     });
   });
 

@@ -1,0 +1,30 @@
+[
+  {
+    "id": "phase9_date_funnel_type_by_text",
+    "note": "regression check for the live-found bug: turn1 fills physio+date (stops at choose_type), turn2 supplies the type by free text — should now advance past choose_type instead of re-showing the same menu",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi, can I make an appointment with Louis tomorrow at 11:30am?",
+      "physiotherapy assessment"
+    ]
+  },
+  {
+    "id": "phase9_date_funnel_type_by_text_then_physio_correction",
+    "note": "full 3-turn repro: does the physio mid-flow-correction guard now get a chance to fire once choose_type is actually passed via free text?",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi, can I make an appointment with Louis tomorrow at 11:30am?",
+      "physiotherapy assessment",
+      "sorry can I see someone else instead"
+    ]
+  },
+  {
+    "id": "phase9_physio_funnel_type_by_text",
+    "note": "same fix, handleBookSpecificPhysio's own choose_type step (physio named first, no date)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi there, I would like to make an appointment with Dickson, referred by a friend.",
+      "sports massage"
+    ]
+  }
+]
