@@ -1869,6 +1869,40 @@ describe('Booking menu and flow coverage', () => {
       expect(reply0).toMatch(/Jolinna|Wei|past visits/i);
       expect(replyB).toMatch(/Jolinna|Wei|past visits/i);
     });
+
+    test('SG: same-named types under different categories stay separate (fix/sg-appt-type-name-collision)', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+      ]);
+      const session = await seedAt('BOOK_HISTORY', physioListData); // default region SG
+      await callHandler(engine, ['handleBookHistory'], session, '');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(2);
+      const idSets = d.appointment_type_list.map(x => x.ids.slice().sort());
+      expect(idSets).toContainEqual(['AT-PHYSIO']);
+      expect(idSets).toContainEqual(['AT-MASSAGE']);
+      // Display names must be disambiguated too — a patient can't tell two
+      // identically-labeled rows apart in a WhatsApp list.
+      const names = d.appointment_type_list.map(x => x.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
+    });
+
+    test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+      ]);
+      const session = await seedAt('BOOK_HISTORY', { ...physioListData, });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookHistory'], refreshed, '');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(1);
+      expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-MASSAGE', 'AT-PHYSIO']);
+    });
   });
 
   // ─── BOOK_HISTORY — choose_clinic ────────────────────────────────────────────
@@ -4935,6 +4969,33 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse(updated.data || '{}');
       expect(d.no_slots_prompt).toMatchObject({ context: 'date' });
     });
+
+    test('SG: same-named types under different categories stay separate (fix/sg-appt-type-name-collision)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        navigation_chain: [],
+      }); // default region SG
+      // Pick date '1' from the date picker → triggers the inline choose_type builder
+      await callHandler(engine, ['handleBookSpecificDate'], session, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(2);
+      const idSets = d.appointment_type_list.map(x => x.ids.slice().sort());
+      expect(idSets).toContainEqual(['AT-PHYSIO']);
+      expect(idSets).toContainEqual(['AT-MASSAGE']);
+      // Display names must be disambiguated too — a patient can't tell two
+      // identically-labeled rows apart in a WhatsApp list.
+      const names = d.appointment_type_list.map(x => x.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
+    });
   });
 
   // ─── BOOK_SPECIFIC_DATE — NLU appointment-type slot (Phase 9) ────────────────
@@ -5162,6 +5223,30 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data || '{}');
       expect(d.no_slots_prompt?.context).toBe('physio');
+    });
+
+    test('SG: same-named types under different categories stay separate (fix/sg-appt-type-name-collision)', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      }); // default region SG
+      await callHandler(engine, ['handleBookSpecificPhysio'], session, '');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(2);
+      const idSets = d.appointment_type_list.map(x => x.ids.slice().sort());
+      expect(idSets).toContainEqual(['AT-PHYSIO']);
+      expect(idSets).toContainEqual(['AT-MASSAGE']);
+      // Display names must be disambiguated too — a patient can't tell two
+      // identically-labeled rows apart in a WhatsApp list.
+      const names = d.appointment_type_list.map(x => x.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
     });
   });
 
@@ -5407,6 +5492,33 @@ describe('Booking menu and flow coverage', () => {
       const updated = await db.getSession(session.id);
       const d = JSON.parse(updated.data || '{}');
       expect(d.no_slots_prompt?.context).toBe('clinic');
+    });
+
+    test('SG: same-named types under different categories stay separate (fix/sg-appt-type-name-collision)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      }); // default region SG
+      await callHandler(engine, ['handleBookSpecificClinic'], session, '');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(2);
+      const idSets = d.appointment_type_list.map(x => x.ids.slice().sort());
+      expect(idSets).toContainEqual(['AT-PHYSIO']);
+      expect(idSets).toContainEqual(['AT-MASSAGE']);
+      // Display names must be disambiguated too — a patient can't tell two
+      // identically-labeled rows apart in a WhatsApp list.
+      const names = d.appointment_type_list.map(x => x.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
     });
   });
 
