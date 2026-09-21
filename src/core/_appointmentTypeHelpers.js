@@ -74,6 +74,34 @@ async function getPractitionersForType(groups, clinikoAPI, apptTypeId) {
 }
 
 /**
+ * Return all unique practitioners who offer any of the given appointment
+ * type IDs. Generalizes getPractitionersForType to a bucket's full id set
+ * (e.g. a SG-disambiguated type entry, or any entry with insurer-variant
+ * IDs under the same display bucket) — matching by name text alone is
+ * insufficient when two distinct Cliniko types share a literal name (the
+ * exact SG "Physiotherapist" Physiotherapy vs Sports Massage collision this
+ * was built for); ID matching is category-safe by construction.
+ */
+async function getPractitionersForTypeIds(groups, clinikoAPI, apptTypeIds) {
+  const targetIds = new Set((apptTypeIds || []).map(String));
+  const result = [];
+  const practitioners = [...new Map(
+    (groups || []).flatMap(g => g.practitioners || []).map(p => [p.id, p])
+  ).values()];
+  let hadFailure = false;
+  const allTypes = await bulkAll(practitioners, p =>
+    clinikoAPI.getAppointmentTypes({ practitioner_id: p.id }).catch(() => {
+      hadFailure = true;
+      return [];
+    })
+  );
+  practitioners.forEach((p, i) => {
+    if ((allTypes[i] || []).some(t => targetIds.has(String(t.id)))) result.push(p);
+  });
+  return (hadFailure || allTypes._partial) ? _markPartial(result) : result;
+}
+
+/**
  * Return all practitioners who offer an appointment type by NAME.
  * Type IDs differ per practitioner for the same label, so ID matching is
  * insufficient. A single practitioner's fetch failing no longer discards
@@ -185,6 +213,7 @@ function resolveApptFromFunnel(catalogue, { service, patientType, insurer, durat
 module.exports = {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
+  getPractitionersForTypeIds,
   getPractitionersForTypeName,
   parseApptCategory,
   parseApptPatientType,

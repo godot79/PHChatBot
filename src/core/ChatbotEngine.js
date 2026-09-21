@@ -30,6 +30,7 @@ const { translateApptTypeName } = require('../config/apptTypeTranslations');
 const {
   getAllAppointmentTypesForAllPractitioners,
   getPractitionersForType,
+  getPractitionersForTypeIds,
   getPractitionersForTypeName,
   parseApptCategory,
   buildFunnelCatalogue,
@@ -3618,7 +3619,7 @@ if (/^p(rev)?$/i.test(text)) {
               buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
             }
             let typeList = Array.from(buckets.values())
-              .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+              .map(v => ({ name: v.displayName, real_name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
             if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
             data.appointment_type_list = sortAppointmentTypes(typeList);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3760,7 +3761,18 @@ if (/^p(rev)?$/i.test(text)) {
     if (data.selection_step === 'choose_physio') {
       if (!Array.isArray(data.practitioner_list)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
-        const practitioners = await getPractitionersForTypeName(groups || [], this.clinikoAPI, data.selected_appt_type?.name || '');
+        // Match by the bucket's real Cliniko type IDs, not by name text.
+        // Two distinct Cliniko types can share a literal name (the SG
+        // "Physiotherapist" Physiotherapy-vs-Sports-Massage collision this
+        // guards against) — name-only matching (getPractitionersForTypeName)
+        // would silently reunite them even after the SG bucketing/
+        // disambiguation fix separated them in the menu. ids is always set
+        // by this handler's own bucket builders above; the name-based
+        // lookup is only a defensive fallback for an unexpected shape.
+        const typeIds = data.selected_appt_type?.ids;
+        const practitioners = (Array.isArray(typeIds) && typeIds.length)
+          ? await getPractitionersForTypeIds(groups || [], this.clinikoAPI, typeIds)
+          : await getPractitionersForTypeName(groups || [], this.clinikoAPI, data.selected_appt_type?.real_name || data.selected_appt_type?.name || '');
         data.practitioner_list = sortPractitioners((practitioners || []).map(p => ({ id: String(p.id), ...p })));
         data.practitioner_page = 0;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -4138,7 +4150,7 @@ if (/^p(rev)?$/i.test(text)) {
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
         let typeList = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+          .map(v => ({ name: v.displayName, real_name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
         if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
         data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
