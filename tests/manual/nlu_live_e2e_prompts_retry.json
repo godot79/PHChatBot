@@ -1,0 +1,14 @@
+[
+  {
+    "id": "retry_combined_physio_date_type",
+    "note": "retry of release_check_combined_physio_date_type — checking transience",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi, could I see Amanda Kot sometime Friday?", "clinical pilates for me please"]
+  },
+  {
+    "id": "retry_by_type_vague_medical",
+    "note": "retry of release_check_by_type_vague_medical — checking transience",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["my knee has been clicking and aching after runs, what should I book?"]
+  }
+]
