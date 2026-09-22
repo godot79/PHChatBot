@@ -8,6 +8,21 @@
 
 const { bulkAll } = require('./BulkContext');
 
+// Must match ChatbotEngine.js's module-scope normalizeTypeName() exactly —
+// duplicated here (that function isn't exported) rather than imported, same
+// as resolveApptFromFunnel's own norm_name computation below.
+function normalizeTypeName(s) {
+  return String(s || '')
+    .replace(/\s+/g, ' ')
+    .replace(/([A-Za-z])\(/g, '$1 (')
+    .replace(/\s+\)/g, ')')
+    .replace(/[‐-―]/g, '-')
+    .replace(/-/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .trim();
+}
+
 // Same non-enumerable _partial convention as ClinikoAPI.js — a caller-supplied
 // clinikoAPI is not guaranteed to be the real resilient class (tests inject
 // plain mocks), so these fan-outs defend their own per-call failures rather
@@ -166,9 +181,11 @@ function buildFunnelCatalogue(rawTypes) {
     .filter(t => t && t.name && !/UWC/i.test(t.name) && !/online\s*booking/i.test(t.name))
     .map(t => {
       const { service, insurer } = parseApptCategory(t.category);
+      const name = String(t.name).replace(/\s+/g, ' ').trim();
       return {
         id: String(t.id),
-        name: String(t.name).replace(/\s+/g, ' ').trim(),
+        name,
+        norm_name: normalizeTypeName(name),
         service,
         insurer,
         patientType: parseApptPatientType(t.name),
@@ -182,16 +199,24 @@ function buildFunnelCatalogue(rawTypes) {
  * Collects all matching IDs (one per practitioner) under a single display name.
  *
  * @param {ReturnType<buildFunnelCatalogue>} catalogue
- * @param {{ service: string, patientType: string, insurer: string|null, duration: number }} sel
+ * @param {{ service: string, patientType: string, insurer: string|null, duration: number, norm_name?: string }} sel
  * @returns {{ name: string, ids: string[], norm_name: string } | null}
  */
-function resolveApptFromFunnel(catalogue, { service, patientType, insurer, duration }) {
-  const matches = catalogue.filter(t =>
+function resolveApptFromFunnel(catalogue, { service, patientType, insurer, duration, norm_name: selNormName }) {
+  let matches = catalogue.filter(t =>
     t.service === service &&
     t.patientType === patientType &&
     (t.insurer || null) === (insurer || null) &&
     t.duration === duration
   );
+  // SG-only disambiguator (see final_pick in _stepApptFunnel): two distinct
+  // Cliniko types (e.g. "Physiotherapist" vs "Senior Physiotherapist") can
+  // share the same service/patientType/insurer/duration, so without this the
+  // funnel silently merged their ids under whichever name happened to be
+  // matches[0] — confirmed live 2026-09-22 (Book Soonest defaulted to Senior
+  // Physiotherapist). Callers outside SG never pass norm_name, so this is a
+  // no-op there.
+  if (selNormName) matches = matches.filter(t => t.norm_name === selNormName);
   if (!matches.length) return null;
   const name = matches[0].name;
   const ids  = [...new Set(matches.map(t => t.id))];

@@ -402,6 +402,7 @@ describe('buildFunnelCatalogue()', () => {
     expect(entry).toEqual({
       id: '1',
       name: 'New Patient 60 Min',
+      norm_name: 'new patient 60 min',
       service: 'Physiotherapy',
       insurer: null,
       patientType: 'new',
@@ -414,6 +415,7 @@ describe('buildFunnelCatalogue()', () => {
     expect(entry).toEqual({
       id: '2',
       name: 'Follow-Up 40 Min',
+      norm_name: 'follow up 40 min',
       service: 'Physiotherapy',
       insurer: 'Bupa Global',
       patientType: 'follow_up',

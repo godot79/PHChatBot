@@ -2489,7 +2489,12 @@ describe('Booking menu and flow coverage', () => {
         navigation_chain: [{ selection_step: 'choose_type', had_multiple_options: false, auto: true }],
       };
       const session = await seedAt('BOOK_SOONEST', data);
-      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      // First reply is now the gender-preference prompt (asked before the
+      // physio list, not after — see the 2026-09-22 "next triggers gender
+      // menu" fix); answer "no preference" to reach the list itself.
+      await callHandler(engine, ['handleBookSoonest'], session, '');
+      const s2 = await db.getSession(session.id);
+      const reply = await callHandler(engine, ['handleBookSoonest'], s2, '3');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       const names = (d.practitioner_list || []).map(p => p.first_name || p.display_name?.split(' ')[0]);
       // Amy < Marcus < Zara
@@ -3112,7 +3117,11 @@ describe('Booking menu and flow coverage', () => {
         appointment_type_list: TYPE_LIST_1,
         funnel_catalogue: [FUNNEL_CAT_1],
       });
-      const reply = await callHandler(engine, ['handleBookSoonest'], session, '');
+      // Gender-preference prompt now comes first (see 2026-09-22 fix); answer
+      // "no preference" to reach the practitioner list itself.
+      await callHandler(engine, ['handleBookSoonest'], session, '');
+      const s2 = await db.getSession(session.id);
+      const reply = await callHandler(engine, ['handleBookSoonest'], s2, '3');
       expect(reply).toMatch(/practitioner|jolinna|wei/i);
     });
 
