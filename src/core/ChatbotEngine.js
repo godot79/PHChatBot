@@ -2727,11 +2727,20 @@ if (/^p(rev)?$/i.test(text)) {
         data.funnel_sel = sel;
         data.funnel_step = 'final_pick';
         data.appt_type_page = 0;
+        // Unlike the 'service' step above, this used to fall through to
+        // final_pick without clearing text — so the numeric reply that just
+        // picked an insurer (e.g. "1" for Self-pay) got silently replayed as
+        // a final_pick menu selection, skipping that menu entirely. Confirmed
+        // live 2026-09-22: this is the direct mechanism behind Book Soonest
+        // "defaulting" to Senior Physiotherapist — whichever combo happened
+        // to land at the reused index got auto-picked with no prompt shown.
+        text = '';
         continue;
       }
 
       // ── final_pick: combined patientType + duration selection ──
       if (step === 'final_pick') {
+        const isSG = this._getSessionRegion(session) === 'SG';
         const filtered = catalogue.filter(t =>
           t.service === sel.service &&
           (t.insurer || null) === (sel.insurer || null)
@@ -2739,8 +2748,14 @@ if (/^p(rev)?$/i.test(text)) {
         const seen = new Set();
         const combos = [];
         for (const t of filtered) {
-          const key = `${t.patientType}|${t.duration}`;
-          if (!seen.has(key)) { seen.add(key); combos.push({ patientType: t.patientType, duration: t.duration }); }
+          // SG-only: distinct type names (e.g. "Physiotherapist" vs "Senior
+          // Physiotherapist") can otherwise share patientType/duration and
+          // silently merge into one combo — confirmed live 2026-09-22 (Book
+          // Soonest defaulted to Senior Physiotherapist for a plain request).
+          // Keeping HK keyed by patientType|duration only, byte-identical to
+          // before, per the standing "cannot mess with HK" constraint.
+          const key = isSG ? `${t.patientType}|${t.duration}|${t.norm_name}` : `${t.patientType}|${t.duration}`;
+          if (!seen.has(key)) { seen.add(key); combos.push({ patientType: t.patientType, duration: t.duration, name: t.name, norm_name: t.norm_name }); }
         }
         combos.sort((a, b) => {
           const order = { new: 0, follow_up: 1 };
@@ -2751,6 +2766,7 @@ if (/^p(rev)?$/i.test(text)) {
         if (combos.length === 1 && text === '') {
           sel.patientType = combos[0].patientType;
           sel.duration = combos[0].duration;
+          if (isSG) sel.norm_name = combos[0].norm_name; else delete sel.norm_name;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
@@ -2758,12 +2774,14 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const allSameDuration   = combos.every(c => c.duration    === combos[0].duration);
         const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
+        const allSameName = combos.every(c => c.norm_name === combos[0].norm_name);
         const ptLabels = { new: t(language, 'bookSoonest.patientTypeNew'), follow_up: t(language, 'bookSoonest.patientTypeFollowUp') };
         const comboLabel = (c) => {
           const durLabel = `${c.duration}${t(language, 'common.minutesSuffix')}`;
+          const namePart = isSG && !allSameName ? c.name : null;
           const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
           const durPart = !allSameDuration ? durLabel : null;
-          return [ptPart, durPart].filter(Boolean).join(' ') || durLabel;
+          return [namePart, ptPart, durPart].filter(Boolean).join(' ') || durLabel;
         };
         const bodyText = allSameDuration && !allSamePatientType
           ? t(language, 'bookSoonest.funnelNewOrReturning')
@@ -2778,6 +2796,7 @@ if (/^p(rev)?$/i.test(text)) {
           const picked = combos[pageStart + localNum - 1];
           sel.patientType = picked.patientType;
           sel.duration    = picked.duration;
+          if (isSG) sel.norm_name = picked.norm_name; else delete sel.norm_name;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
@@ -2809,6 +2828,9 @@ if (/^p(rev)?$/i.test(text)) {
   _saveFunnelPref(session, sel) {
     const phone = session.phone_number || session.phoneNumber;
     const pref = { service: sel.service, patientType: sel.patientType, insurer: sel.insurer || null, duration: sel.duration };
+    // Only ever set for SG (see final_pick in _stepApptFunnel) — leaving this
+    // out for HK keeps resolveApptFromFunnel's norm_name filter a no-op there.
+    if (sel.norm_name) pref.norm_name = sel.norm_name;
     let ctx = session.context;
     if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
     if (ctx && typeof ctx === 'object') { ctx.appt_preference = pref; session.context = ctx; }
@@ -3279,13 +3301,13 @@ if (/^p(rev)?$/i.test(text)) {
       await sync();
 
       if (practitioners.length > 1) {
-        const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
-          items: data.practitioner_list,
-          rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
-          page: 0,
-          header: t(this._getSessionLanguage(session), 'bookSoonest.selectPhysio', { name: getAppointmentTypeDisplayName(data.selected_appt_type, this._getSessionLanguage(session), this.logger) })
-      });
-        return reply;
+        // Route through the choose_physio block below instead of rendering the
+        // list here directly — that block runs the gender-preference funnel
+        // (_stepPhysioFunnel) before it renders anything. Rendering the raw
+        // list here first meant the funnel's first-ever run got triggered
+        // later by an unrelated "next"/pagination reply, popping up a gender
+        // prompt mid-pagination with no context (found live 2026-09-22).
+        return await this.handleBookSoonest(session, '');
       }
 
       // Auto-advance to clinic when only one physio
