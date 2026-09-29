@@ -199,40 +199,56 @@ function buildFunnelCatalogue(rawTypes) {
  * Collects all matching IDs (one per practitioner) under a single display name.
  *
  * @param {ReturnType<buildFunnelCatalogue>} catalogue
- * @param {{ service: string, patientType: string, insurer: string|null, duration: number, norm_name?: string }} sel
- * @returns {{ name: string, ids: string[], norm_name: string } | null}
+ * @param {{ service: string, patientType: string, insurer: string|null, duration: number }} sel
+ * @returns {{ name: string, ids: string[], norm_name: string, norm_names: string[] } | null}
  */
-function resolveApptFromFunnel(catalogue, { service, patientType, insurer, duration, norm_name: selNormName }) {
-  let matches = catalogue.filter(t =>
+function resolveApptFromFunnel(catalogue, { service, patientType, insurer, duration }) {
+  const matches = catalogue.filter(t =>
     t.service === service &&
     t.patientType === patientType &&
     (t.insurer || null) === (insurer || null) &&
     t.duration === duration
   );
-  // SG-only disambiguator (see final_pick in _stepApptFunnel): two distinct
-  // Cliniko types (e.g. "Physiotherapist" vs "Senior Physiotherapist") can
-  // share the same service/patientType/insurer/duration, so without this the
-  // funnel silently merged their ids under whichever name happened to be
-  // matches[0] — confirmed live 2026-09-22 (Book Soonest defaulted to Senior
-  // Physiotherapist). Callers outside SG never pass norm_name, so this is a
-  // no-op there.
-  if (selNormName) matches = matches.filter(t => t.norm_name === selNormName);
   if (!matches.length) return null;
-  const name = matches[0].name;
+  // Two distinct Cliniko types can legitimately share service/patientType/
+  // insurer/duration (e.g. SG's "Physiotherapist" vs "Senior Physiotherapist"
+  // — same self-pay visit, just named per practitioner rate tier, confirmed
+  // live 2026-09-29 against real Cliniko data: neither has its own New/
+  // Follow-up split, and every practitioner in this bucket holds exactly one
+  // of the two names). These are meant to merge into one bookable option —
+  // the tier itself belongs in physio selection, not appointment-type
+  // selection. But `matches[0].name` is an arbitrary, meaningless label to
+  // show as "the appointment type" here (a job title, not a session type).
+  // When there's no real patientType for this match, fall back to "New
+  // Patient" if this service DOES have a genuine New/Follow-up split
+  // elsewhere (e.g. under an insurer) — this self-pay visit is the same
+  // kind of visit, just missing that split in Cliniko's self-pay setup.
+  // Otherwise (no New/Follow-up concept exists anywhere for this service,
+  // e.g. Sports Massage) fall back to the service name itself.
+  let name = matches[0].name;
+  if (!patientType && service) {
+    const hasRealPatientTypeForService = catalogue.some(t => t.service === service && t.patientType);
+    name = hasRealPatientTypeForService ? 'New Patient' : service;
+  }
   const ids  = [...new Set(matches.map(t => t.id))];
+  // Real (non-overridden) normalized names of every merged Cliniko record —
+  // used for slot/practitioner matching downstream, which must key off the
+  // actual Cliniko type name(s), never the display-name override above.
   // Must match normalizeTypeName's hyphen-stripping (ChatbotEngine.js) — this
-  // norm_name becomes handleBookSoonest's typeNorm, compared against slot
-  // type names normalized the same way. Without stripping hyphens here, any
-  // hyphenated Cliniko type name (e.g. "Follow-Up Appointment-Physiotherapy")
-  // never matches, silently zeroing out real availability (confirmed live
+  // becomes handleBookSoonest's typeNorm, compared against slot type names
+  // normalized the same way. Without stripping hyphens here, any hyphenated
+  // Cliniko type name (e.g. "Follow-Up Appointment-Physiotherapy") never
+  // matches, silently zeroing out real availability (confirmed live
   // 2026-07-21/22 — hundreds of real slots existed, app reported none).
-  const norm_name = name
+  const stripHyphens = (s) => s
     .toLowerCase()
     .replace(/[‐-―]/g, '-')
     .replace(/-/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return { name, ids, norm_name, insurer: insurer || null };
+  const norm_names = [...new Set(matches.map(t => stripHyphens(t.name)))];
+  const norm_name = norm_names[0];
+  return { name, ids, norm_name, norm_names, insurer: insurer || null };
 }
 
 module.exports = {

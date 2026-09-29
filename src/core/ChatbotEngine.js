@@ -2740,7 +2740,6 @@ if (/^p(rev)?$/i.test(text)) {
 
       // ── final_pick: combined patientType + duration selection ──
       if (step === 'final_pick') {
-        const isSG = this._getSessionRegion(session) === 'SG';
         const filtered = catalogue.filter(t =>
           t.service === sel.service &&
           (t.insurer || null) === (sel.insurer || null)
@@ -2748,14 +2747,8 @@ if (/^p(rev)?$/i.test(text)) {
         const seen = new Set();
         const combos = [];
         for (const t of filtered) {
-          // SG-only: distinct type names (e.g. "Physiotherapist" vs "Senior
-          // Physiotherapist") can otherwise share patientType/duration and
-          // silently merge into one combo — confirmed live 2026-09-22 (Book
-          // Soonest defaulted to Senior Physiotherapist for a plain request).
-          // Keeping HK keyed by patientType|duration only, byte-identical to
-          // before, per the standing "cannot mess with HK" constraint.
-          const key = isSG ? `${t.patientType}|${t.duration}|${t.norm_name}` : `${t.patientType}|${t.duration}`;
-          if (!seen.has(key)) { seen.add(key); combos.push({ patientType: t.patientType, duration: t.duration, name: t.name, norm_name: t.norm_name }); }
+          const key = `${t.patientType}|${t.duration}`;
+          if (!seen.has(key)) { seen.add(key); combos.push({ patientType: t.patientType, duration: t.duration }); }
         }
         combos.sort((a, b) => {
           const order = { new: 0, follow_up: 1 };
@@ -2766,7 +2759,6 @@ if (/^p(rev)?$/i.test(text)) {
         if (combos.length === 1 && text === '') {
           sel.patientType = combos[0].patientType;
           sel.duration = combos[0].duration;
-          if (isSG) sel.norm_name = combos[0].norm_name; else delete sel.norm_name;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
@@ -2774,14 +2766,12 @@ if (/^p(rev)?$/i.test(text)) {
         }
         const allSameDuration   = combos.every(c => c.duration    === combos[0].duration);
         const allSamePatientType = combos.every(c => c.patientType === combos[0].patientType);
-        const allSameName = combos.every(c => c.norm_name === combos[0].norm_name);
         const ptLabels = { new: t(language, 'bookSoonest.patientTypeNew'), follow_up: t(language, 'bookSoonest.patientTypeFollowUp') };
         const comboLabel = (c) => {
           const durLabel = `${c.duration}${t(language, 'common.minutesSuffix')}`;
-          const namePart = isSG && !allSameName ? c.name : null;
           const ptPart  = !allSamePatientType && c.patientType ? ptLabels[c.patientType] : null;
           const durPart = !allSameDuration ? durLabel : null;
-          return [namePart, ptPart, durPart].filter(Boolean).join(' ') || durLabel;
+          return [ptPart, durPart].filter(Boolean).join(' ') || durLabel;
         };
         const bodyText = allSameDuration && !allSamePatientType
           ? t(language, 'bookSoonest.funnelNewOrReturning')
@@ -2796,7 +2786,6 @@ if (/^p(rev)?$/i.test(text)) {
           const picked = combos[pageStart + localNum - 1];
           sel.patientType = picked.patientType;
           sel.duration    = picked.duration;
-          if (isSG) sel.norm_name = picked.norm_name; else delete sel.norm_name;
           data.funnel_sel = sel;
           const resolved = resolveApptFromFunnel(catalogue, sel);
           this._saveFunnelPref(session, sel);
@@ -2828,9 +2817,6 @@ if (/^p(rev)?$/i.test(text)) {
   _saveFunnelPref(session, sel) {
     const phone = session.phone_number || session.phoneNumber;
     const pref = { service: sel.service, patientType: sel.patientType, insurer: sel.insurer || null, duration: sel.duration };
-    // Only ever set for SG (see final_pick in _stepApptFunnel) — leaving this
-    // out for HK keeps resolveApptFromFunnel's norm_name filter a no-op there.
-    if (sel.norm_name) pref.norm_name = sel.norm_name;
     let ctx = session.context;
     if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch { ctx = {}; } }
     if (ctx && typeof ctx === 'object') { ctx.appt_preference = pref; session.context = ctx; }
@@ -3109,10 +3095,14 @@ if (/^p(rev)?$/i.test(text)) {
     };
 
     /**
-     * True if this practitioner has at least one slot for the given type NAME
-     * in the standard soonest window across any of their clinics.
+     * True if this practitioner has at least one slot for any of the given
+     * type NAMES (a single name, or a merged bucket's set of real Cliniko
+     * names — e.g. SG's "Physiotherapist" + "Senior Physiotherapist", which
+     * are the same bookable visit split only by practitioner rate tier) in
+     * the standard soonest window across any of their clinics.
      */
-    const practitionerHasSlotsForTypeName = async (practitioner, typeNorm) => {
+    const practitionerHasSlotsForTypeName = async (practitioner, typeNorms) => {
+      const norms = typeNorms instanceof Set ? typeNorms : new Set([typeNorms]);
       const clinics = await clinicsForPractitioner(practitioner.id);
       if (!clinics.length) return { hasSlots: false, partial: false };
       const { from, to } = normalizeDateWindow();
@@ -3125,21 +3115,22 @@ if (/^p(rev)?$/i.test(text)) {
           to
         });
         if (raw && raw._partial) partial = true;
-        const any = (raw || []).some(s => normName(s.appointment_type_name) === typeNorm);
+        const any = (raw || []).some(s => norms.has(normName(s.appointment_type_name)));
         if (any) return { hasSlots: true, partial };
       }
       return { hasSlots: false, partial };
     };
 
     /**
-     * Build physio list that offers the TYPE NAME and has at least one slot.
-     * Marks the returned array _partial if any practitioner's type or slot
-     * fetch failed, so a resulting empty list surfaces as "trouble checking
-     * availability, try again" (via _noSlotsRetry) rather than a confirmed
-     * "no one has slots" — matching the same convention already used by
-     * getAllAppointmentTypesForAllPractitioners and friends.
+     * Build physio list that offers any of the given TYPE NAMES and has at
+     * least one slot. Marks the returned array _partial if any practitioner's
+     * type or slot fetch failed, so a resulting empty list surfaces as
+     * "trouble checking availability, try again" (via _noSlotsRetry) rather
+     * than a confirmed "no one has slots" — matching the same convention
+     * already used by getAllAppointmentTypesForAllPractitioners and friends.
      */
-    const buildAvailablePhysiosForTypeName = async (typeNorm) => {
+    const buildAvailablePhysiosForTypeName = async (typeNorms) => {
+      const norms = typeNorms instanceof Set ? typeNorms : new Set([typeNorms]);
       const groups = await this.clinikoAPI.getPractitionersByClinic();
       // Collect unique practitioners across all clinics
       const allPractitioners = [...new Map(
@@ -3155,11 +3146,11 @@ if (/^p(rev)?$/i.test(text)) {
       // both, and the `(allTypes[i] || [])` below already tolerates the latter.
       const hadTypeFetchFailure = !!allTypes._partial || allTypes.some(t => t && t._partial);
       const phys = allPractitioners.filter((p, i) =>
-        (allTypes[i] || []).some(t => normName(t.name) === typeNorm)
+        (allTypes[i] || []).some(t => norms.has(normName(t.name)))
       );
       // Filter by slot availability — same throttling
       const slotResults = await bulkAll(phys,
-        p => practitionerHasSlotsForTypeName(p, typeNorm)
+        p => practitionerHasSlotsForTypeName(p, norms)
       );
       const hadSlotFetchFailure = !!slotResults._partial || slotResults.some(r => r && r.partial);
       const result = phys.filter((_, i) => (slotResults[i] || {}).hasSlots);
@@ -3190,9 +3181,14 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       if (data.selection_step === 'choose_clinic') {
-        // Back to physios for same type
-        const typeNorm = normName(data.selected_appt_type?.name || '');
-        const physios = typeNorm ? await buildAvailablePhysiosForTypeName(typeNorm) : [];
+        // Back to physios for same type — use the real merged Cliniko names
+        // (norm_names), never the possibly-overridden display name (e.g.
+        // "New Patient" for SG's tier-merged self-pay Physiotherapy), which
+        // wouldn't match any real slot's appointment_type_name.
+        const typeNorms = (data.selected_appt_type?.norm_names && data.selected_appt_type.norm_names.length)
+          ? new Set(data.selected_appt_type.norm_names)
+          : new Set([normName(data.selected_appt_type?.name || '')].filter(Boolean));
+        const physios = typeNorms.size ? await buildAvailablePhysiosForTypeName(typeNorms) : [];
         if (physios.length > 1) {
           data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
           data.physio_funnel_step = 'done'; // skip funnel on back — pref already captured
@@ -3275,9 +3271,15 @@ if (/^p(rev)?$/i.test(text)) {
         await sync();
       }
 
-      // Build AVAILABLE practitioners for this type name
-      const typeNorm = data.selected_appt_type.norm_name || normName(data.selected_appt_type.name);
-      const practitioners = await buildAvailablePhysiosForTypeName(typeNorm);
+      // Build AVAILABLE practitioners for this type — use the real merged
+      // Cliniko names (norm_names) when present, never the possibly-
+      // overridden display name (e.g. "New Patient" for SG's tier-merged
+      // self-pay Physiotherapy), which wouldn't match any real slot's
+      // appointment_type_name.
+      const typeNorms = (data.selected_appt_type.norm_names && data.selected_appt_type.norm_names.length)
+        ? new Set(data.selected_appt_type.norm_names)
+        : new Set([data.selected_appt_type.norm_name || normName(data.selected_appt_type.name)]);
+      const practitioners = await buildAvailablePhysiosForTypeName(typeNorms);
 
       data.practitioner_list = sortPractitioners(practitioners); data.practitioner_page = 0;
       data.selection_step = 'choose_physio';
