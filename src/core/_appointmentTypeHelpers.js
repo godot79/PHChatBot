@@ -227,13 +227,14 @@ function resolveApptFromFunnel(catalogue, { service, patientType, insurer, durat
   // e.g. Sports Massage) fall back to the service name itself.
   let name = matches[0].name;
   if (!patientType && service) {
+    // No "(Self-pay)" qualifier needed here (unlike the choose_type builders'
+    // _bucketApptType, which merges into a shared bucket that can also hold
+    // insured entries): by the time _stepApptFunnel reaches final_pick, its
+    // own insurer step has already resolved sel.insurer, so `matches` here
+    // are already scoped to one coverage value — no risk of this same name
+    // spanning both self-pay and insured ids at once.
     const hasRealPatientTypeForService = catalogue.some(t => t.service === service && t.patientType);
-    // "(Self-pay)" is required, not cosmetic — see ChatbotEngine.js's
-    // _bucketApptType for the full explanation: an unqualified "New Patient"
-    // here can collide, at the same duration, with a REAL insured "New
-    // Patient" entry for the same service, and the patient has no way to
-    // tell the two rows apart (confirmed live 2026-09-30).
-    name = (hasRealPatientTypeForService ? 'New Patient' : service) + ' (Self-pay)';
+    name = hasRealPatientTypeForService ? 'New Patient' : service;
   }
   const ids  = [...new Set(matches.map(t => t.id))];
   // Real (non-overridden) normalized names of every merged Cliniko record —

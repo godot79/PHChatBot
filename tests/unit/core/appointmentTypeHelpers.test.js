@@ -581,11 +581,11 @@ describe('resolveApptFromFunnel()', () => {
       { id: 'ins-new', name: 'New Patient', norm_name: 'new patient', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'new', duration: 45 },
     ];
 
-    test('merges both tier ids under one resolved entry, named "New Patient (Self-pay)" (service has a real split elsewhere)', () => {
+    test('merges both tier ids under one resolved entry, named "New Patient" (service has a real split elsewhere)', () => {
       const result = resolveApptFromFunnel(tieredCatalogue, {
         service: 'Physiotherapy', patientType: null, insurer: null, duration: 45,
       });
-      expect(result.name).toBe('New Patient (Self-pay)');
+      expect(result.name).toBe('New Patient');
       expect(new Set(result.ids)).toEqual(new Set(['std', 'sen']));
     });
 
@@ -604,7 +604,7 @@ describe('resolveApptFromFunnel()', () => {
       const result = resolveApptFromFunnel(sportsMassageCatalogue, {
         service: 'Sports Massage', patientType: null, insurer: null, duration: 45,
       });
-      expect(result.name).toBe('Sports Massage (Self-pay)');
+      expect(result.name).toBe('Sports Massage');
       expect(result.ids).toEqual(['a']);
     });
   });

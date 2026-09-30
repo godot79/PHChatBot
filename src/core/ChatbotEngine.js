@@ -878,15 +878,22 @@ class ChatbotEngine {
     // otherwise merge with any other same-service type similarly missing it,
     // regardless of how different their actual names are.
     if (hasTierMerge && !patientType && service && duration) {
-      // "(Self-pay)" is required, not cosmetic: when this service also has a
-      // real insured "New Patient" bucket at the same duration (the common
-      // case — Bupa/Cigna New Patient is usually the same 45min as the
-      // self-pay visit), an unqualified "New Patient" here would render as
-      // two menu rows with the IDENTICAL label and no way for the patient to
-      // tell them apart — confirmed live 2026-09-30 (handleBookSpecificPhysio
-      // showed "New Patient (45min)" twice, one self-pay one insured).
-      const mergedName = (servicesWithPatientTypeSplit.has(service) ? 'New Patient' : service) + ' (Self-pay)';
-      const bucketKey = `tier:${service}|${insurer || ''}|${duration}`;
+      // Use the SAME bucket key formula as the "real name" branch below —
+      // this is deliberate, not an oversight. Coverage (self-pay vs Bupa vs
+      // Cigna) is already a distinct, existing question (_stepTypeInsurer,
+      // "How is this covered?"), so a tier-merged self-pay entry renamed to
+      // "New Patient" should simply JOIN whatever real insured "New Patient"
+      // bucket already exists for this service — appearing as one more
+      // `entries` row (insurer: null) that _stepTypeInsurer already knows
+      // how to offer as a "Self-pay" option — not become a second,
+      // separately-labeled menu row that duplicates what that step already
+      // does. (An earlier version of this fix instead gave it its own
+      // "New Patient (Self-pay)" row with a distinct bucket key; found via a
+      // live menu check to be architecturally wrong — insurer disambiguation
+      // belongs entirely to _stepTypeInsurer, never to the type-name label.)
+      const mergedName = servicesWithPatientTypeSplit.has(service) ? 'New Patient' : service;
+      const n = normName(mergedName);
+      const bucketKey = isSG ? `${n} ${service || ''}` : n;
       return { bucketKey, displayName: mergedName, service, duration };
     }
     const n = normName(display);
