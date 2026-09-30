@@ -823,10 +823,9 @@ class ChatbotEngine {
   /**
    * Every service (category) that has at least one REAL patientType
    * (New/Follow-up) entry anywhere in the raw type list — used to decide
-   * whether a patientType-less entry's merged display name should fall back
-   * to "New Patient" (the service has a real split elsewhere, e.g. SG's
-   * insured Physiotherapy types) or to the service name itself (the service
-   * has no New/Follow-up concept anywhere, e.g. Sports Massage).
+   * whether a tier-merged entry's display name should fall back to "New
+   * Patient" (the service has a real split elsewhere, e.g. SG's insured
+   * Physiotherapy types) or to its own (adjective-stripped) name.
    * @param {Array<{name:string, category:string}>} allTypes - raw Cliniko types
    * @returns {Set<string>}
    */
@@ -841,10 +840,69 @@ class ChatbotEngine {
   }
 
   /**
+   * Leading practitioner-rate-tier adjective a Cliniko type name can carry
+   * (e.g. "Senior Physiotherapist"). Deliberately a small, curated list, not
+   * "any name without a detected patientType" — that broader heuristic was
+   * tried and found to be a real regression: ordinary distinct visit names
+   * that simply don't match the New/Follow-up regex (e.g. "Initial Visit"
+   * vs "Return Visit") got wrongly collapsed together (confirmed live via a
+   * failing NLU regression test after merging main into an NLU branch).
+   */
+  static TIER_ADJECTIVE_RE = /^(senior|junior|lead|principal|associate)\s+/i;
+
+  /**
+   * Base names (adjective-stripped, lowercased) that appear with 2+ distinct
+   * real Cliniko names in the raw type list — i.e. an actual tier-adjective
+   * pair exists (e.g. "Physiotherapist" AND "Senior Physiotherapist" both
+   * present). Only these are safe to merge; a lone "Senior X" with no plain
+   * "X" counterpart is left alone (name-only bucketing already handles it).
+   * @param {Array<{name:string}>} allTypes - raw Cliniko types
+   * @returns {Set<string>}
+   */
+  _tierBaseNamesWithVariants(allTypes) {
+    const map = new Map(); // baseNorm -> Set(realNameNorm)
+    for (const t of allTypes || []) {
+      if (!t || !t.name) continue;
+      const display = String(t.name).replace(/\s+/g, ' ').trim();
+      const base = display.replace(ChatbotEngine.TIER_ADJECTIVE_RE, '').trim().toLowerCase();
+      if (!map.has(base)) map.set(base, new Set());
+      map.get(base).add(display.toLowerCase());
+    }
+    const result = new Set();
+    for (const [base, variants] of map) if (variants.size > 1) result.add(base);
+    return result;
+  }
+
+  /**
+   * Full clinic-wide raw type list, used ONLY to detect genuine tier-
+   * adjective pairs across practitioners — a single physio's own type list
+   * can never reveal this: Cliniko splits tiers as different id records
+   * assigned to different practitioners, so any one physio only ever holds
+   * ONE variant (confirmed live 2026-09-30: computing tierBaseNames from
+   * just Jade's own types never saw "Senior Physiotherapist", since only
+   * other practitioners hold that id — her own "Physiotherapist" entry
+   * never merged with the real insured "New Patient" bucket as a result).
+   * Needed by handleBookHistory / handleBookSpecificPhysio specifically —
+   * every other choose_type builder already scans all practitioners
+   * anyway. Only fetched when the region has the 'physioTiers' capability,
+   * so there's no extra live cost for regions where this can never matter
+   * (e.g. HK) — and ClinikoAPI's own group/type caching (see "ClinikoAPI
+   * caching" tests) means this is typically a cache hit in real sessions
+   * regardless, since other steps already warm it.
+   * @param {object} session
+   * @returns {Promise<Array>}
+   */
+  async _clinicWideTypesForTierDetection(session) {
+    if (!hasCapability(this._getSessionRegion(session), 'physioTiers')) return [];
+    const groups = await this.clinikoAPI.getPractitionersByClinic();
+    return await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+  }
+
+  /**
    * Determine the choose_type bucket key + display name for a raw Cliniko
-   * appointment type, collapsing practitioner-title/tier-label variants
-   * (e.g. SG's "Physiotherapist" vs "Senior Physiotherapist" — same service/
-   * duration/insurer, no real New/Follow-up split) into one bucket instead of
+   * appointment type, collapsing practitioner-rate-tier variants (e.g. SG's
+   * "Physiotherapist" vs "Senior Physiotherapist" — same service/duration/
+   * insurer, no real New/Follow-up split) into one bucket instead of
    * exposing them as separate session types — confirmed live 2026-09-29:
    * these are the same visit, priced per practitioner, not different visits.
    * Gated by the 'physioTiers' region capability (config-driven, see
@@ -858,26 +916,26 @@ class ChatbotEngine {
    * that region's bucketing (confirmed via a regression test: doing this
    * without the gate changed HK's same-name-different-category merge
    * behavior, violating the "HK must not change at all" constraint).
+   * Also requires an actual detected tier-adjective PAIR
+   * (_tierBaseNamesWithVariants), not just "no patientType" — that broader
+   * rule wrongly merged ordinary distinct types like "Initial Visit"/
+   * "Return Visit" (confirmed live regression, see TIER_ADJECTIVE_RE's doc).
    * @param {object} t - raw Cliniko type ({ id, name, category, duration_in_minutes })
    * @param {(s:string)=>string} normName
    * @param {boolean} isSG - still used for the ORIGINAL (name, service) collision bucketing, unrelated to the tier-merge below
    * @param {Set<string>} servicesWithPatientTypeSplit - from _servicesWithPatientTypeSplit()
    * @param {boolean} hasTierMerge - hasCapability(region, 'physioTiers')
+   * @param {Set<string>} tierBaseNamesWithVariants - from _tierBaseNamesWithVariants()
    * @returns {{ bucketKey: string, displayName: string, service: string, duration: number|undefined }}
    */
-  _bucketApptType(t, normName, isSG, servicesWithPatientTypeSplit, hasTierMerge) {
+  _bucketApptType(t, normName, isSG, servicesWithPatientTypeSplit, hasTierMerge, tierBaseNamesWithVariants) {
     const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
     const { service, insurer } = parseApptCategory(t.category);
     const duration = t.duration_in_minutes;
     const patientType = parseApptPatientType(t.name);
-    // Require a real duration too — it's the only remaining dimension that
-    // keeps genuinely distinct same-service, no-patientType types (e.g. an
-    // "Initial Visit" vs a "Return Visit" whose names don't match the New/
-    // Follow-up regex) from being wrongly collapsed together. Confirmed as a
-    // real regression risk: a type missing duration_in_minutes would
-    // otherwise merge with any other same-service type similarly missing it,
-    // regardless of how different their actual names are.
-    if (hasTierMerge && !patientType && service && duration) {
+    const baseName = display.replace(ChatbotEngine.TIER_ADJECTIVE_RE, '').trim();
+    const baseNorm = baseName.toLowerCase();
+    if (hasTierMerge && !patientType && service && tierBaseNamesWithVariants && tierBaseNamesWithVariants.has(baseNorm)) {
       // Use the SAME bucket key formula as the "real name" branch below —
       // this is deliberate, not an oversight. Coverage (self-pay vs Bupa vs
       // Cigna) is already a distinct, existing question (_stepTypeInsurer,
@@ -891,7 +949,7 @@ class ChatbotEngine {
       // "New Patient (Self-pay)" row with a distinct bucket key; found via a
       // live menu check to be architecturally wrong — insurer disambiguation
       // belongs entirely to _stepTypeInsurer, never to the type-name label.)
-      const mergedName = servicesWithPatientTypeSplit.has(service) ? 'New Patient' : service;
+      const mergedName = servicesWithPatientTypeSplit.has(service) ? 'New Patient' : baseName;
       const n = normName(mergedName);
       const bucketKey = isSG ? `${n} ${service || ''}` : n;
       return { bucketKey, displayName: mergedName, service, duration };
@@ -2408,12 +2466,16 @@ async handleMessageEnvelope(message, phoneNumber) {
 
         const isSG = this._getSessionRegion(session) === 'SG';
         const servicesSplit = this._servicesWithPatientTypeSplit(types);
+        // Tier pairs can't be detected from this one physio's own type list
+        // (see _clinicWideTypesForTierDetection's doc) — use the clinic-wide
+        // list for detection only; bucketing itself still uses `types`.
+        const tierBaseNames = this._tierBaseNamesWithVariants(await this._clinicWideTypesForTierDetection(session));
         const buckets = new Map(); // bucketKey -> { displayName, entries: [{id, insurer}] }
         for (const t of types || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
-          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
           const { insurer } = parseApptCategory(t.category);
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -3245,11 +3307,12 @@ if (/^p(rev)?$/i.test(text)) {
       data.funnel_catalogue = buildFunnelCatalogue(allTypes);
       const isSG = this._getSessionRegion(session) === 'SG';
       const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
+      const tierBaseNames = this._tierBaseNamesWithVariants(allTypes);
       const buckets = new Map(); // bucketKey -> { displayName, ids:Set }
       for (const t of allTypes || []) {
         if (!t || !t.name) continue;
         if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-        const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+        const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
         if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, ids: new Set(), service, duration });
         buckets.get(bucketKey).ids.add(String(t.id));
       }
@@ -3840,11 +3903,12 @@ if (/^p(rev)?$/i.test(text)) {
             const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
             const isSG = this._getSessionRegion(session) === 'SG';
             const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
+            const tierBaseNames = this._tierBaseNamesWithVariants(allTypes);
             const buckets = new Map();
             for (const t of allTypes || []) {
               if (!t || !t.name) continue;
               if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-              const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+              const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
               const { insurer } = parseApptCategory(t.category);
               if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
               buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -3913,11 +3977,12 @@ if (/^p(rev)?$/i.test(text)) {
         const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
         const isSG = this._getSessionRegion(session) === 'SG';
         const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
+        const tierBaseNames = this._tierBaseNamesWithVariants(allTypes);
         const buckets = new Map();
         for (const t of allTypes || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
           const { insurer } = parseApptCategory(t.category);
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -4382,11 +4447,15 @@ if (/^p(rev)?$/i.test(text)) {
         const apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(data.selected_physio.id) });
         const isSG = this._getSessionRegion(session) === 'SG';
         const servicesSplit = this._servicesWithPatientTypeSplit(apptTypes);
+        // Tier pairs can't be detected from this one physio's own type list
+        // (see _clinicWideTypesForTierDetection's doc) — use the clinic-wide
+        // list for detection only; bucketing itself still uses `apptTypes`.
+        const tierBaseNames = this._tierBaseNamesWithVariants(await this._clinicWideTypesForTierDetection(session));
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
           const { insurer } = parseApptCategory(t.category);
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -4758,11 +4827,12 @@ if (/^p(rev)?$/i.test(text)) {
         hadClinicTypeFailure = !!clinicTypesByPractitioner._partial || clinicTypesByPractitioner.some(types => types && types._partial);
         const isSG = this._getSessionRegion(session) === 'SG';
         const servicesSplit = this._servicesWithPatientTypeSplit(clinicTypesByPractitioner.flat().filter(Boolean));
+        const tierBaseNames = this._tierBaseNamesWithVariants(clinicTypesByPractitioner.flat().filter(Boolean));
         for (const types of clinicTypesByPractitioner) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-            const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+            const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
             const { insurer } = parseApptCategory(t.category);
             if (!buckets.has(bucketKey)) buckets.set(bucketKey, { display: displayName, entries: [], service, duration });
             buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });

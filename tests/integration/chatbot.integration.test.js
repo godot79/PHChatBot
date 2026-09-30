@@ -1730,8 +1730,8 @@ describe('Booking menu and flow coverage', () => {
       // type) — still two distinct, non-colliding names, one per service.
       const names = d.appointment_type_list.map(x => x.name);
       expect(new Set(names).size).toBe(names.length);
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4324,8 +4324,8 @@ describe('Booking menu and flow coverage', () => {
       // Both fall back to their own service name (never the raw
       // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
       // naming fix — see the equivalent BOOK_HISTORY test for detail.
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4466,8 +4466,8 @@ describe('Booking menu and flow coverage', () => {
       // Both fall back to their own service name (never the raw
       // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
       // naming fix — see the equivalent BOOK_HISTORY test for detail.
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4629,8 +4629,8 @@ describe('Booking menu and flow coverage', () => {
       // Both fall back to their own service name (never the raw
       // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
       // naming fix — see the equivalent BOOK_HISTORY test for detail.
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
+      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4754,30 +4754,53 @@ describe('Booking menu and flow coverage', () => {
       expect(set.has('Sports Massage')).toBe(false); // no patientType anywhere for this service
     });
 
-    test('tier-merge (hasTierMerge=true): two same-service/duration/no-patientType entries merge, named "New Patient" (service has a real split elsewhere)', () => {
+    test('_tierBaseNamesWithVariants finds only genuine tier-adjective PAIRS, not lone names or unrelated same-name collisions', () => {
+      const types = [
+        { name: 'Physiotherapist' },
+        { name: 'Senior Physiotherapist' },       // real pair -> base "physiotherapist" has 2 variants
+        { name: 'Lead Podiatrist' },               // lone adjective-bearing name, no plain "Podiatrist" counterpart
+        { name: 'Initial Visit' },
+        { name: 'Return Visit' },                  // unrelated names, never share a base
+        { name: 'Physiotherapist' },                // exact duplicate of the first — still 1 distinct variant for this base
+      ];
+      const set = engine._tierBaseNamesWithVariants(types);
+      expect(set.has('physiotherapist')).toBe(true);
+      expect(set.has('podiatrist')).toBe(false); // no plain "Podiatrist" to pair with
+      expect(set.has('initial visit')).toBe(false);
+      expect(set.has('return visit')).toBe(false);
+    });
+
+    test('tier-merge (hasTierMerge=true, genuine tier-adjective pair): "Physiotherapist"/"Senior Physiotherapist" merge, named "New Patient" (service has a real split elsewhere)', () => {
       const servicesSplit = new Set(['Physiotherapy']);
+      const tierBaseNames = new Set(['physiotherapist']); // real pair: "Physiotherapist" + "Senior Physiotherapist"
       const standard = { id: '1', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
       const senior   = { id: '2', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
-      const a = engine._bucketApptType(standard, normName, true, servicesSplit, true);
-      const b = engine._bucketApptType(senior, normName, true, servicesSplit, true);
+      const a = engine._bucketApptType(standard, normName, true, servicesSplit, true, tierBaseNames);
+      const b = engine._bucketApptType(senior, normName, true, servicesSplit, true, tierBaseNames);
       expect(a.bucketKey).toBe(b.bucketKey);
       expect(a.displayName).toBe('New Patient');
       expect(b.displayName).toBe('New Patient');
     });
 
-    test('tier-merge: falls back to the service name when no service anywhere has a real patientType (e.g. Sports Massage)', () => {
+    test('tier-merge: falls back to the (adjective-stripped) base name when no service anywhere has a real patientType (e.g. Sports Massage)', () => {
       const servicesSplit = new Set(); // no service has a real split in this scenario
-      const t = { id: '1', name: 'Sports Massage Therapist', category: 'Sports Massage', duration_in_minutes: 60 };
-      const r = engine._bucketApptType(t, normName, true, servicesSplit, true);
-      expect(r.displayName).toBe('Sports Massage');
+      const tierBaseNames = new Set(['sports massage therapist']); // real pair: plain + "Senior Sports Massage Therapist"
+      const standard = { id: '1', name: 'Sports Massage Therapist', category: 'Sports Massage', duration_in_minutes: 60 };
+      const senior   = { id: '2', name: 'Senior Sports Massage Therapist', category: 'Sports Massage', duration_in_minutes: 60 };
+      const r = engine._bucketApptType(standard, normName, true, servicesSplit, true, tierBaseNames);
+      const rSenior = engine._bucketApptType(senior, normName, true, servicesSplit, true, tierBaseNames);
+      expect(r.displayName).toBe('Sports Massage Therapist');
+      expect(rSenior.displayName).toBe('Sports Massage Therapist');
+      expect(r.bucketKey).toBe(rSenior.bucketKey);
     });
 
-    test('tier-merge does NOT collapse two genuinely different types missing duration_in_minutes (defensive: falls through to name+service bucketing)', () => {
+    test('a name with no tier-adjective PAIR present is NEVER merged, even if patientType-less (e.g. "Initial Visit"/"Return Visit" — the real regression this guards against)', () => {
       const servicesSplit = new Set();
-      const initial = { id: '1', name: 'Initial Visit', category: 'Physiotherapy' }; // no duration_in_minutes
-      const returnV = { id: '2', name: 'Return Visit', category: 'Physiotherapy' };   // no duration_in_minutes
-      const a = engine._bucketApptType(initial, normName, true, servicesSplit, true);
-      const b = engine._bucketApptType(returnV, normName, true, servicesSplit, true);
+      const tierBaseNames = new Set(); // no genuine tier pair detected anywhere
+      const initial = { id: '1', name: 'Initial Visit', category: 'Physiotherapy', duration_in_minutes: 60 };
+      const returnV = { id: '2', name: 'Return Visit', category: 'Physiotherapy', duration_in_minutes: 30 };
+      const a = engine._bucketApptType(initial, normName, true, servicesSplit, true, tierBaseNames);
+      const b = engine._bucketApptType(returnV, normName, true, servicesSplit, true, tierBaseNames);
       expect(a.bucketKey).not.toBe(b.bucketKey);
       expect(a.displayName).toBe('Initial Visit');
       expect(b.displayName).toBe('Return Visit');
@@ -4785,10 +4808,11 @@ describe('Booking menu and flow coverage', () => {
 
     test('hasTierMerge=false (e.g. HK, no physioTiers capability): never merges, always uses original name+service bucketing regardless of patientType', () => {
       const servicesSplit = new Set(['Physiotherapy']);
+      const tierBaseNames = new Set(['physiotherapist']);
       const standard = { id: '1', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
       const senior   = { id: '2', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
-      const a = engine._bucketApptType(standard, normName, false, servicesSplit, false);
-      const b = engine._bucketApptType(senior, normName, false, servicesSplit, false);
+      const a = engine._bucketApptType(standard, normName, false, servicesSplit, false, tierBaseNames);
+      const b = engine._bucketApptType(senior, normName, false, servicesSplit, false, tierBaseNames);
       expect(a.bucketKey).not.toBe(b.bucketKey);
       expect(a.displayName).toBe('Physiotherapist');
       expect(b.displayName).toBe('Senior Physiotherapist');
@@ -4796,10 +4820,10 @@ describe('Booking menu and flow coverage', () => {
 
     test('a real New/Follow-up type (patientType present) is never touched by tier-merge, even when hasTierMerge=true', () => {
       const servicesSplit = new Set(['Physiotherapy']);
+      const tierBaseNames = new Set(['physiotherapist']);
       const t = { id: '1', name: 'New Patient', category: 'Physiotherapy', duration_in_minutes: 45 };
-      const r = engine._bucketApptType(t, normName, true, servicesSplit, true);
+      const r = engine._bucketApptType(t, normName, true, servicesSplit, true, tierBaseNames);
       expect(r.displayName).toBe('New Patient'); // unchanged, real name, not the merge fallback
-      expect(r.bucketKey).not.toMatch(/^tier:/);
     });
 
     test('isSG=false + hasTierMerge=false (fully off): identical same-name-different-category types merge into ONE bucket by name only (original HK behavior, byte-identical)', () => {
