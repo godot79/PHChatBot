@@ -1730,8 +1730,8 @@ describe('Booking menu and flow coverage', () => {
       // type) — still two distinct, non-colliding names, one per service.
       const names = d.appointment_type_list.map(x => x.name);
       expect(new Set(names).size).toBe(names.length);
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapy (Self-pay)');
+      expect(names).toContainEqual('Sports Massage (Self-pay)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4253,8 +4253,8 @@ describe('Booking menu and flow coverage', () => {
       // Both fall back to their own service name (never the raw
       // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
       // naming fix — see the equivalent BOOK_HISTORY test for detail.
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapy (Self-pay)');
+      expect(names).toContainEqual('Sports Massage (Self-pay)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4395,8 +4395,8 @@ describe('Booking menu and flow coverage', () => {
       // Both fall back to their own service name (never the raw
       // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
       // naming fix — see the equivalent BOOK_HISTORY test for detail.
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapy (Self-pay)');
+      expect(names).toContainEqual('Sports Massage (Self-pay)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4558,8 +4558,8 @@ describe('Booking menu and flow coverage', () => {
       // Both fall back to their own service name (never the raw
       // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
       // naming fix — see the equivalent BOOK_HISTORY test for detail.
-      expect(names).toContainEqual('Physiotherapy');
-      expect(names).toContainEqual('Sports Massage');
+      expect(names).toContainEqual('Physiotherapy (Self-pay)');
+      expect(names).toContainEqual('Sports Massage (Self-pay)');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
@@ -4619,15 +4619,15 @@ describe('Booking menu and flow coverage', () => {
       const a = engine._bucketApptType(standard, normName, true, servicesSplit, true);
       const b = engine._bucketApptType(senior, normName, true, servicesSplit, true);
       expect(a.bucketKey).toBe(b.bucketKey);
-      expect(a.displayName).toBe('New Patient');
-      expect(b.displayName).toBe('New Patient');
+      expect(a.displayName).toBe('New Patient (Self-pay)');
+      expect(b.displayName).toBe('New Patient (Self-pay)');
     });
 
     test('tier-merge: falls back to the service name when no service anywhere has a real patientType (e.g. Sports Massage)', () => {
       const servicesSplit = new Set(); // no service has a real split in this scenario
       const t = { id: '1', name: 'Sports Massage Therapist', category: 'Sports Massage', duration_in_minutes: 60 };
       const r = engine._bucketApptType(t, normName, true, servicesSplit, true);
-      expect(r.displayName).toBe('Sports Massage');
+      expect(r.displayName).toBe('Sports Massage (Self-pay)');
     });
 
     test('tier-merge does NOT collapse two genuinely different types missing duration_in_minutes (defensive: falls through to name+service bucketing)', () => {

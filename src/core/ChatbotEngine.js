@@ -878,7 +878,14 @@ class ChatbotEngine {
     // otherwise merge with any other same-service type similarly missing it,
     // regardless of how different their actual names are.
     if (hasTierMerge && !patientType && service && duration) {
-      const mergedName = servicesWithPatientTypeSplit.has(service) ? 'New Patient' : service;
+      // "(Self-pay)" is required, not cosmetic: when this service also has a
+      // real insured "New Patient" bucket at the same duration (the common
+      // case — Bupa/Cigna New Patient is usually the same 45min as the
+      // self-pay visit), an unqualified "New Patient" here would render as
+      // two menu rows with the IDENTICAL label and no way for the patient to
+      // tell them apart — confirmed live 2026-09-30 (handleBookSpecificPhysio
+      // showed "New Patient (45min)" twice, one self-pay one insured).
+      const mergedName = (servicesWithPatientTypeSplit.has(service) ? 'New Patient' : service) + ' (Self-pay)';
       const bucketKey = `tier:${service}|${insurer || ''}|${duration}`;
       return { bucketKey, displayName: mergedName, service, duration };
     }
