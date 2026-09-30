@@ -1981,12 +1981,31 @@ async handleMessageEnvelope(message, phoneNumber) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_MANAGE_OPTIONS });
       return await this.goToInteractiveMenu(session);
     }
-    if (text === '1' || text.includes('history')) {
+    // Keyword shortcuts below are a fast path for a tapped button/list row
+    // (real WhatsApp interactive replies send the row id, e.g. "4", or its
+    // exact title, e.g. "Specific physio" — see webhook.js's button_reply/
+    // list_reply handling) or a short typed word matching one. They must NOT
+    // fire on a longer free-text sentence that happens to contain the
+    // keyword as a real word — live-confirmed bug (2026-09-30 NLU stress
+    // test): "can i book with jade for physio next wednesday" contains the
+    // word "physio", so this used to short-circuit straight to
+    // handleBookSpecificPhysio with data wiped, before the NLU block below
+    // ever ran — silently dropping the physio-name and date slots it would
+    // otherwise have extracted. Gating on word count keeps the short-tap
+    // fast path (button titles are at most 3 words: "By last visit") while
+    // routing any longer sentence to NLU instead, same principle as the
+    // existing 'date'/'clinic' word-boundary fixes below (which stop a
+    // false-positive substring match, not slot-dropping, but the fix shape
+    // — don't let a keyword match short-circuit a real sentence — is the
+    // same class of problem).
+    const MAX_KEYWORD_SHORTCUT_WORDS = 3;
+    const isShortKeywordReply = (re) => re.test(text) && text.split(/\s+/).filter(Boolean).length <= MAX_KEYWORD_SHORTCUT_WORDS;
+    if (text === '1' || isShortKeywordReply(/\bhistory\b/)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_HISTORY, data: null });
       session.data = null;
       return await this.handleBookHistory(session, '');
     }
-    if (text === '2' || text.includes('soonest')) {
+    if (text === '2' || isShortKeywordReply(/\bsoonest\b/)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SOONEST, data: null });
       session.data = null;
       return await this.handleBookSoonest(session, '');
@@ -1996,19 +2015,19 @@ async handleMessageEnvelope(message, phoneNumber) {
     // unrelated free text into this funnel with data wiped before the NLU
     // layer below ever gets a chance. Live-confirmed risk (see 'clinic' fix
     // just below — same class, "clinical" contains "clinic").
-    if (text === '3' || /\bdate\b/.test(text)) {
+    if (text === '3' || isShortKeywordReply(/\bdate\b/)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_DATE, data: null });
       session.data = null;
       return await this.handleBookSpecificDate(session, '');
     }
-    if (text === '4' || text.includes('physio')) {
+    if (text === '4' || isShortKeywordReply(/\bphysio\b/)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_PHYSIO, data: null });
       session.data = null;
       return await this.handleBookSpecificPhysio(session, '');
     }
     // Word-boundary match — 'clinic' as a bare substring false-positives on
     // "clinical" (e.g. "clinical pilates", "clinical assessment").
-    if (text === '5' || /\bclinic\b/.test(text)) {
+    if (text === '5' || isShortKeywordReply(/\bclinic\b/)) {
       await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC, data: null });
       session.data = null;
       return await this.handleBookSpecificClinic(session, '');

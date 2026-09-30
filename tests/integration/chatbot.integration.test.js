@@ -1369,6 +1369,79 @@ describe('Booking menu and flow coverage', () => {
       expect(reply.length).toBeGreaterThan(0);
     });
 
+    // Bug found live 2026-09-30 (NLU branch stress test): the bare keyword
+    // shortcuts (text.includes('physio') etc.) used to fire on ANY message
+    // containing the word, including a full sentence carrying real slots —
+    // "can i book with jade for physio next wednesday" short-circuited
+    // straight to handleBookSpecificPhysio with data wiped, before
+    // classifyIntent ever ran, silently dropping the physio-name/date slots
+    // NLU would otherwise have extracted. Fix: gate the shortcut on word
+    // count so it only fires for a short tap-like reply, not a sentence.
+    describe('keyword shortcuts must not short-circuit a longer sentence before NLU runs', () => {
+      test('a short bare keyword ("physio") still takes the fast path (no NLU call)', async () => {
+        const session = await seedAt('BOOKING_METHOD_OPTIONS');
+        await callHandler(engine, ['handleBookingMethodOptions'], session, 'physio');
+        expect(NluRouter.classifyIntent).not.toHaveBeenCalled();
+        const updated = await db.getSession(session.id);
+        expect(updated.conversation_state).toBe('BOOK_SPECIFIC_PHYSIO');
+      });
+
+      test('a full sentence containing "physio" reaches NLU instead of short-circuiting', async () => {
+        NluRouter.classifyIntent.mockResolvedValueOnce({
+          intent: 'book_specific_physio',
+          slots: { physio: { value: 'jade', confidence: 0.9 }, date: { value: '2026-10-07', confidence: 0.9 } },
+          confidence: 0.95,
+        });
+        const session = await seedAt('BOOKING_METHOD_OPTIONS');
+        await callHandler(engine, ['handleBookingMethodOptions'], session, 'can i book with jade for physio next wednesday');
+        expect(NluRouter.classifyIntent).toHaveBeenCalled();
+      });
+
+      test('a full sentence containing "date" reaches NLU instead of short-circuiting', async () => {
+        NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_specific_date', slots: {}, confidence: 0.95 });
+        const session = await seedAt('BOOKING_METHOD_OPTIONS');
+        await callHandler(engine, ['handleBookingMethodOptions'], session, 'is there a date next week that works for me');
+        expect(NluRouter.classifyIntent).toHaveBeenCalled();
+      });
+
+      test('a full sentence containing "clinic" reaches NLU instead of short-circuiting', async () => {
+        NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_specific_clinic', slots: {}, confidence: 0.95 });
+        const session = await seedAt('BOOKING_METHOD_OPTIONS');
+        await callHandler(engine, ['handleBookingMethodOptions'], session, 'is there a clinic open near me on saturday');
+        expect(NluRouter.classifyIntent).toHaveBeenCalled();
+      });
+
+      test('a full sentence containing "history" reaches NLU instead of short-circuiting', async () => {
+        NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_history', slots: {}, confidence: 0.95 });
+        const session = await seedAt('BOOKING_METHOD_OPTIONS');
+        await callHandler(engine, ['handleBookingMethodOptions'], session, 'can you check my history and book the same again');
+        expect(NluRouter.classifyIntent).toHaveBeenCalled();
+      });
+
+      test('a full sentence containing "soonest" reaches NLU instead of short-circuiting', async () => {
+        NluRouter.classifyIntent.mockResolvedValueOnce({ intent: 'book_soonest', slots: {}, confidence: 0.95 });
+        const session = await seedAt('BOOKING_METHOD_OPTIONS');
+        await callHandler(engine, ['handleBookingMethodOptions'], session, 'just give me the soonest slot you have available please');
+        expect(NluRouter.classifyIntent).toHaveBeenCalled();
+      });
+
+      test('short typed keyword replies still take the fast path for each shortcut', async () => {
+        for (const [text, expectedState] of [
+          ['history', 'BOOK_HISTORY'],
+          ['soonest', 'BOOK_SOONEST'],
+          ['specific date', 'BOOK_SPECIFIC_DATE'],
+          ['specific physio', 'BOOK_SPECIFIC_PHYSIO'],
+          ['specific clinic', 'BOOK_SPECIFIC_CLINIC'],
+        ]) {
+          const session = await seedAt('BOOKING_METHOD_OPTIONS');
+          await callHandler(engine, ['handleBookingMethodOptions'], session, text);
+          const updated = await db.getSession(session.id);
+          expect(updated.conversation_state).toBe(expectedState);
+        }
+        expect(NluRouter.classifyIntent).not.toHaveBeenCalled();
+      });
+    });
+
     test('invalid input → validation message with menu (not a dead end)', async () => {
       const session = await seedAt('BOOKING_METHOD_OPTIONS');
       const reply   = await engine.handleBookingMethodOptions(session, 'xyz');

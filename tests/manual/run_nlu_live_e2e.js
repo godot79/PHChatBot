@@ -60,7 +60,7 @@ async function seedSession(engine, phone, seed) {
     verification_status: 'verified',
     verified: 1,
     patient_id: 'LIVE-E2E-TEST-PATIENT',
-    context: { region: 'HK', language: 'en' },
+    context: { region: seed.region || 'HK', language: 'en' },
     data: JSON.stringify({ email: 'live-e2e-test@example.invalid', patient_name: 'Live E2E Test', ...(seed.data || {}) }),
   });
   // A real chat-history row so handleMessageEnvelope's first-contact detection (which only
