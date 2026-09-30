@@ -934,6 +934,13 @@ describe('ChatbotEngine.handleBookSoonest — choose_physio row order (live)', (
       verification_status: 'verified',
       verified: 1,
       conversation_state: 'BOOK_SOONEST',
+      // Real HK data via hk() above, so the session must actually be HK —
+      // _getSessionRegion() defaults to 'SG' when context.region is unset,
+      // which would otherwise silently exercise the SG-only final_pick
+      // name-disambiguation path (see _stepApptFunnel) against this real HK
+      // catalogue. Real sessions always have region set by INTRO before
+      // reaching BOOK_SOONEST; only this synthetic fixture was missing it.
+      context: JSON.stringify({ region: 'HK' }),
       data: JSON.stringify({
         email: 'live-test@example.com',
         selection_step: 'choose_type',

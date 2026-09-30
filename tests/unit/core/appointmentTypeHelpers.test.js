@@ -402,6 +402,7 @@ describe('buildFunnelCatalogue()', () => {
     expect(entry).toEqual({
       id: '1',
       name: 'New Patient 60 Min',
+      norm_name: 'new patient 60 min',
       service: 'Physiotherapy',
       insurer: null,
       patientType: 'new',
@@ -414,6 +415,7 @@ describe('buildFunnelCatalogue()', () => {
     expect(entry).toEqual({
       id: '2',
       name: 'Follow-Up 40 Min',
+      norm_name: 'follow up 40 min',
       service: 'Physiotherapy',
       insurer: 'Bupa Global',
       patientType: 'follow_up',
@@ -484,6 +486,7 @@ describe('resolveApptFromFunnel()', () => {
       name: 'New Patient 60 Min',
       ids: ['1', '5'],
       norm_name: 'new patient 60 min',
+      norm_names: ['new patient 60 min'],
       insurer: null,
     });
   });
@@ -559,5 +562,50 @@ describe('resolveApptFromFunnel()', () => {
 
   test('empty catalogue → null', () => {
     expect(resolveApptFromFunnel([], { service: 'X', patientType: 'new', insurer: null, duration: 60 })).toBeNull();
+  });
+
+  // Regression (2026-09-29): SG's self-pay Physiotherapy has two distinct
+  // Cliniko types — "Physiotherapist" (standard-rate physios) and "Senior
+  // Physiotherapist" (senior-rate physios) — same service/patientType(null)/
+  // insurer/duration, differing only by practitioner rate tier, not by any
+  // real session-type difference. These must merge into one resolved entry
+  // (ids = union) with a sensible display name, never an arbitrary raw
+  // Cliniko name like "Senior Physiotherapist" (a job title, not a visit
+  // type) — and norm_names must still carry both REAL names so downstream
+  // slot/practitioner matching isn't broken by the display-name override.
+  describe('patientType-null tier-merge naming', () => {
+    const tieredCatalogue = [
+      { id: 'std', name: 'Physiotherapist', norm_name: 'physiotherapist', service: 'Physiotherapy', insurer: null, patientType: null, duration: 45 },
+      { id: 'sen', name: 'Senior Physiotherapist', norm_name: 'senior physiotherapist', service: 'Physiotherapy', insurer: null, patientType: null, duration: 45 },
+      // Proves this service DOES have a real New/Follow-up split elsewhere (insured)
+      { id: 'ins-new', name: 'New Patient', norm_name: 'new patient', service: 'Physiotherapy', insurer: 'Bupa Global', patientType: 'new', duration: 45 },
+    ];
+
+    test('merges both tier ids under one resolved entry, named "New Patient" (service has a real split elsewhere)', () => {
+      const result = resolveApptFromFunnel(tieredCatalogue, {
+        service: 'Physiotherapy', patientType: null, insurer: null, duration: 45,
+      });
+      expect(result.name).toBe('New Patient');
+      expect(new Set(result.ids)).toEqual(new Set(['std', 'sen']));
+    });
+
+    test('norm_names carries both REAL Cliniko names, unaffected by the display-name override', () => {
+      const result = resolveApptFromFunnel(tieredCatalogue, {
+        service: 'Physiotherapy', patientType: null, insurer: null, duration: 45,
+      });
+      expect(new Set(result.norm_names)).toEqual(new Set(['physiotherapist', 'senior physiotherapist']));
+    });
+
+    test('falls back to the service name when the service has NO real New/Follow-up split anywhere (e.g. Sports Massage)', () => {
+      const sportsMassageCatalogue = [
+        { id: 'a', name: 'Physiotherapist', norm_name: 'physiotherapist', service: 'Sports Massage', insurer: null, patientType: null, duration: 45 },
+        { id: 'b', name: 'Sports Massage Therapist', norm_name: 'sports massage therapist', service: 'Sports Massage', insurer: null, patientType: null, duration: 60 },
+      ];
+      const result = resolveApptFromFunnel(sportsMassageCatalogue, {
+        service: 'Sports Massage', patientType: null, insurer: null, duration: 45,
+      });
+      expect(result.name).toBe('Sports Massage');
+      expect(result.ids).toEqual(['a']);
+    });
   });
 });

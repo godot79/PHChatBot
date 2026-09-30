@@ -122,4 +122,33 @@ function getRegionFeesForLanguage(region, language) {
   return entry[language] || entry.en;
 }
 
-module.exports = { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage };
+/**
+ * Region capability flags — feature gates keyed by capability name, not by
+ * literal region checks scattered through ChatbotEngine.js. A region simply
+ * omits a flag (or sets it false) when the capability doesn't apply; callers
+ * use hasCapability() rather than comparing region strings directly, so
+ * enabling/disabling a feature for a region (or adding it to a new one) is a
+ * one-line config change, not a code change.
+ */
+const REGION_CAPABILITIES = {
+  SG: {
+    // Some appointment types differ only by which physio holds them (rate
+    // tier), not by session type (e.g. SG's "Physiotherapist" vs "Senior
+    // Physiotherapist" — same visit, priced per practitioner). When true, a
+    // dedicated funnel step asks which tier before the gender-preference
+    // step, instead of surfacing the tier as if it were a different
+    // appointment type. See project_singapore_physio_tiers memory.
+    physioTiers: true,
+  },
+};
+
+/**
+ * @param {string} region
+ * @param {string} capability
+ * @returns {boolean}
+ */
+function hasCapability(region, capability) {
+  return !!(REGION_CAPABILITIES[region] && REGION_CAPABILITIES[region][capability]);
+}
+
+module.exports = { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage, REGION_CAPABILITIES, hasCapability };
