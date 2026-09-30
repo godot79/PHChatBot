@@ -1711,8 +1711,8 @@ describe('Booking menu and flow coverage', () => {
 
     test('SG: same-named types under different categories stay separate (fix/sg-appt-type-name-collision)', async () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
-        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
       ]);
       const session = await seedAt('BOOK_HISTORY', physioListData); // default region SG
       await callHandler(engine, ['handleBookHistory'], session, '');
@@ -1722,17 +1722,22 @@ describe('Booking menu and flow coverage', () => {
       expect(idSets).toContainEqual(['AT-PHYSIO']);
       expect(idSets).toContainEqual(['AT-MASSAGE']);
       // Display names must be disambiguated too — a patient can't tell two
-      // identically-labeled rows apart in a WhatsApp list.
+      // identically-labeled rows apart in a WhatsApp list. Both entries here
+      // have no real New/Follow-up split and no patientType split anywhere
+      // for either service in this fixture, so per the 2026-09-29 tier-merge
+      // fix each falls back to its own service name (never the raw
+      // practitioner-title "Physiotherapist", which isn't a real session
+      // type) — still two distinct, non-colliding names, one per service.
       const names = d.appointment_type_list.map(x => x.name);
       expect(new Set(names).size).toBe(names.length);
-      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
-      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
+      expect(names).toContainEqual('Physiotherapy');
+      expect(names).toContainEqual('Sports Massage');
     });
 
     test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
-        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
       ]);
       const session = await seedAt('BOOK_HISTORY', { ...physioListData, });
       await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
@@ -3338,6 +3343,111 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_SOONEST — physio-tier funnel (SG-style, config-gated) ──────────────
+  // Confirmed live 2026-09-29: SG's tier-merged self-pay Physiotherapy type
+  // (see the tier-merge tests above) spans practitioners at two rate tiers.
+  // This funnel asks which tier BEFORE gender, only when the region has the
+  // 'physioTiers' capability and the type actually spans >1 real name.
+  describe('BOOK_SOONEST — physio-tier funnel', () => {
+    const STANDARD_1 = { id: 'PRAC-STD', first_name: 'Jade',  last_name: 'Yap' };
+    const SENIOR_1   = { id: 'PRAC-SEN', first_name: 'Chris', last_name: 'Wong' };
+
+    // mockImplementation (not mockResolvedValue) on the INSTANCE persists
+    // across tests — resetCliniko()'s beforeEach only restores the prototype
+    // default (per this file's own documented convention, see resetCliniko()
+    // above) — so tests after this block would otherwise silently inherit a
+    // practitioner-id-branching implementation they don't expect. Restore the
+    // prototype's own default explicitly.
+    afterEach(() => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
+
+    function tierMergedSession(extra = {}) {
+      return {
+        selection_step: 'choose_physio',
+        selected_appt_type: {
+          name: 'New Patient',
+          norm_name: 'physiotherapist',
+          norm_names: ['physiotherapist', 'senior physiotherapist'],
+          ids: ['AT-STD', 'AT-SEN'],
+        },
+        practitioner_list: [STANDARD_1, SENIOR_1],
+        practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
+        ...extra,
+      };
+    }
+
+    test('asks tier BEFORE gender when the type spans 2 real tier names (SG default region)', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_1.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SOONEST', tierMergedSession({
+        physio_funnel_step: undefined, // not yet done, but tier gate must fire FIRST regardless
+      }));
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, ''));
+      expect(reply).toMatch(/which physio/i);
+      expect(reply).toMatch(/physiotherapist/i);
+      expect(reply).toMatch(/senior physiotherapi/i); // truncated at WhatsApp's 20-char button limit
+      // Must NOT have fallen through to the gender prompt on this same turn.
+      expect(reply).not.toMatch(/male|female|no preference/i);
+    });
+
+    test('picking a tier filters the practitioner list, then still asks gender', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_1.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SOONEST', tierMergedSession({ physio_funnel_step: undefined }));
+      await callHandler(engine, ['handleBookSoonest'], session, ''); // shows tier prompt
+      const s2 = await db.getSession(session.id);
+      const reply2 = String(await callHandler(engine, ['handleBookSoonest'], s2, '1')); // pick "Physiotherapist" (standard)
+      // "1" must be consumed by the tier prompt, not leaked into gender — the
+      // very next reply must be the gender prompt, not a re-rendered tier menu
+      // or a physio list (which would mean "1" got silently discarded/misrouted).
+      expect(reply2).toMatch(/male|female|no preference/i);
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.physio_tier_sel).toBe('physiotherapist');
+    });
+
+    test('typing "1" for a real numeric physio selection is never swallowed by an instant tier no-op (region/type without a tier split)', async () => {
+      // Regression: the tier gate used to unconditionally recurse with a
+      // cleared text even when it was a no-op, discarding a real physio
+      // selection sent on the very same turn the gate resolves.
+      const session = await seedAt('BOOK_SOONEST', {
+        selection_step: 'choose_physio',
+        selected_appt_type: TYPE_1, // no norm_names — not tier-merged
+        practitioner_list: [PHYSIO_1, PHYSIO_2],
+        practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
+      });
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], session, '1'));
+      expect(reply).not.toMatch(/select a practitioner/i); // must have advanced, not re-rendered the list
+    });
+
+    test('HK (no physioTiers capability): never asks the tier question, even for a same-shape tier-merged type', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_1.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SOONEST', tierMergedSession({ physio_funnel_step: undefined }));
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSoonest'], refreshed, ''));
+      expect(reply).not.toMatch(/which physio/i);
+      expect(reply).toMatch(/male|female|no preference/i); // falls straight through to gender
+    });
+  });
+
   // ─── BOOK_SOONEST — gender preference funnel ─────────────────────────────────
   describe('BOOK_SOONEST — gender preference funnel', () => {
     // Mixed-gender practitioner pool used across tests
@@ -4122,8 +4232,8 @@ describe('Booking menu and flow coverage', () => {
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
       ]);
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
-        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_DATE', {
         selection_step: 'choose_date',
@@ -4140,8 +4250,31 @@ describe('Booking menu and flow coverage', () => {
       // identically-labeled rows apart in a WhatsApp list.
       const names = d.appointment_type_list.map(x => x.name);
       expect(new Set(names).size).toBe(names.length);
-      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
-      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
+      // Both fall back to their own service name (never the raw
+      // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
+      // naming fix — see the equivalent BOOK_HISTORY test for detail.
+      expect(names).toContainEqual('Physiotherapy');
+      expect(names).toContainEqual('Sports Massage');
+    });
+
+    test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        navigation_chain: [],
+      });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificDate'], refreshed, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(1);
+      expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-MASSAGE', 'AT-PHYSIO']);
     });
   });
 
@@ -4241,8 +4374,8 @@ describe('Booking menu and flow coverage', () => {
 
     test('SG: same-named types under different categories stay separate (fix/sg-appt-type-name-collision)', async () => {
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
-        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
         selection_step: 'choose_type',
@@ -4259,8 +4392,29 @@ describe('Booking menu and flow coverage', () => {
       // identically-labeled rows apart in a WhatsApp list.
       const names = d.appointment_type_list.map(x => x.name);
       expect(new Set(names).size).toBe(names.length);
-      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
-      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
+      // Both fall back to their own service name (never the raw
+      // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
+      // naming fix — see the equivalent BOOK_HISTORY test for detail.
+      expect(names).toContainEqual('Physiotherapy');
+      expect(names).toContainEqual('Sports Massage');
+    });
+
+    test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_PHYSIO', {
+        selection_step: 'choose_type',
+        selected_physio: PHYSIO_1,
+        navigation_chain: [{ selection_step: 'choose_physio', had_multiple_options: true, auto: false }],
+      });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificPhysio'], refreshed, '');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(1);
+      expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-MASSAGE', 'AT-PHYSIO']);
     });
   });
 
@@ -4383,8 +4537,8 @@ describe('Booking menu and flow coverage', () => {
         { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
       ]);
       engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
-        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy' },
-        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage' },
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
       ]);
       const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
         selection_step: 'choose_type',
@@ -4401,8 +4555,118 @@ describe('Booking menu and flow coverage', () => {
       // identically-labeled rows apart in a WhatsApp list.
       const names = d.appointment_type_list.map(x => x.name);
       expect(new Set(names).size).toBe(names.length);
-      expect(names).toContainEqual('Physiotherapist (Physiotherapy)');
-      expect(names).toContainEqual('Physiotherapist (Sports Massage)');
+      // Both fall back to their own service name (never the raw
+      // practitioner-title "Physiotherapist") per the 2026-09-29 tier-merge
+      // naming fix — see the equivalent BOOK_HISTORY test for detail.
+      expect(names).toContainEqual('Physiotherapy');
+      expect(names).toContainEqual('Sports Massage');
+    });
+
+    test('HK: same-named types under different categories still merge (region gate leaves HK unchanged)', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-PHYSIO', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 },
+        { id: 'AT-MASSAGE', name: 'Physiotherapist', category: 'Sports Massage', duration_in_minutes: 45 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_type',
+        selected_clinic: CLINIC_1,
+        navigation_chain: [{ selection_step: 'choose_clinic', had_multiple_options: true, auto: false }],
+      });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificClinic'], refreshed, '');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(1);
+      expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-MASSAGE', 'AT-PHYSIO']);
+    });
+  });
+
+  // ─── _bucketApptType / _servicesWithPatientTypeSplit (unit) ──────────────────
+  // Direct unit coverage for the shared bucket-merge helpers used by all 5
+  // choose_type builders (buildTypeCatalogue, handleBookHistory,
+  // handleBookSpecificDate x2, handleBookSpecificPhysio, handleBookSpecificClinic).
+  // Confirmed live 2026-09-29: SG's "Physiotherapist"/"Senior Physiotherapist"
+  // are the same self-pay visit, tier-priced per practitioner, not two session
+  // types — they must merge, with a sensible display name, never the raw
+  // practitioner-title Cliniko name. Gated by the 'physioTiers' region
+  // capability (config-driven, src/config/regions.js), not a region literal —
+  // but MUST still be opt-in per call, not unconditional: HK (no capability)
+  // relies on the ORIGINAL name+service bucketing to correctly separate real
+  // same-name-different-category collisions, and merging those unconditionally
+  // would silently change HK's behavior (confirmed as a real regression during
+  // development — see commit history).
+  describe('_bucketApptType / _servicesWithPatientTypeSplit (unit)', () => {
+    const normName = (s) => String(s || '').toLowerCase().trim();
+
+    test('_servicesWithPatientTypeSplit finds services with a real New/Follow-up split', () => {
+      const types = [
+        { name: 'New Patient', category: 'Bupa Global : Physiotherapy' },
+        { name: 'Physiotherapist', category: 'Physiotherapy' },
+        { name: 'Sports Massage Therapist', category: 'Sports Massage' },
+      ];
+      const set = engine._servicesWithPatientTypeSplit(types);
+      expect(set.has('Physiotherapy')).toBe(true); // via the Bupa entry
+      expect(set.has('Sports Massage')).toBe(false); // no patientType anywhere for this service
+    });
+
+    test('tier-merge (hasTierMerge=true): two same-service/duration/no-patientType entries merge, named "New Patient" (service has a real split elsewhere)', () => {
+      const servicesSplit = new Set(['Physiotherapy']);
+      const standard = { id: '1', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
+      const senior   = { id: '2', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
+      const a = engine._bucketApptType(standard, normName, true, servicesSplit, true);
+      const b = engine._bucketApptType(senior, normName, true, servicesSplit, true);
+      expect(a.bucketKey).toBe(b.bucketKey);
+      expect(a.displayName).toBe('New Patient');
+      expect(b.displayName).toBe('New Patient');
+    });
+
+    test('tier-merge: falls back to the service name when no service anywhere has a real patientType (e.g. Sports Massage)', () => {
+      const servicesSplit = new Set(); // no service has a real split in this scenario
+      const t = { id: '1', name: 'Sports Massage Therapist', category: 'Sports Massage', duration_in_minutes: 60 };
+      const r = engine._bucketApptType(t, normName, true, servicesSplit, true);
+      expect(r.displayName).toBe('Sports Massage');
+    });
+
+    test('tier-merge does NOT collapse two genuinely different types missing duration_in_minutes (defensive: falls through to name+service bucketing)', () => {
+      const servicesSplit = new Set();
+      const initial = { id: '1', name: 'Initial Visit', category: 'Physiotherapy' }; // no duration_in_minutes
+      const returnV = { id: '2', name: 'Return Visit', category: 'Physiotherapy' };   // no duration_in_minutes
+      const a = engine._bucketApptType(initial, normName, true, servicesSplit, true);
+      const b = engine._bucketApptType(returnV, normName, true, servicesSplit, true);
+      expect(a.bucketKey).not.toBe(b.bucketKey);
+      expect(a.displayName).toBe('Initial Visit');
+      expect(b.displayName).toBe('Return Visit');
+    });
+
+    test('hasTierMerge=false (e.g. HK, no physioTiers capability): never merges, always uses original name+service bucketing regardless of patientType', () => {
+      const servicesSplit = new Set(['Physiotherapy']);
+      const standard = { id: '1', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
+      const senior   = { id: '2', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 };
+      const a = engine._bucketApptType(standard, normName, false, servicesSplit, false);
+      const b = engine._bucketApptType(senior, normName, false, servicesSplit, false);
+      expect(a.bucketKey).not.toBe(b.bucketKey);
+      expect(a.displayName).toBe('Physiotherapist');
+      expect(b.displayName).toBe('Senior Physiotherapist');
+    });
+
+    test('a real New/Follow-up type (patientType present) is never touched by tier-merge, even when hasTierMerge=true', () => {
+      const servicesSplit = new Set(['Physiotherapy']);
+      const t = { id: '1', name: 'New Patient', category: 'Physiotherapy', duration_in_minutes: 45 };
+      const r = engine._bucketApptType(t, normName, true, servicesSplit, true);
+      expect(r.displayName).toBe('New Patient'); // unchanged, real name, not the merge fallback
+      expect(r.bucketKey).not.toMatch(/^tier:/);
+    });
+
+    test('isSG=false + hasTierMerge=false (fully off): identical same-name-different-category types merge into ONE bucket by name only (original HK behavior, byte-identical)', () => {
+      const servicesSplit = new Set();
+      const physio  = { id: '1', name: 'Physiotherapist', category: 'Physiotherapy' };
+      const massage = { id: '2', name: 'Physiotherapist', category: 'Sports Massage' };
+      const a = engine._bucketApptType(physio, normName, false, servicesSplit, false);
+      const b = engine._bucketApptType(massage, normName, false, servicesSplit, false);
+      expect(a.bucketKey).toBe(b.bucketKey); // HK merges same-name entries regardless of category
     });
   });
 

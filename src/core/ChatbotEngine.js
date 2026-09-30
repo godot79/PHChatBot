@@ -8,7 +8,7 @@ const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
-const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage } = require('../config/regions');
+const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage, hasCapability } = require('../config/regions');
 const { LANGUAGE_LABELS } = require('../config/languages');
 
 // LANGUAGE_LABELS entries may carry a "(English gloss)" suffix for readability
@@ -33,6 +33,7 @@ const {
   getPractitionersForTypeIds,
   getPractitionersForTypeName,
   parseApptCategory,
+  parseApptPatientType,
   buildFunnelCatalogue,
   resolveApptFromFunnel,
   _markPartial,
@@ -187,7 +188,7 @@ function planForward(data, selection_step, optionsCount, onAuto) {
 const CLEAR_FIELDS_BY_STEP = {
   choose_date: ['selected_date', 'appointment_type_list', 'appt_type_page', 'selected_appt_type', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic'],
   choose_type: ['selected_appt_type', 'insurer_page', 'practitioner_list', 'practitioner_page', 'selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'funnel_catalogue', 'funnel_step', 'funnel_sel'],
-  choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type', 'physio_funnel_step', 'physio_funnel_sel', 'physio_categories'],
+  choose_physio: ['selected_physio', 'clinic_list', 'clinic_page', 'selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type', 'physio_tier_step', 'physio_tier_sel', 'physio_tier_groups', 'physio_tier_names', 'physio_funnel_step', 'physio_funnel_sel', 'physio_categories'],
   choose_clinic: ['selected_clinic', 'appt_types_for_physio', 'appt_type_page', 'selected_appt_type'],
   choose_appt_type: ['selected_appt_type']
 };
@@ -803,11 +804,87 @@ class ChatbotEngine {
   _disambiguateSGTypeNames(list) {
     const nameCounts = new Map();
     for (const entry of list) nameCounts.set(entry.name, (nameCounts.get(entry.name) || 0) + 1);
-    return list.map(entry => (
-      nameCounts.get(entry.name) > 1 && entry.service
-        ? { ...entry, name: `${entry.name} (${entry.service})` }
-        : entry
-    ));
+    return list.map(entry => {
+      if (nameCounts.get(entry.name) <= 1) return entry;
+      // Prefer disambiguating by service (the original name-collision case —
+      // e.g. "Physiotherapist" under Physiotherapy vs Sports Massage). When
+      // the colliding entries share the same service too (the tier-merge
+      // case below can produce two same-named, same-service entries that
+      // differ only by duration — e.g. two "Sports Massage" rows), fall back
+      // to duration instead.
+      const collidingSameName = list.filter(e => e.name === entry.name);
+      const allSameService = collidingSameName.every(e => e.service === entry.service);
+      if (!allSameService && entry.service) return { ...entry, name: `${entry.name} (${entry.service})` };
+      if (allSameService && entry.duration) return { ...entry, name: `${entry.name} (${entry.duration}min)` };
+      return entry;
+    });
+  }
+
+  /**
+   * Every service (category) that has at least one REAL patientType
+   * (New/Follow-up) entry anywhere in the raw type list — used to decide
+   * whether a patientType-less entry's merged display name should fall back
+   * to "New Patient" (the service has a real split elsewhere, e.g. SG's
+   * insured Physiotherapy types) or to the service name itself (the service
+   * has no New/Follow-up concept anywhere, e.g. Sports Massage).
+   * @param {Array<{name:string, category:string}>} allTypes - raw Cliniko types
+   * @returns {Set<string>}
+   */
+  _servicesWithPatientTypeSplit(allTypes) {
+    const set = new Set();
+    for (const t of allTypes || []) {
+      if (!t || !t.name) continue;
+      const { service } = parseApptCategory(t.category);
+      if (service && parseApptPatientType(t.name)) set.add(service);
+    }
+    return set;
+  }
+
+  /**
+   * Determine the choose_type bucket key + display name for a raw Cliniko
+   * appointment type, collapsing practitioner-title/tier-label variants
+   * (e.g. SG's "Physiotherapist" vs "Senior Physiotherapist" — same service/
+   * duration/insurer, no real New/Follow-up split) into one bucket instead of
+   * exposing them as separate session types — confirmed live 2026-09-29:
+   * these are the same visit, priced per practitioner, not different visits.
+   * Gated by the 'physioTiers' region capability (config-driven, see
+   * src/config/regions.js), NOT a region literal — but this must still be
+   * opt-in per region rather than unconditional: a type with no real
+   * New/Follow-up split can legitimately be a genuine same-name-different-
+   * category collision (e.g. a generically-named type under two distinct
+   * categories) that the ORIGINAL name+service bucketing already handles
+   * correctly for every region, including regions without this capability —
+   * applying the tier-merge unconditionally there would silently change
+   * that region's bucketing (confirmed via a regression test: doing this
+   * without the gate changed HK's same-name-different-category merge
+   * behavior, violating the "HK must not change at all" constraint).
+   * @param {object} t - raw Cliniko type ({ id, name, category, duration_in_minutes })
+   * @param {(s:string)=>string} normName
+   * @param {boolean} isSG - still used for the ORIGINAL (name, service) collision bucketing, unrelated to the tier-merge below
+   * @param {Set<string>} servicesWithPatientTypeSplit - from _servicesWithPatientTypeSplit()
+   * @param {boolean} hasTierMerge - hasCapability(region, 'physioTiers')
+   * @returns {{ bucketKey: string, displayName: string, service: string, duration: number|undefined }}
+   */
+  _bucketApptType(t, normName, isSG, servicesWithPatientTypeSplit, hasTierMerge) {
+    const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
+    const { service, insurer } = parseApptCategory(t.category);
+    const duration = t.duration_in_minutes;
+    const patientType = parseApptPatientType(t.name);
+    // Require a real duration too — it's the only remaining dimension that
+    // keeps genuinely distinct same-service, no-patientType types (e.g. an
+    // "Initial Visit" vs a "Return Visit" whose names don't match the New/
+    // Follow-up regex) from being wrongly collapsed together. Confirmed as a
+    // real regression risk: a type missing duration_in_minutes would
+    // otherwise merge with any other same-service type similarly missing it,
+    // regardless of how different their actual names are.
+    if (hasTierMerge && !patientType && service && duration) {
+      const mergedName = servicesWithPatientTypeSplit.has(service) ? 'New Patient' : service;
+      const bucketKey = `tier:${service}|${insurer || ''}|${duration}`;
+      return { bucketKey, displayName: mergedName, service, duration };
+    }
+    const n = normName(display);
+    const bucketKey = isSG ? `${n} ${service || ''}` : n;
+    return { bucketKey, displayName: display, service, duration };
   }
 
   /**
@@ -2316,16 +2393,15 @@ async handleMessageEnvelope(message, phoneNumber) {
         const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: physioId });
 
         const isSG = this._getSessionRegion(session) === 'SG';
+        const servicesSplit = this._servicesWithPatientTypeSplit(types);
         const buckets = new Map(); // bucketKey -> { displayName, entries: [{id, insurer}] }
         for (const t of types || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
-          const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
-          const n = normName(display);
-          const { insurer, service } = parseApptCategory(t.category);
-          const bucketKey = isSG ? `${n} ${service || ''}` : n;
-          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+          const { insurer } = parseApptCategory(t.category);
+          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
 
@@ -2335,6 +2411,7 @@ async handleMessageEnvelope(message, phoneNumber) {
           ids: v.entries.map(e => e.id),
           entries: v.entries,
           service: v.service,
+          duration: v.duration,
         }));
         if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
         data.appointment_type_list = sortAppointmentTypes(typeList);
@@ -2995,6 +3072,96 @@ if (/^p(rev)?$/i.test(text)) {
     return result.length > 0 ? result : fullList;
   }
 
+  /**
+   * Physio-tier funnel (e.g. SG: standard vs senior physio) — asked BEFORE
+   * the gender-preference funnel, only when the region has the 'physioTiers'
+   * capability (config-driven, src/config/regions.js — not a region literal)
+   * AND the resolved (possibly tier-merged) appointment type actually spans
+   * more than one real Cliniko type name across the candidate practitioners.
+   * A no-op everywhere else (HK included), matching _stepPhysioFunnel's
+   * 'done' sentinel shape. Confirmed live 2026-09-29: SG's "Physiotherapist"
+   * vs "Senior Physiotherapist" is exactly this shape — same visit, priced
+   * per practitioner, no longer shown as separate appointment types (see
+   * resolveApptFromFunnel / _bucketApptType), but the choice of WHICH
+   * practitioner (tier) still needs to be made somewhere — here, before
+   * gender, not as a type-selection menu item.
+   *
+   * @param {object} session
+   * @param {object} data - data.selected_appt_type.norm_names and
+   *   data.practitioner_list must already be set by the caller.
+   * @param {string} text
+   * @returns {Promise<{reply}|{}>}
+   */
+  async _stepPhysioTierFunnel(session, data, text) {
+    const region = this._getSessionRegion(session);
+    const normNames = data.selected_appt_type && data.selected_appt_type.norm_names;
+    if (!hasCapability(region, 'physioTiers') || !normNames || normNames.length < 2) {
+      data.physio_tier_step = 'done';
+      return { skipped: true };
+    }
+
+    if (!data.physio_tier_groups) {
+      const pracList = data.practitioner_list || [];
+      // Match by the resolved type's own ids, NOT by name — a practitioner
+      // can hold an unrelated type sharing the same literal name under a
+      // different category (confirmed live 2026-09-29: Chris Wong and Teck
+      // Woon Tan both hold a Sports-Massage type literally named
+      // "Physiotherapist", which would otherwise wrongly classify them into
+      // the standard Physiotherapy tier). ids are already category-safe —
+      // resolveApptFromFunnel only ever collects matches sharing the same
+      // service/patientType/insurer/duration.
+      const idsSet = new Set((data.selected_appt_type.ids || []).map(String));
+      const groups = {};
+      await Promise.all(pracList.map(async (p) => {
+        const types = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: p.id });
+        const match = (types || []).find(t => idsSet.has(String(t.id)));
+        if (match) groups[String(p.id)] = normalizeTypeName(match.name);
+      }));
+      data.physio_tier_groups = groups;
+      data.physio_tier_names = [...new Set(Object.values(groups))];
+    }
+
+    if (data.physio_tier_names.length < 2) {
+      data.physio_tier_step = 'done';
+      return { skipped: true };
+    }
+
+    // NOTE: a real selection here consumes `text` — the caller must re-enter
+    // with a CLEARED text afterward (never fall through with the same text
+    // to the next gate), or a valid tier-menu numeric reply like "1" would
+    // get silently replayed as a gender-menu selection next — the same
+    // failure class as the insurer→final_pick text-leak bug fixed 2026-09-22.
+    const idx = /^\d+$/.test(text) ? parseInt(text, 10) - 1 : -1;
+    if (idx >= 0 && idx < data.physio_tier_names.length) {
+      data.physio_tier_sel = data.physio_tier_names[idx];
+      data.physio_tier_step = 'done';
+      return { resolved: true };
+    }
+
+    const badInput = text !== '';
+    const titleCase = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
+    const options = data.physio_tier_names.map((n, i) => ({ id: String(i + 1), title: titleCase(n).slice(0, 20) }));
+    const body = 'Which physio would you like?\n\n' + options.map((o, i) => `${i + 1}. ${o.title}`).join('\n') + '\n\nTap a button, or type a number.';
+    const menu = buttons(body, options);
+    menu._textFallback = body.replace('Tap a button, or type a number.', 'Reply with the number.');
+    return { reply: badInput ? prependTextToEnvelope('Please choose an option.', menu) : menu };
+  }
+
+  /**
+   * Filter a practitioner list by the resolved physio-tier preference.
+   * Practitioners with no known tier membership (shouldn't happen once
+   * _stepPhysioTierFunnel has run, but defensive) are included regardless.
+   * Falls back to the full list if the filter would produce an empty result.
+   */
+  _applyPhysioTierFilter(fullList, tierSel, tierGroups) {
+    if (!tierSel || !tierGroups || !fullList || !fullList.length) return fullList || [];
+    const result = fullList.filter(p => {
+      const tier = tierGroups[String(p.id)];
+      return !tier || tier === tierSel;
+    });
+    return result.length > 0 ? result : fullList;
+  }
+
   _savePhysioPref(session, sel) {
     const phone = session.phone_number || session.phoneNumber;
     const pref = { gender: sel.gender || null, category: sel.category || null };
@@ -3061,19 +3228,17 @@ if (/^p(rev)?$/i.test(text)) {
       const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
       data.funnel_catalogue = buildFunnelCatalogue(allTypes);
       const isSG = this._getSessionRegion(session) === 'SG';
+      const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
       const buckets = new Map(); // bucketKey -> { displayName, ids:Set }
       for (const t of allTypes || []) {
         if (!t || !t.name) continue;
         if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-        const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
-        const n = normName(display);
-        const { service } = parseApptCategory(t.category);
-        const bucketKey = isSG ? `${n} ${service || ''}` : n;
-        if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, ids: new Set(), service });
+        const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+        if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, ids: new Set(), service, duration });
         buckets.get(bucketKey).ids.add(String(t.id));
       }
       let list = Array.from(buckets.values())
-        .map(b => ({ name: b.displayName, id: Array.from(b.ids)[0], norm_name: normName(b.displayName), service: b.service }))
+        .map(b => ({ name: b.displayName, id: Array.from(b.ids)[0], norm_name: normName(b.displayName), service: b.service, duration: b.duration }))
         .sort((a, b) => a.name.localeCompare(b.name));
       if (isSG) list = this._disambiguateSGTypeNames(list);
       const map = {}; for (const [n, b] of buckets.entries()) map[n] = Array.from(b.ids);
@@ -3174,6 +3339,7 @@ if (/^p(rev)?$/i.test(text)) {
         data.appointment_type_list = list; data.appt_type_name_to_ids_norm = map; data.appt_type_page = 0;
         delete data.selected_appt_type; delete data.practitioner_list; delete data.selected_physio;
         delete data.funnel_step; delete data.funnel_sel;
+        delete data.physio_tier_step; delete data.physio_tier_sel; delete data.physio_tier_groups; delete data.physio_tier_names;
         delete data.physio_funnel_step; delete data.physio_funnel_sel; delete data.physio_categories;
         data.selection_step = 'choose_type';
         await sync({ conversation_state: this.STATES.BOOK_SOONEST });
@@ -3191,10 +3357,15 @@ if (/^p(rev)?$/i.test(text)) {
         const physios = typeNorms.size ? await buildAvailablePhysiosForTypeName(typeNorms) : [];
         if (physios.length > 1) {
           data.practitioner_list = sortPractitioners(physios); data.practitioner_page = 0; delete data.selected_physio;
+          data.physio_tier_step = 'done'; // skip tier funnel on back — pref already captured
           data.physio_funnel_step = 'done'; // skip funnel on back — pref already captured
           data.selection_step = 'choose_physio';
           await sync({ conversation_state: this.STATES.BOOK_SOONEST });
-          const effectiveList = this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories);
+          const effectiveList = this._applyPhysioTierFilter(
+            this._applyPhysioFilter(data.practitioner_list, data.physio_funnel_sel, data.physio_categories),
+            data.physio_tier_sel,
+            data.physio_tier_groups
+          );
           const reply = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
             items: effectiveList,
             rowFn: (p) => ({ title: getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) || `${p.first_name||''} ${p.last_name||''}`.trim() || '' }),
@@ -3335,6 +3506,23 @@ if (/^p(rev)?$/i.test(text)) {
       const practitionerList = data.practitioner_list || [];
       const page = data.practitioner_page || 0;
 
+      // Physio-tier funnel (SG-style: standard vs senior physio, config-gated,
+      // asked before gender) — a no-op wherever the region has no physioTiers
+      // capability or this type wasn't tier-merged into >1 real Cliniko name.
+      // Only recurse with a cleared text when it actually displayed a prompt;
+      // an instant no-op must fall through to the gender gate below using the
+      // SAME text, or a real numeric physio selection sent on the very same
+      // turn this gate resolves would be silently discarded (confirmed as a
+      // real bug via a regression test: seeding physio_funnel_step done but
+      // physio_tier_step unset, then sending "1", used to just re-render the
+      // list instead of selecting row 1).
+      if (data.physio_tier_step !== 'done') {
+        const fr = await this._stepPhysioTierFunnel(session, data, text);
+        await sync({ conversation_state: this.STATES.BOOK_SOONEST });
+        if (fr.reply) return fr.reply;
+        if (!fr.skipped) return await this.handleBookSoonest(session, '');
+      }
+
       // Gender-only preference funnel (no category step — type already chosen)
       if (data.physio_funnel_step !== 'done') {
         const fr = await this._stepPhysioFunnel(session, data, text, { skipCategory: true });
@@ -3343,7 +3531,11 @@ if (/^p(rev)?$/i.test(text)) {
         return await this.handleBookSoonest(session, '');
       }
 
-      const effectiveList = this._applyPhysioFilter(practitionerList, data.physio_funnel_sel, data.physio_categories);
+      const effectiveList = this._applyPhysioTierFilter(
+        this._applyPhysioFilter(practitionerList, data.physio_funnel_sel, data.physio_categories),
+        data.physio_tier_sel,
+        data.physio_tier_groups
+      );
 
       if (/^\d+$/.test(text)) {
         const pageStart = interactivePageStart(page);
@@ -3631,19 +3823,18 @@ if (/^p(rev)?$/i.test(text)) {
             const groups = await this.clinikoAPI.getPractitionersByClinic();
             const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
             const isSG = this._getSessionRegion(session) === 'SG';
+            const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
             const buckets = new Map();
             for (const t of allTypes || []) {
               if (!t || !t.name) continue;
               if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-              const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
-              const n = normName(display);
-              const { insurer, service } = parseApptCategory(t.category);
-              const bucketKey = isSG ? `${n} ${service || ''}` : n;
-              if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+              const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+              const { insurer } = parseApptCategory(t.category);
+              if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
               buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
             }
             let typeList = Array.from(buckets.values())
-              .map(v => ({ name: v.displayName, real_name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+              .map(v => ({ name: v.displayName, real_name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service, duration: v.duration }));
             if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
             data.appointment_type_list = sortAppointmentTypes(typeList);
             await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
@@ -3705,19 +3896,18 @@ if (/^p(rev)?$/i.test(text)) {
         const groups = await this.clinikoAPI.getPractitionersByClinic();
         const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
         const isSG = this._getSessionRegion(session) === 'SG';
+        const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
         const buckets = new Map();
         for (const t of allTypes || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-          const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
-          const n = normName(display);
-          const { insurer, service } = parseApptCategory(t.category);
-          const bucketKey = isSG ? `${n} ${service || ''}` : n;
-          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+          const { insurer } = parseApptCategory(t.category);
+          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
         let typeList = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+          .map(v => ({ name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service, duration: v.duration }));
         if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
         data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
@@ -4162,19 +4352,18 @@ if (/^p(rev)?$/i.test(text)) {
       if (!Array.isArray(data.appointment_type_list)) {
         const apptTypes = await this.clinikoAPI.getAppointmentTypes({ practitioner_id: String(data.selected_physio.id) });
         const isSG = this._getSessionRegion(session) === 'SG';
+        const servicesSplit = this._servicesWithPatientTypeSplit(apptTypes);
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-          const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
-          const n = normName(display);
-          const { insurer, service } = parseApptCategory(t.category);
-          const bucketKey = isSG ? `${n} ${service || ''}` : n;
-          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName: display, entries: [], service });
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+          const { insurer } = parseApptCategory(t.category);
+          if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
         }
         let typeList = Array.from(buckets.values())
-          .map(v => ({ name: v.displayName, real_name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service }));
+          .map(v => ({ name: v.displayName, real_name: v.displayName, ids: v.entries.map(e => e.id), norm: normName(v.displayName), entries: v.entries, service: v.service, duration: v.duration }));
         if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
         data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
@@ -4539,20 +4728,19 @@ if (/^p(rev)?$/i.test(text)) {
         );
         hadClinicTypeFailure = !!clinicTypesByPractitioner._partial || clinicTypesByPractitioner.some(types => types && types._partial);
         const isSG = this._getSessionRegion(session) === 'SG';
+        const servicesSplit = this._servicesWithPatientTypeSplit(clinicTypesByPractitioner.flat().filter(Boolean));
         for (const types of clinicTypesByPractitioner) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-            const display = String(t.name).replace(/\s+/g,' ').replace(/([A-Za-z])\(/g,'$1 (').replace(/\s+\)/g,')').trim();
-            const n = normName(display);
-            const { insurer, service } = parseApptCategory(t.category);
-            const bucketKey = isSG ? `${n} ${service || ''}` : n;
-            if (!buckets.has(bucketKey)) buckets.set(bucketKey, { display, entries: [], service });
+            const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'));
+            const { insurer } = parseApptCategory(t.category);
+            if (!buckets.has(bucketKey)) buckets.set(bucketKey, { display: displayName, entries: [], service, duration });
             buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
           }
         }
         let typeList = Array.from(buckets.values())
-          .map(v => ({ name: v.display, norm_name: normName(v.display), ids: v.entries.map(e => e.id), entries: v.entries, service: v.service }));
+          .map(v => ({ name: v.display, norm_name: normName(v.display), ids: v.entries.map(e => e.id), entries: v.entries, service: v.service, duration: v.duration }));
         if (isSG) typeList = this._disambiguateSGTypeNames(typeList);
         data.appointment_type_list = sortAppointmentTypes(typeList);
         data.appt_type_page = 0;
