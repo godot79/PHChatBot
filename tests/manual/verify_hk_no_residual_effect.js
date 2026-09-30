@@ -66,9 +66,13 @@ async function main() {
       await engine.handleBookSpecificClinic(session, '');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       assertNoMergeArtifacts(d.appointment_type_list, 'handleBookSpecificClinic');
+      const s2 = await db.getSession(session.id);
+      const reply = String(await engine.handleBookSpecificClinic(s2, '1'));
+      check('handleBookSpecificClinic: tier prompt never fires for HK', !/which physio would you like/i.test(reply), reply.slice(0, 150));
     }
 
-    // 2. handleBookSpecificDate
+    // 2. handleBookSpecificDate — also proceed into choose_physio to confirm
+    // the tier-funnel gate (wired in 2026-09-30) never fires for HK.
     {
       const session = await newSession(db, 'HK', 'BOOK_SPECIFIC_DATE', {
         selection_step: 'choose_date',
@@ -77,6 +81,9 @@ async function main() {
       await engine.handleBookSpecificDate(session, '1');
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       assertNoMergeArtifacts(d.appointment_type_list, 'handleBookSpecificDate');
+      const s2 = await db.getSession(session.id);
+      const reply = String(await engine.handleBookSpecificDate(s2, '1'));
+      check('handleBookSpecificDate: tier prompt never fires for HK', !/which physio would you like/i.test(reply), reply.slice(0, 150));
     }
 
     // 3. handleBookSpecificPhysio (first real physio)

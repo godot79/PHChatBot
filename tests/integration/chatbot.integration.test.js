@@ -3638,6 +3638,77 @@ describe('Booking menu and flow coverage', () => {
     });
   });
 
+  // ─── BOOK_SPECIFIC_DATE — physio-tier funnel (config-gated) ──────────────────
+  describe('BOOK_SPECIFIC_DATE — physio-tier funnel', () => {
+    const STANDARD_D = { id: 'PRAC-STD-D', first_name: 'Jade',  last_name: 'Yap' };
+    const SENIOR_D   = { id: 'PRAC-SEN-D', first_name: 'Chris', last_name: 'Wong' };
+
+    function tierMergedSession(extra = {}) {
+      return {
+        selection_step: 'choose_physio',
+        selected_date: '2026-08-05',
+        selected_appt_type: {
+          name: 'New Patient (Self-pay)',
+          ids: ['AT-STD', 'AT-SEN'],
+        },
+        practitioner_list: [STANDARD_D, SENIOR_D],
+        practitioner_page: 0,
+        physio_funnel_step: 'done',
+        physio_funnel_sel: { gender: null, category: null },
+        navigation_chain: [],
+        ...extra,
+      };
+    }
+
+    afterEach(() => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
+
+    test('asks tier before gender, then narrows the practitioner list', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_D.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SPECIFIC_DATE', tierMergedSession({ physio_funnel_step: undefined }));
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], session, ''));
+      expect(reply).toMatch(/which physio/i);
+      expect(reply).not.toMatch(/male|female|no preference/i);
+
+      // Tier option order isn't guaranteed (built from Promise.all over the
+      // practitioner list) — find "Physiotherapist" (standard) by its actual
+      // rendered position rather than assuming an index.
+      const standardIdx = [...reply.matchAll(/^(\d+)\.\s+(.+)$/gm)]
+        .find(m => /^physiotherapist$/i.test(m[2].trim()))?.[1];
+      expect(standardIdx).toBeTruthy();
+      const s2 = await db.getSession(session.id);
+      const reply2 = String(await callHandler(engine, ['handleBookSpecificDate'], s2, standardIdx));
+      expect(reply2).toMatch(/male|female|no preference/i);
+
+      const s3 = await db.getSession(session.id);
+      const reply3 = String(await callHandler(engine, ['handleBookSpecificDate'], s3, '3')); // no gender preference
+      expect(reply3).toMatch(/Jade/i);
+      expect(reply3).not.toMatch(/Chris/i);
+    });
+
+    test('HK: never asks the tier question', async () => {
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_D.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SPECIFIC_DATE', tierMergedSession({ physio_funnel_step: undefined }));
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificDate'], refreshed, ''));
+      expect(reply).not.toMatch(/which physio/i);
+      expect(reply).toMatch(/male|female|no preference/i);
+    });
+  });
+
   // ─── Text fallback alignment ──────────────────────────────────────────────────
   describe('physio funnel — text fallback alignment', () => {
     test('gender step interactive body includes numbered list for Mac Desktop fallback', async () => {
@@ -4581,6 +4652,77 @@ describe('Booking menu and flow coverage', () => {
       const d = JSON.parse((await db.getSession(session.id)).data || '{}');
       expect(d.appointment_type_list).toHaveLength(1);
       expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-MASSAGE', 'AT-PHYSIO']);
+    });
+  });
+
+  // ─── BOOK_SPECIFIC_CLINIC — physio-tier funnel (config-gated) ────────────────
+  // This flow has no gender-preference funnel — the tier question is simply
+  // asked before the physio list is shown, with no ordering concern.
+  describe('BOOK_SPECIFIC_CLINIC — physio-tier funnel', () => {
+    const STANDARD_C = { id: 'PRAC-STD-C', first_name: 'Jade',  last_name: 'Yap' };
+    const SENIOR_C   = { id: 'PRAC-SEN-C', first_name: 'Chris', last_name: 'Wong' };
+
+    afterEach(() => {
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-001', name: 'Initial 60 Min Visit (New Clients)', duration: 60, category: 'Physiotherapy', duration_in_minutes: 60 },
+        { id: 'AT-002', name: 'Return Visit (Existing Clients)',    duration: 30, category: 'Physiotherapy', duration_in_minutes: 30 },
+      ]);
+    });
+
+    test('asks tier before showing the physio list, then narrows it', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [STANDARD_C, SENIOR_C] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_C.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_physio',
+        selected_clinic: CLINIC_1,
+        selected_appt_type: { name: 'New Patient (Self-pay)', ids: ['AT-STD', 'AT-SEN'] },
+        practitioner_list: [STANDARD_C, SENIOR_C],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], session, ''));
+      expect(reply).toMatch(/which physio/i);
+
+      // Tier option order isn't guaranteed (built from Promise.all over the
+      // practitioner list) — find "Physiotherapist" (standard) by its actual
+      // rendered position rather than assuming an index.
+      const standardIdx = [...reply.matchAll(/^(\d+)\.\s+(.+)$/gm)]
+        .find(m => /^physiotherapist$/i.test(m[2].trim()))?.[1];
+      expect(standardIdx).toBeTruthy();
+      const s2 = await db.getSession(session.id);
+      const reply2 = String(await callHandler(engine, ['handleBookSpecificClinic'], s2, standardIdx));
+      expect(reply2).toMatch(/Jade/i);
+      expect(reply2).not.toMatch(/Chris/i);
+    });
+
+    test('HK: never asks the tier question', async () => {
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth In Touch', practitioners: [STANDARD_C, SENIOR_C] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockImplementation(({ practitioner_id }) => Promise.resolve(
+        practitioner_id === STANDARD_C.id
+          ? [{ id: 'AT-STD', name: 'Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+          : [{ id: 'AT-SEN', name: 'Senior Physiotherapist', category: 'Physiotherapy', duration_in_minutes: 45 }]
+      ));
+      const session = await seedAt('BOOK_SPECIFIC_CLINIC', {
+        selection_step: 'choose_physio',
+        selected_clinic: CLINIC_1,
+        selected_appt_type: { name: 'New Patient (Self-pay)', ids: ['AT-STD', 'AT-SEN'] },
+        practitioner_list: [STANDARD_C, SENIOR_C],
+        practitioner_page: 0,
+        navigation_chain: [],
+      });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      const reply = String(await callHandler(engine, ['handleBookSpecificClinic'], refreshed, ''));
+      expect(reply).not.toMatch(/which physio/i);
+      expect(reply).toMatch(/Jade|Chris/i); // straight to the physio list, unfiltered
     });
   });
 

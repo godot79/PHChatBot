@@ -3094,15 +3094,17 @@ if (/^p(rev)?$/i.test(text)) {
    * gender, not as a type-selection menu item.
    *
    * @param {object} session
-   * @param {object} data - data.selected_appt_type.norm_names and
-   *   data.practitioner_list must already be set by the caller.
+   * @param {object} data - data.selected_appt_type.ids and
+   *   data.practitioner_list must already be set by the caller. Generic
+   *   across all 5 booking flows — uses ids (always present, from whichever
+   *   choose_type builder ran), not Book Soonest's norm_names specifically.
    * @param {string} text
    * @returns {Promise<{reply}|{}>}
    */
   async _stepPhysioTierFunnel(session, data, text) {
     const region = this._getSessionRegion(session);
-    const normNames = data.selected_appt_type && data.selected_appt_type.norm_names;
-    if (!hasCapability(region, 'physioTiers') || !normNames || normNames.length < 2) {
+    const ids = data.selected_appt_type && data.selected_appt_type.ids;
+    if (!hasCapability(region, 'physioTiers') || !Array.isArray(ids) || ids.length < 2) {
       data.physio_tier_step = 'done';
       return { skipped: true };
     }
@@ -4012,6 +4014,15 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
+      // Physio-tier funnel (config-gated; no-op unless the region has the
+      // 'physioTiers' capability and this type spans >1 real Cliniko name).
+      if (data.physio_tier_step !== 'done') {
+        const fr = await this._stepPhysioTierFunnel(session, data, text);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_DATE });
+        if (fr.reply) return fr.reply;
+        if (!fr.skipped) return await this.handleBookSpecificDate(session, '');
+      }
+
       // Gender-only preference funnel (no category step — type already chosen)
       if (data.physio_funnel_step !== 'done') {
         const fr = await this._stepPhysioFunnel(session, data, text, { skipCategory: true });
@@ -4020,7 +4031,11 @@ if (/^p(rev)?$/i.test(text)) {
         return await this.handleBookSpecificDate(session, '');
       }
 
-      const effectiveList = this._applyPhysioFilter(data.practitioner_list || [], data.physio_funnel_sel, data.physio_categories);
+      const effectiveList = this._applyPhysioTierFilter(
+        this._applyPhysioFilter(data.practitioner_list || [], data.physio_funnel_sel, data.physio_categories),
+        data.physio_tier_sel,
+        data.physio_tier_groups
+      );
 
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (data.practitioner_page || 0) + 1;
@@ -4866,21 +4881,34 @@ if (/^p(rev)?$/i.test(text)) {
         }
       }
 
+      // Physio-tier funnel (config-gated; no-op unless the region has the
+      // 'physioTiers' capability and this type spans >1 real Cliniko name).
+      // This flow has no gender-preference funnel to order against — the
+      // tier question is simply asked before the physio list is shown.
+      if (data.physio_tier_step !== 'done') {
+        const fr = await this._stepPhysioTierFunnel(session, data, text);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+        if (fr.reply) return fr.reply;
+        if (!fr.skipped) return await this.handleBookSpecificClinic(session, '');
+      }
+
       if (/^m(ore)?$|^next$/i.test(text)) {
         data.practitioner_page = (Number(data.practitioner_page) || 0) + 1;
         await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
       }
-if (/^p(rev)?$/i.test(text)) {
-  data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
-  await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
-}
+      if (/^p(rev)?$/i.test(text)) {
+        data.practitioner_page = Math.max(0, (Number(data.practitioner_page) || 0) - 1);
+        await sync({ conversation_state: this.STATES.BOOK_SPECIFIC_CLINIC });
+      }
+
+      const effectiveList = this._applyPhysioTierFilter(data.practitioner_list || [], data.physio_tier_sel, data.physio_tier_groups);
 
       if (numStr) {
         const page = data.practitioner_page || 0;
         const pageStart = interactivePageStart(page);
         const pageSize = interactivePageSize(page);
         const localNum = parseInt(numStr, 10);
-        const list = data.practitioner_list || [];
+        const list = effectiveList;
         const idx = pageStart + localNum - 1;
         if (localNum >= 1 && localNum <= Math.min(pageSize, list.length - pageStart) && list[idx]) {
           data.selected_physio = list[idx];
@@ -4892,7 +4920,7 @@ if (/^p(rev)?$/i.test(text)) {
       }
 
       const replyPhys = buildInteractiveSelectionList({ language: this._getSessionLanguage(session),
-        items: data.practitioner_list || [],
+        items: effectiveList,
         rowFn: (p) => ({ title: String(getPractitionerDisplayName ? getPractitionerDisplayName(p, this._getSessionLanguage(session), this.logger) : (p.display_name || p.name || p.id)) }),
         page: data.practitioner_page || 0,
         header: t(this._getSessionLanguage(session), 'bookSpecificClinic.choosePhysioForClinic', { clinic: getBusinessDisplayName ? getBusinessDisplayName(data.selected_clinic, this._getSessionLanguage(session), this.logger) : '' })
