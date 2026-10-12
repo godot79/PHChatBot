@@ -1493,6 +1493,9 @@ async handleMessageEnvelope(message, phoneNumber) {
           const fresh = await this.sessionManager.getSession(session.id);
           return await this.handleViewLocationsState(fresh, '');
         }
+        if (nlu.intent === 'check_insurance') {
+          return await this.handleCheckInsuranceState(session);
+        }
       }
       this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'INTRO', intent: nlu.intent, confidence: nlu.confidence });
     }
@@ -6225,6 +6228,30 @@ if (/^p(rev)?$/i.test(text)) {
     await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
     const fresh = await this.sessionManager.getSession(session.id);
     return [locationText, await this.renderMainMenu(fresh)];
+  }
+
+  /**
+   * Answer a free-text insurance question (e.g. "Do you accept Bupa?") with the
+   * real, live insurer list — same catalogue source as _stepTypeInsurer /
+   * renderPreferredInsurerMenu, so the answer always matches real Cliniko data
+   * instead of a static FAQ that can drift out of date.
+   */
+  async handleCheckInsuranceState(session) {
+    const language = this._getSessionLanguage(session);
+    const groups = await this.clinikoAPI.getPractitionersByClinic();
+    const allTypes = await getAllAppointmentTypesForAllPractitioners(this.clinikoAPI, groups);
+    const catalogue = buildFunnelCatalogue(allTypes);
+    const insurers = [...new Set(catalogue.map(t => t.insurer).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+      .map(name => translateInsurerName(name, language, this.logger));
+
+    const insuranceText = insurers.length
+      ? `${t(language, 'viewFeesLocations.insuranceIntro')}\n\n${insurers.map(name => `• ${name}`).join('\n')}`
+      : t(language, 'viewFeesLocations.noInsurerInfo');
+
+    await this.sessionManager.updateSession(session.id, { conversation_state: this.STATES.INTRO });
+    const fresh = await this.sessionManager.getSession(session.id);
+    return [insuranceText, await this.renderMainMenu(fresh)];
   }
 
   /**

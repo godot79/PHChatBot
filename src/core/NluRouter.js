@@ -36,6 +36,13 @@ const KNOWN_INTENTS = [
   // tapping menu options 3/4.
   'view_fees',
   'view_locations',
+  // Phase 11: wired at the INTRO dead-end only. Live-traffic check
+  // (2026-10-12) showed real insurance questions ("Do you accept Bupa?",
+  // "Are you a HealthNet provider?") were landing on view_fees/view_locations
+  // at confidence right on the threshold edge instead of a dedicated bucket.
+  // Answers with the real, live insurer list (same catalogue source as
+  // _stepTypeInsurer/renderPreferredInsurerMenu) rather than a static FAQ.
+  'check_insurance',
   // Phase 8: "actually, forget this, start over" said mid-funnel — wired
   // only at the same mid-flow-correction call sites as
   // MIDFLOW_CORRECTION_INTENTS below (BOOK_SPECIFIC_DATE/PHYSIO/CLINIC),
@@ -54,7 +61,7 @@ const KNOWN_INTENTS = [
 // book_specific_* intent tied to the handler the user is already in — so
 // gating on an exact intent match silently drops real corrections.
 // Deliberately excludes cancel_appointment/book_history/book_soonest/
-// view_fees/view_locations: those represent the user asking about
+// view_fees/view_locations/check_insurance: those represent the user asking about
 // something else entirely, not correcting the current selection, and a
 // slot-shaped value extracted alongside one of those must not clear
 // in-progress flow state.
@@ -79,7 +86,7 @@ const TODAY_ISO = () => new Date().toISOString().slice(0, 10);
 // tell a genuine correction ("actually make it Thursday") from an
 // unrelated/ambiguous message instead of always extracting slots cold.
 function buildSystemPrompt(existingSlots) {
-  let prompt = `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan". Classify as "restart_menu" only when the user clearly wants to abandon the current booking selection entirely and start over (e.g. "actually never mind, let's start over", "cancel that, take me back to the menu") — not for a correction to one detail (that's a book_specific_* intent with a new slot value instead).`;
+  let prompt = `Today's date is ${TODAY_ISO()} (YYYY-MM-DD). When extracting a date slot, resolve any relative date phrasing ("next Tuesday", "tomorrow") to an absolute YYYY-MM-DD date using today's date as the reference point. Never return a relative phrase as the date value. When extracting a physio slot, return only the practitioner's name, with any honorific ("Dr", "Dr.", "Mr", "Mrs", "Ms") removed — e.g. "Dr Chan" should be extracted as "Chan", not "Dr Chan". Classify as "restart_menu" only when the user clearly wants to abandon the current booking selection entirely and start over (e.g. "actually never mind, let's start over", "cancel that, take me back to the menu") — not for a correction to one detail (that's a book_specific_* intent with a new slot value instead). If the message names a symptom, body part, or treatment/specialty (e.g. "pelvic floor pain", "dry needling", "carpal tunnel") even alongside a fee or insurance question, prefer book_by_type or book_specific_physio over view_fees/check_insurance — those intents already match the message against real practitioners who treat that condition, and the resulting booking flow surfaces price and insurer info along the way. Reserve view_fees/check_insurance for messages that ask about cost or insurance with no specific symptom, body part, or treatment named.`;
   if (existingSlots && Object.keys(existingSlots).length > 0) {
     const known = Object.entries(existingSlots).map(([k, v]) => `${k}=${v}`).join(', ');
     prompt += ` The user is already partway through booking with these selections already made: ${known}. Only extract a slot for one of these if the message clearly states a *different* value for it (a correction, e.g. "actually Thursday" or "no, Dr Chan instead") — otherwise omit that slot.`;
