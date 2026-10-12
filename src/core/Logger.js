@@ -71,14 +71,21 @@ class Logger {
             winston.format.timestamp({ format: 'HH:mm:ss' }),
             winston.format.colorize(),
             winston.format.printf(info => {
-                const { timestamp, level, message, sessionId, userId } = info;
+                const { timestamp, level, message, sessionId, userId, service, ...meta } = info;
                 let logLine = `${timestamp} [${level}]`;
-                
+
                 if (sessionId) logLine += ` [${sessionId}]`;
                 if (userId) logLine += ` [${userId}]`;
-                
+
                 logLine += `: ${message}`;
-                
+
+                // Cloud Run only captures stdout (this transport) — the File
+                // transport's metadata never reaches gcloud logging, so metadata
+                // (e.g. error details on logger.error calls) must be included here too.
+                if (Object.keys(meta).length > 0) {
+                    logLine += ` ${JSON.stringify(meta)}`;
+                }
+
                 return logLine;
             })
         );
