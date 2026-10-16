@@ -6883,6 +6883,41 @@ describe('Global restart-intent interception (handleMessage)', () => {
     });
   }
 
+  // Cantonese/Mandarin greetings — a first-contact "你好"/"您好" should get the
+  // same informative treatment as "hi", not fall through to the fallback
+  // message (confirmed as a real gap on first-contact HK traffic).
+  const CANTO_MANDARIN_GREETING_WORDS = ['你好', '您好', '哈囉', '喂'];
+
+  for (const word of CANTO_MANDARIN_GREETING_WORDS) {
+    test(`"${word}" in BOOK_MANAGE_OPTIONS → routes to interactive menu, not "I don't understand"`, async () => {
+      const phone = await seedAt('BOOK_MANAGE_OPTIONS');
+      const reply = await engine.handleMessage(word, phone);
+      expect(reply).not.toMatch(/not understood|don.t understand/i);
+      expect(typeof reply).toBe('string');
+      expect(reply.length).toBeGreaterThan(10);
+    });
+  }
+
+  test('"你好" in SELECT_SLOT → routes to interactive menu (same as "hello")', async () => {
+    const phone = await seedAt('SELECT_SLOT', {
+      slot_list: [{ slot: new Date(Date.now() + 86400000).toISOString(), practitioner_id: 'P1', business_id: 'B1', appointment_type_id: 'AT1' }],
+    });
+    const reply = await engine.handleMessage('你好', phone);
+    expect(reply).not.toMatch(/not understood|don.t understand/i);
+  });
+
+  test('a genuinely unmatched Chinese phrase (not a greeting) is NOT globally intercepted', async () => {
+    // Guards the precision requirement: only the curated greeting words
+    // trigger the global interceptor — arbitrary Chinese text must still
+    // fall through to normal state handling, not be treated as "hi".
+    const phone = await seedAt('BOOK_MANAGE_OPTIONS');
+    const reply = await engine.handleMessage('我想預約', phone); // "I'd like to book an appointment"
+    expect(typeof reply).toBe('string');
+    // Should be handled by BOOK_MANAGE_OPTIONS's own fallback, not silently
+    // redirected to the main menu as if it were a greeting.
+    expect(reply.length).toBeGreaterThan(5);
+  });
+
   test('"hello" in SELECT_SLOT → routes to interactive menu', async () => {
     const phone = await seedAt('SELECT_SLOT', {
       slot_list: [{ slot: new Date(Date.now() + 86400000).toISOString(), practitioner_id: 'P1', business_id: 'B1', appointment_type_id: 'AT1' }],
@@ -10539,6 +10574,31 @@ describe('goToInteractiveMenu — region guard', () => {
     // Neither region nor language selection should appear for a known non-HK region number
     expect(reply).not.toMatch(/please select your region/i);
     expect(reply).not.toMatch(/select your language/i);
+  });
+
+  test('HK number sends "你好" → language selection shown untouched (greeting recognized, no "let\'s start again" prefix)', async () => {
+    const reply = String(await engine.handleMessage('你好', '+85262000002'));
+    expect(reply).toMatch(/select your language/i);
+    expect(reply).not.toMatch(/let's start again|thanks for reaching out/i);
+  });
+
+  test('HK number sends "您好" → language selection shown untouched', async () => {
+    const reply = String(await engine.handleMessage('您好', '+85262000003'));
+    expect(reply).toMatch(/select your language/i);
+    expect(reply).not.toMatch(/let's start again|thanks for reaching out/i);
+  });
+
+  test('HK number sends unmatched text (not a greeting) → language list still shown, but with the "didn\'t understand" prefix', async () => {
+    const reply = String(await engine.handleMessage('asdkjfh random text', '+85262000004'));
+    expect(reply).toMatch(/select your language/i);
+    expect(reply).toMatch(/thanks for reaching out|let's start again/i);
+  });
+
+  test('HK language-selection prompt includes the bilingual (EN/Cantonese/Mandarin) welcome text', async () => {
+    const reply = String(await engine.handleMessage('hello', '+85262000005'));
+    expect(reply).toMatch(/welcome/i);
+    expect(reply).toMatch(/請先選擇/); // Cantonese
+    expect(reply).toMatch(/请先选择/); // Mandarin
   });
 
   test('HK number sends "hello" then picks language → main menu shown (region auto-detected, no extra region step)', async () => {

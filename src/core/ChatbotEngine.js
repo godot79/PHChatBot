@@ -21,6 +21,12 @@ function matchesLanguageLabel(text, code) {
   const gloss = glossMatch ? glossMatch[2].trim() : null;
   return text.includes(base) || (!!gloss && text.includes(gloss));
 }
+// Generic greeting words recognized pre-language-selection (raw string match,
+// since no session language is set yet at that point). Covers English plus
+// common Cantonese/Mandarin greetings so a first-contact "你好"/"您好" gets
+// the same informative treatment as "hi" — not an exhaustive NLU match, just
+// the common real-world openers.
+const GREETING_WORDS = ['hi', 'hello', 'hey', '你好', '您好', '哈囉', '喂'];
 const { t } = require('../config/strings');
 const { translateInsurerName } = require('../config/insurerTranslations');
 const { translateServiceName } = require('../config/serviceTranslations');
@@ -1233,7 +1239,7 @@ async handleMessageEnvelope(message, phoneNumber) {
       // sessions with stale/unrecognized states still route to the menu on fresh-start words,
       // rather than falling through to handleFallbackState.
       const _globalText = (message || '').trim().toLowerCase();
-      if (['hi', 'hello', 'hey', 'start', 'restart', 'home'].includes(_globalText)) {
+      if (GREETING_WORDS.includes(_globalText) || ['start', 'restart', 'home'].includes(_globalText)) {
         return await this.goToInteractiveMenu(session);
       }
 
@@ -1427,13 +1433,17 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       await this.sessionManager.updateSession(session.id, { context });
-      const languageList = list('Please select your language / 請選擇語言 / 请选择语言:', 'Select language',
+      const languageList = list(
+        "Welcome! Please select your language so I can help you properly — you can change this anytime by typing 'language'.\n\n"
+        + '請先選擇你嘅語言，方便我哋為你提供協助 — 隨時可以打「language」更改。\n\n'
+        + '请先选择您的语言，方便我们为您提供帮助 — 随时可以输入"language"更改。',
+        'Select language',
         languageCodes.map((code, i) => ({ id: String(i + 1), title: LANGUAGE_LABELS[code] }))
       );
       // Greetings/menu commands and explicit language-change requests go straight to the
       // list untouched — the ack/"let's start again" prefix is only for genuinely unmatched
       // free text, mirroring the fallback prefix logic further down this method.
-      const isGreetingOrMenu = !text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text);
+      const isGreetingOrMenu = !text || GREETING_WORDS.includes(text) || ['menu', '0', 'back'].includes(text);
       const isExplicitLanguageCommand = text === 'language' || text === 'change language';
       if (!isGreetingOrMenu && !isExplicitLanguageCommand) {
         const prefix = session._isFirstContactMessage
@@ -1447,7 +1457,7 @@ async handleMessageEnvelope(message, phoneNumber) {
     const language = context.language || 'en';
 
     // Region is set → show Intro main menu for non-verified user
-    if (!text || ['menu', 'hi', 'hello', 'hey', '0', 'back'].includes(text)) {
+    if (!text || GREETING_WORDS.includes(text) || ['menu', '0', 'back'].includes(text)) {
       return await this.renderMainMenu(session);
     }
 
