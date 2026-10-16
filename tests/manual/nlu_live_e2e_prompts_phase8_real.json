@@ -1,0 +1,129 @@
+[
+  {
+    "id": "real_intro_fees_zh_1",
+    "note": "real HK prod (last 3wk): '物理治療怎收費' (how much does physio cost)",
+    "seed": { "state": "INTRO" },
+    "turns": ["物理治療怎收費"]
+  },
+  {
+    "id": "real_intro_fees_zh_2",
+    "note": "real HK prod: '你好，想查詢物理治療收費' (hi, want to check physio pricing)",
+    "seed": { "state": "INTRO" },
+    "turns": ["你好，想查詢物理治療收費"]
+  },
+  {
+    "id": "real_intro_fees_en_1",
+    "note": "real HK prod: 'hi, how much is your physiotherapy'",
+    "seed": { "state": "INTRO" },
+    "turns": ["hi, how much is your physiotherapy"]
+  },
+  {
+    "id": "real_intro_locations_1",
+    "note": "real HK prod: '請問你們在太古坊仍然有治療中心嗎?' (is your Taikoo Place centre still open) plus a post-op context clause",
+    "seed": { "state": "INTRO" },
+    "turns": ["請問你們在太古坊仍然有治療中心嗎? 我剛做完髖關節手術一個月要坐輪椅出入, 如果做手術後復康治療收費多少?"]
+  },
+  {
+    "id": "real_intro_ambiguous_check_appt",
+    "note": "real HK prod: 'Checking my appointment today' — no existing KNOWN_INTENT for checking an existing booking; verifying fail-closed behavior, not expecting a match",
+    "seed": { "state": "INTRO" },
+    "turns": ["Checking my appointment today"]
+  },
+  {
+    "id": "real_manage_cancel_1",
+    "note": "real HK prod: 'hi！ could you please cancel my appointment at 7 tomorrow with Mr Jia at QB?'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["hi！ could you please cancel my appointment at 7 tomorrow with Mr Jia at QB?"]
+  },
+  {
+    "id": "real_manage_cancel_2",
+    "note": "real HK prod: 'Hi, I have a session booked with Leo at 6pm on Wednesday. My name is Ross Styles and I need to cancel'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Hi, I have a session booked with Leo at 6pm on Wednesday. My name is Ross Styles and I need to cancel"]
+  },
+  {
+    "id": "real_manage_reschedule_1",
+    "note": "real HK prod: reschedule request with old+new date/time both present",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Morning, I have booked my appointment with Maritza at 12p on Sept 25th. Please help move my appt to 24th at 12p. Many thanks!"]
+  },
+  {
+    "id": "real_manage_reschedule_2",
+    "note": "real HK prod: reschedule, different phrasing ('will need to reschedule to')",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Hi I have a session booked for tomorrow at the TST clinic at 730pm with Yolanda, will need to reschedule to next Monday 730pm please, thanks!"]
+  },
+  {
+    "id": "real_manage_book_generic",
+    "note": "real HK prod: 'Look I just want to take an appointment .' — vague/frustrated generic booking intent",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Look I just want to take an appointment ."]
+  },
+  {
+    "id": "real_method_combined_physio_date_1",
+    "note": "real HK prod: 'Hi can I make appointment with Kelvin tomorrow around 12-1pm?' (Phase 7 combined slots, live-verified before; re-checking on phase8 tip)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi can I make appointment with Kelvin tomorrow around 12-1pm?"]
+  },
+  {
+    "id": "real_method_combined_physio_date_2",
+    "note": "real HK prod: 'Hi there i would like to make a reservation with 陳展晴 for the upcoming Friday- 4 sep 2026 ?' (Chinese physio name + English date)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi there i would like to make a reservation with 陳展晴 for the upcoming Friday- 4 sep 2026 ?"]
+  },
+  {
+    "id": "real_method_specific_physio_named",
+    "note": "real HK prod: 'Hi there, I would like to make an appointment with Maritza, referred by a friend.'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi there, I would like to make an appointment with Maritza, referred by a friend."]
+  },
+  {
+    "id": "real_method_by_type_scoliosis",
+    "note": "real HK prod: schroth-method / scoliosis specialist request paired with insurance question — checking type/insurer slot handling doesn't over-claim",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Good morning, I am a 43 year old man with scoliosis and osteoporosis. I am interested in seeing your schroth specialist for management of scoliosis related pain. Please can you advise me on the options? Thanks"]
+  },
+  {
+    "id": "real_method_by_type_massage",
+    "note": "real HK prod: 'Hi, my doctor thinks that shockwave therapy may be helpful for my right foot.' — appointment-type inference from a medical description, not a named service",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi, my doctor thinks that shockwave therapy may be helpful for my right foot."]
+  },
+  {
+    "id": "real_method_vague_slot_or_not",
+    "note": "real HK prod: 'Do you have a slot or not ?' — low-information generic booking intent, checking it stays a safe generic match not a false slot fill",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Do you have a slot or not ?"]
+  },
+  {
+    "id": "real_midflow_restart_1",
+    "note": "real-flavored 2-turn: first message fills physio+date, second is a real HK prod restart-style message ('Look I just want to take an appointment .') repurposed as a mid-flow bail-out — checking Phase 8 restart intent doesn't misfire on a message that could also read as a fresh booking ask",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi can I make appointment with Kelvin tomorrow around 12-1pm?",
+      "actually forget it, let's start over"
+    ]
+  },
+  {
+    "id": "real_midflow_physio_correction_after_type",
+    "note": "3-turn, addresses the open self-audit question: turn1 fills physio+date (stops at choose_type since type wasn't extracted), turn2 supplies a type so the funnel advances to choose_physio, turn3 is a real-flavored correction ('sorry can I see someone else instead') fired once selected_physio is actually set — resolves whether the guard fires when reached, vs. the prior test's gap of firing before reached",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi, can I make an appointment with Louis tomorrow at 11:30am?",
+      "physiotherapy assessment",
+      "sorry can I see someone else instead"
+    ]
+  },
+  {
+    "id": "real_lowconf_gibberish",
+    "note": "real HK prod: '.' — single-character noise message, fail-closed regression check",
+    "seed": { "state": "INTRO" },
+    "turns": ["."]
+  },
+  {
+    "id": "real_lowconf_promo_spam",
+    "note": "real HK prod: property-ad spam ('*🔥 HOT FROM OVEN — THE SERRA RESIDENCES*') that reached the bot — fail-closed regression check on genuinely off-topic real traffic",
+    "seed": { "state": "INTRO" },
+    "turns": ["*🔥 HOT FROM OVEN — THE SERRA RESIDENCES*"]
+  }
+]

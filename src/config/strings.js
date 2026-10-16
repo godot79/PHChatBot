@@ -64,6 +64,8 @@ const STRINGS = {
       locationsIntro: 'Here are our clinic locations:',
       noClinicInfo: 'No clinic information is currently available.',
       clinicSystemTrouble: "We're having trouble reaching our clinic system right now. Please try again in a moment.",
+      insuranceIntro: 'We accept the following insurers:',
+      noInsurerInfo: 'No insurer information is currently available.',
     },
     appointmentChangeBlocked: {
       promptBody: "{{intro}}\n\nThis appointment is within 24 hours, so it can't be {{action}} here. Please contact our front desk directly — cancellation fees may apply.",
@@ -243,6 +245,9 @@ const STRINGS = {
       registrationSuccess: "✅ You've been registered!",
       registrationFailedFalsy: "Sorry, we couldn't complete registration right now.",
       registrationError: 'We hit an error while registering you. Please try again later.',
+      duplicateFoundPrompt: "We found an existing record matching this name and date of birth. Are you already registered with us?",
+      duplicateYesRegistered: "Yes, I'm registered",
+      duplicateNoContinue: 'No, continue registering',
     },
     listNav: {
       previousLabel: '← Previous',
@@ -304,6 +309,8 @@ const STRINGS = {
       locationsIntro: '我哋嘅診所地點：',
       noClinicInfo: '暫時冇診所資料。',
       clinicSystemTrouble: '而家連接診所系統有啲問題，請等一陣再試。',
+      insuranceIntro: '我哋接受以下保險公司：',
+      noInsurerInfo: '暫時冇保險資料。',
     },
     appointmentChangeBlocked: {
       promptBody: '{{intro}}\n\n呢個預約喺 24 小時之內，所以喺呢度冇辦法{{action}}。請直接聯絡我哋嘅前台 — 可能需要收取取消費用。',
@@ -483,6 +490,9 @@ const STRINGS = {
       registrationSuccess: '✅ 你已經登記成功！',
       registrationFailedFalsy: '唔好意思，而家未能完成登記。',
       registrationError: '登記時出咗少少問題，請遲啲再試。',
+      duplicateFoundPrompt: '我哋搵到一個同呢個名同出生日期相符嘅記錄。你係咪已經登記咗？',
+      duplicateYesRegistered: '係，我已經登記咗',
+      duplicateNoContinue: '唔係，繼續登記',
     },
     listNav: {
       previousLabel: '← 上一頁',
@@ -544,6 +554,8 @@ const STRINGS = {
       locationsIntro: '我们的诊所地点：',
       noClinicInfo: '暂时没有诊所信息。',
       clinicSystemTrouble: '目前连接诊所系统时遇到问题，请稍后再试。',
+      insuranceIntro: '我们接受以下保险公司：',
+      noInsurerInfo: '暂时没有保险信息。',
     },
     appointmentChangeBlocked: {
       promptBody: '{{intro}}\n\n该预约在 24 小时之内，因此无法在这里{{action}}。请直接联系我们的前台——可能需要收取取消费用。',
@@ -723,6 +735,9 @@ const STRINGS = {
       registrationSuccess: '✅ 您已注册成功！',
       registrationFailedFalsy: '抱歉，暂时无法完成注册。',
       registrationError: '注册时遇到了一些问题，请稍后再试。',
+      duplicateFoundPrompt: '我们找到一条与该姓名和出生日期相符的记录。您是否已经注册过？',
+      duplicateYesRegistered: '是的，我已注册',
+      duplicateNoContinue: '不是，继续注册',
     },
     listNav: {
       previousLabel: '← 上一页',

@@ -1,0 +1,53 @@
+[
+  {
+    "id": "release_check_fees_zh",
+    "note": "release-readiness spot check: fees in Cantonese/Chinese, INTRO dead-end",
+    "seed": { "state": "INTRO" },
+    "turns": ["請問一次治療要幾錢？"]
+  },
+  {
+    "id": "release_check_cancel_natural",
+    "note": "release-readiness spot check: cancel via natural phrasing, no literal 'cancel' keyword",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["I can't make it to my session tomorrow, please take me off the list"]
+  },
+  {
+    "id": "release_check_reschedule_natural",
+    "note": "release-readiness spot check: reschedule via natural phrasing",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["can we push my appointment back a couple of days"]
+  },
+  {
+    "id": "release_check_combined_physio_date_type",
+    "note": "release-readiness spot check: physio+date entry then a free-text type answer at choose_type (Phase 9 fix), fresh phrasing not used in any prior test batch",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi, could I see Amanda Kot sometime Friday?", "clinical pilates for me please"]
+  },
+  {
+    "id": "release_check_by_type_vague_medical",
+    "note": "release-readiness spot check: type inference from a vague medical complaint, no named service",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["my knee has been clicking and aching after runs, what should I book?"]
+  },
+  {
+    "id": "release_check_clinic_named",
+    "note": "release-readiness spot check: clinic-first flow, different clinic name than previously tested",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["do you have space at the Wellington Street clinic this week"]
+  },
+  {
+    "id": "release_check_restart_midflow",
+    "note": "release-readiness spot check: Phase 8 restart intent from a genuinely new phrasing",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "can I book with Louis tomorrow at 2pm",
+      "actually never mind, take me back to the menu"
+    ]
+  },
+  {
+    "id": "release_check_gibberish_control",
+    "note": "release-readiness spot check: fail-closed control, off-topic real-world-flavored spam",
+    "seed": { "state": "INTRO" },
+    "turns": ["CONGRATULATIONS you have won a free gift card claim now"]
+  }
+]

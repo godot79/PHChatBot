@@ -1,0 +1,185 @@
+[
+  {
+    "id": "fees_casual_typo",
+    "note": "plausible: casual phrasing with a typo, no punctuation",
+    "seed": { "state": "INTRO" },
+    "turns": ["hows much for a phsyio session"]
+  },
+  {
+    "id": "fees_specific_service",
+    "note": "plausible: asks about a specific service by name, not just 'fees'",
+    "seed": { "state": "INTRO" },
+    "turns": ["do you know the price for clinical pilates"]
+  },
+  {
+    "id": "locations_casual",
+    "note": "plausible: asks where clinics are, conversational tone",
+    "seed": { "state": "INTRO" },
+    "turns": ["where are you guys located ah"]
+  },
+  {
+    "id": "locations_specific_area",
+    "note": "plausible: asks if a specific area/branch exists",
+    "seed": { "state": "INTRO" },
+    "turns": ["is there a branch near causeway bay"]
+  },
+  {
+    "id": "manage_cancel_casual",
+    "note": "plausible: cancel with no 'appointment' keyword, uses 'my slot'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["need to cancel my slot on friday, sth came up"]
+  },
+  {
+    "id": "manage_cancel_apology_tone",
+    "note": "plausible: apologetic cancel, common WhatsApp register",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["so sorry but i can't make it tmr, please cancel"]
+  },
+  {
+    "id": "manage_reschedule_vague_time",
+    "note": "plausible: reschedule without a concrete new time, just intent",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["can i push my appointment to another day"]
+  },
+  {
+    "id": "manage_reschedule_earlier",
+    "note": "plausible: reschedule to an EARLIER time, tests direction isn't assumed",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["actually can we move my thursday session earlier, like morning instead of evening"]
+  },
+  {
+    "id": "manage_book_new_no_keyword",
+    "note": "plausible: wants a new booking without saying 'book'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["i need to see someone for my back next week"]
+  },
+  {
+    "id": "manage_ambiguous_both",
+    "note": "edge case: mentions both cancel and reschedule in one message — which wins?",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["can you cancel my friday appt, actually no wait can you just move it to monday instead"]
+  },
+  {
+    "id": "method_type_singlish",
+    "note": "plausible SG-register phrasing for a type-only request",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["want to book physio can, no preference on who"]
+  },
+  {
+    "id": "method_type_symptom_not_type",
+    "note": "edge case: describes a symptom/reason, not a named appointment type — does it still resolve to book_by_type or fall back cleanly?",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["my shoulder has been hurting since last week, can i come in"]
+  },
+  {
+    "id": "method_date_relative_far",
+    "note": "plausible: relative date further out than 'tomorrow'/'next Tuesday'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["can i get an appointment 3 weeks from now"]
+  },
+  {
+    "id": "method_date_weekend",
+    "note": "edge case: asks for a Sunday, which the date-picker excludes — does slot extraction still fire, and does downstream handling degrade gracefully?",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["is sunday possible for a session"]
+  },
+  {
+    "id": "method_physio_nickname",
+    "note": "plausible: refers to a physio by first name only, informally",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["can i book with jade again, she saw me last time"]
+  },
+  {
+    "id": "method_physio_gender_pref_not_name",
+    "note": "edge case: expresses a preference (gender), not a named physio — must NOT be extracted as a physio slot",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["i'd prefer a female physiotherapist if possible"]
+  },
+  {
+    "id": "method_clinic_named",
+    "note": "plausible: names a specific clinic/branch directly",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["book me in at the quarry bay clinic please"]
+  },
+  {
+    "id": "method_history_reference",
+    "note": "plausible: refers to 'the usual'/past visits without saying 'history'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["same as last time please"]
+  },
+  {
+    "id": "method_combined_date_physio_clinic",
+    "note": "edge case: THREE slots in one message (date+physio+clinic) — which one wins routing, and are the other two picked up downstream?",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["can i see dr chan this saturday at the causeway bay branch"]
+  },
+  {
+    "id": "method_lowconf_price_question_mid_book",
+    "note": "edge case: a fees question asked at the booking-method state (not INTRO) — should not be misrouted as a booking intent",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["wait how much does this cost actually"]
+  },
+  {
+    "id": "midflow_negation_correction",
+    "note": "edge case: negation phrasing ('not X, Y instead') for a date correction — harder for the model than a plain restatement",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "book me with dr chan next tuesday",
+      "not tuesday, wednesday instead"
+    ]
+  },
+  {
+    "id": "midflow_physio_swap_named",
+    "note": "edge case: mid-flow physio correction that NAMES the new physio (vs the existing synthetic case which just says 'someone else')",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "book me with jade tomorrow",
+      "actually can it be rushi instead"
+    ]
+  },
+  {
+    "id": "midflow_restart_frustrated_tone",
+    "note": "plausible: restart phrased as frustration, common real-world register",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "book me with dr chan next tuesday",
+      "ugh forget it, let's just start over"
+    ]
+  },
+  {
+    "id": "midflow_not_a_restart_just_confused",
+    "note": "edge case: expresses confusion but is NOT asking to restart — must not false-trigger restart_menu",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "book me with dr chan next tuesday",
+      "wait i'm confused, what did i just pick"
+    ]
+  },
+  {
+    "id": "sg_tier_freetext_during_tier_choice",
+    "note": "edge case, SG-specific: free text naming a tier preference sent WHILE the physio-tier funnel prompt is showing (BOOK_SPECIFIC_DATE, choose_physio, physio_tier_step pending) — checks it re-prompts rather than misrouting into the gender gate or silently advancing",
+    "seed": {
+      "state": "BOOK_SPECIFIC_DATE",
+      "region": "SG",
+      "data": {
+        "selection_step": "choose_physio",
+        "selected_date": "2026-10-01",
+        "selected_appt_type": { "name": "New Patient", "ids": ["1704019452481242941", "1710554047309678542"] },
+        "navigation_chain": [{ "selection_step": "choose_type", "had_multiple_options": true, "auto": false }]
+      }
+    },
+    "turns": [
+      "",
+      "i want a senior physio please"
+    ]
+  },
+  {
+    "id": "sg_tier_named_physio_bypasses_tier_question",
+    "note": "edge case, SG-specific: naming a specific physio directly at the type->physio transition should resolve straight to that physio without ever showing the tier menu (checks the pending_nlu_slots.physio consume runs BEFORE the tier gate, per the branch-health note)",
+    "seed": {
+      "state": "BOOKING_METHOD_OPTIONS",
+      "region": "SG"
+    },
+    "turns": ["can i book with jade for physio next wednesday"]
+  }
+]

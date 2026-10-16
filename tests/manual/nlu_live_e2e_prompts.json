@@ -1,0 +1,146 @@
+[
+  {
+    "id": "intro_fees_1",
+    "note": "real (paraphrased): 'How much is 1 session?'",
+    "seed": { "state": "INTRO" },
+    "turns": ["How much is 1 session?"]
+  },
+  {
+    "id": "intro_fees_2",
+    "note": "real (paraphrased): 'What's the fee for physiotherapy in Quarry Bay centre?'",
+    "seed": { "state": "INTRO" },
+    "turns": ["What's the fee for physiotherapy in Quarry Bay centre? Thanks"]
+  },
+  {
+    "id": "intro_locations_1",
+    "note": "real: 'What is the address?'",
+    "seed": { "state": "INTRO" },
+    "turns": ["What is the address?"]
+  },
+  {
+    "id": "intro_locations_2",
+    "note": "real (paraphrased): 'is it available at quarry bay?'",
+    "seed": { "state": "INTRO" },
+    "turns": ["Do you have a clinic near Quarry Bay?"]
+  },
+  {
+    "id": "intro_lowconf_gibberish",
+    "note": "synthetic — regression check, must fail closed",
+    "seed": { "state": "INTRO" },
+    "turns": ["asdkfj qqweoiu 12983"]
+  },
+  {
+    "id": "manage_book_1",
+    "note": "real: 'Hi can I book a physio session?'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Hi can I book a physio session?"]
+  },
+  {
+    "id": "manage_book_2",
+    "note": "real: 'I want to book for tonight'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["I want to book for tonight"]
+  },
+  {
+    "id": "manage_cancel_1",
+    "note": "real (paraphrased, drop physio name): 'Hi I need to cancel my appointment today, something came up'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Hi I need to cancel my appointment today, something came up"]
+  },
+  {
+    "id": "manage_cancel_2",
+    "note": "real: '2026-09-07 HK prod incident this project's own memory flags — free-text cancel misrouted into registration before the NLU layer existed'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["can you cancel my booking for tomorrow please"]
+  },
+  {
+    "id": "manage_reschedule_1",
+    "note": "real (paraphrased, drop physio name/clinic): 'session booked tomorrow, need to reschedule to next Monday same time'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["I have a session booked for tomorrow at 7:30pm, will need to reschedule to next Monday 7:30pm please"]
+  },
+  {
+    "id": "manage_reschedule_2",
+    "note": "real (paraphrased): 'booked a session online but realized I have a clash, could we move it?'",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["I just booked a session online but I realize I have a clash, could we please move it to Friday noon instead?"]
+  },
+  {
+    "id": "manage_lowconf_human_agent",
+    "note": "real: 'Can I please speak to a human' — should NOT match any KNOWN_INTENTS, must fall through",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS" },
+    "turns": ["Can I please speak to a human"]
+  },
+  {
+    "id": "method_by_type_1",
+    "note": "real: 'Can I book chiropractor?'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Can I book chiropractor?"]
+  },
+  {
+    "id": "method_by_type_2",
+    "note": "real: 'I would like to book for a myofascial release session today'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["I would like to book for a myofascial release session today"]
+  },
+  {
+    "id": "method_history_1",
+    "note": "real (paraphrased, drop physio name): 'did I successfully book the appointment at 12:00 today?'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["did I successfully book my appointment at 12:00 today?"]
+  },
+  {
+    "id": "method_history_2",
+    "note": "real: 'Checking my appointment today'",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Checking my appointment today"]
+  },
+  {
+    "id": "method_combined_physio_date_1",
+    "note": "real (paraphrased, generic physio name): 'can I make appointment with Kelvin tomorrow around 12-1pm?' (Phase 7 combined slots)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi can I make appointment with Kelvin tomorrow around 12-1pm?"]
+  },
+  {
+    "id": "method_combined_physio_date_2",
+    "note": "real (paraphrased): 'can I make an appointment with Louis tomorrow at 11:30am?' (Phase 7 combined slots)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Hi, can I make an appointment with Louis tomorrow at 11:30am?"]
+  },
+  {
+    "id": "method_specific_date_only",
+    "note": "synthetic, single date slot only, no physio named",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Can I book something for next Tuesday afternoon?"]
+  },
+  {
+    "id": "method_specific_physio_only",
+    "note": "real (paraphrased): 'still see new patients?' style physio-only mention, no date",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Is Angela still taking new patients?"]
+  },
+  {
+    "id": "method_lowconf_human_agent",
+    "note": "real: 'Do you have real people please' — should fall through to menu, not crash",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": ["Do you have real people please"]
+  },
+  {
+    "id": "midflow_date_correction",
+    "note": "synthetic 2-turn: first message fills physio+date via NLU (Phase 7), second turn is a free-text date correction (Phase 6) — no real prod example of the correction turn exists, phrasing modeled on real messages' casual tone",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi can I make appointment with Kelvin tomorrow around 12-1pm?",
+      "actually can we make it Thursday instead"
+    ]
+  },
+  {
+    "id": "midflow_physio_correction",
+    "note": "synthetic 2-turn: first fills physio+date, second is a free-text physio correction — synthetic, modeled on real messages' tone",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS" },
+    "turns": [
+      "Hi, can I make an appointment with Louis tomorrow at 11:30am?",
+      "sorry can I see someone else instead"
+    ]
+  }
+]

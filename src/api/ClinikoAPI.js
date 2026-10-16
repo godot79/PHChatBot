@@ -218,6 +218,37 @@ class ClinikoAPI {
   }
 
   /**
+   * Find patients matching first name + last name + DOB (exact match on all
+   * three). Used as a duplicate-registration guard — Cliniko's /patients
+   * search doesn't support filtering by phone number (confirmed against the
+   * public API docs), so name+DOB is the closest available signal.
+   * @param {string} first_name
+   * @param {string} last_name
+   * @param {string} date_of_birth - 'YYYY-MM-DD'
+   * @returns {Promise<Array>} empty array on a genuine no-match
+   */
+  async findPatientsByNameAndDob(first_name, last_name, date_of_birth) {
+    const fn = String(first_name || '').trim();
+    const ln = String(last_name || '').trim();
+    const dob = String(date_of_birth || '').trim();
+    try {
+      const params = new URLSearchParams();
+      params.append('q[]', `first_name:=${fn}`);
+      params.append('q[]', `last_name:=${ln}`);
+      if (dob) params.append('q[]', `date_of_birth:=${dob}`);
+      const data = await this._get429Retry(`/patients?${params.toString()}`);
+      return Array.isArray(data?.patients) ? data.patients : [];
+    } catch (error) {
+      // Same discipline as findPatientByEmailAndDob: a genuine "no match" is
+      // a 200 handled above — this only fires on a real fetch failure, and
+      // the caller (registration) must not silently treat an outage as
+      // "no duplicate found" without deciding that itself.
+      this.logger.error(`findPatientsByNameAndDob failed for ${fn} ${ln}`);
+      throw error;
+    }
+  }
+
+  /**
    * Get next available appointment slots for all practitioners in a business.
    * @param {Object} options
    * @param {string} options.business_id
