@@ -1,0 +1,59 @@
+[
+  {
+    "id": "sg_intro_fees_tier_aware",
+    "note": "SG-specific: fee display must show both Senior/standard physio rates (SGD 230/200), not a single HK-style flat fee",
+    "seed": { "state": "INTRO", "region": "SG" },
+    "turns": ["how much does a physio session cost"]
+  },
+  {
+    "id": "sg_intro_locations_single_clinic",
+    "note": "SG-specific: only one real clinic (Prohealth In Touch Physiotherapy) unlike HK's 4 — check the response is sensible for a single-location region, not a broken/empty multi-clinic list",
+    "seed": { "state": "INTRO", "region": "SG" },
+    "turns": ["where is your clinic located"]
+  },
+  {
+    "id": "sg_method_tier_as_if_type",
+    "note": "SG-specific edge case: user asks for 'a senior physio' as if it's an appointment TYPE — tier is a physio-selection concept (_stepPhysioTierFunnel), not a type. Checks NLU doesn't wrongly extract 'senior physio' as an appointmentType slot, which would try to match a real Cliniko type name and fail/misfire",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS", "region": "SG" },
+    "turns": ["can i book a senior physio session"]
+  },
+  {
+    "id": "sg_method_sports_massage",
+    "note": "SG-specific: Sports Massage is a genuinely separate service/pool from Physiotherapy (Jade+Chris+Rushi+Teck vs Michi), no tier funnel applies here — checks book_by_type routes correctly and the tier gate stays a no-op for this type",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS", "region": "SG" },
+    "turns": ["i'd like to book a sports massage please"]
+  },
+  {
+    "id": "sg_method_named_senior_physio",
+    "note": "SG-specific: naming a SENIOR-tier physio directly (Chris) should bypass both the tier question AND the gender question, same as the earlier Jade (standard-tier) case — proves the bypass isn't tier-specific",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS", "region": "SG" },
+    "turns": ["can i see chris for physio this friday"]
+  },
+  {
+    "id": "sg_midflow_tier_swap_via_named_physio",
+    "note": "SG-specific edge case: books with a standard-tier physio (Jade), then mid-flow names a SENIOR-tier physio instead (Chris) — checks the tier-filtered practitioner_list/physio_tier_sel state doesn't go stale or block the switch (a physio named directly should always be honored regardless of any earlier tier filter)",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS", "region": "SG" },
+    "turns": [
+      "book me with jade tomorrow for physio",
+      "actually can it be chris instead"
+    ]
+  },
+  {
+    "id": "sg_method_clinic_request_single_option",
+    "note": "SG-specific: asking to book 'at the clinic' when there is only ONE real clinic — checks handleBookSpecificClinic degrades sensibly (e.g. auto-advances or shows a 1-row list) rather than behaving oddly for a single-option region",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS", "region": "SG" },
+    "turns": ["book me in at the clinic next week"]
+  },
+  {
+    "id": "sg_manage_singlish_cancel",
+    "note": "SG-specific register: Singlish cancel phrasing ('...can', particle-heavy) at BOOK_MANAGE_OPTIONS",
+    "seed": { "state": "BOOK_MANAGE_OPTIONS", "region": "SG" },
+    "turns": ["wah sorry, need to cancel my appointment tmr can"]
+  },
+  {
+    "id": "sg_method_named_multitype_physio",
+    "note": "SG-specific edge case: Teck Woon Tan holds Physiotherapy (senior tier), Sports Massage, AND Paediatrics/Return-Visit types under one practitioner — naming him directly without a type should still land on a sane type-selection step rather than misresolving to the wrong pool",
+    "seed": { "state": "BOOKING_METHOD_OPTIONS", "region": "SG" },
+    "turns": ["can i book with teck next monday"]
+  }
+]
