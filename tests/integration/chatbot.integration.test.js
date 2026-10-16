@@ -4347,6 +4347,58 @@ describe('Booking menu and flow coverage', () => {
       expect(d.appointment_type_list).toHaveLength(1);
       expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-MASSAGE', 'AT-PHYSIO']);
     });
+
+    test('HK: "<name>-<its own service>" duplicate type merges into the base-name bucket (fix/followup-name-suffix-duplicate)', async () => {
+      // Real live HK data, 2026-10-15: "Follow-Up Appointment" (bare) and
+      // "Follow-Up Appointment-Physiotherapy" are two separate Cliniko
+      // records every real physio holds, both resolving to the same patient-
+      // facing self-pay Physiotherapy follow-up — a clinic-side workaround,
+      // not a code bucketing bug. _bucketApptType must fold the suffixed one
+      // into the bare one's bucket instead of showing two near-identical rows.
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth Sports & Spinal (WS)', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-BARE-40', name: 'Follow-Up Appointment', category: 'Bupa Global : Physiotherapy', duration_in_minutes: 40 },
+        { id: 'AT-BARE-WH', name: 'Follow-Up Appointment', category: "Women's Health Physiotherapy", duration_in_minutes: 40 },
+        { id: 'AT-SUF-40', name: 'Follow-Up Appointment-Physiotherapy', category: 'Physiotherapy', duration_in_minutes: 40 },
+        { id: 'AT-SUF-60', name: 'Follow-Up Appointment-Physiotherapy', category: 'Physiotherapy', duration_in_minutes: 60 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        navigation_chain: [],
+      });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificDate'], refreshed, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(1);
+      expect(d.appointment_type_list[0].name).toBe('Follow-Up Appointment');
+      expect(d.appointment_type_list[0].ids.slice().sort()).toEqual(['AT-BARE-40', 'AT-BARE-WH', 'AT-SUF-40', 'AT-SUF-60']);
+    });
+
+    test('HK: a genuinely distinct type ending in a service word is NOT swept into an unrelated bucket', async () => {
+      // Guards the precision requirement: "New Patient-Osteopathy" ends in a
+      // real service name but has no bare "New Patient" sibling in THIS list,
+      // so it must stay its own bucket, not merge into anything.
+      engine.clinikoAPI.getPractitionersByClinic.mockResolvedValue([
+        { clinic_id: 'BIZ-001', clinic_name: 'Prohealth Sports & Spinal (WS)', practitioners: [PHYSIO_1] },
+      ]);
+      engine.clinikoAPI.getAppointmentTypes.mockResolvedValue([
+        { id: 'AT-OSTEO', name: 'New Patient-Osteopathy', category: 'Osteopathy', duration_in_minutes: 45 },
+      ]);
+      const session = await seedAt('BOOK_SPECIFIC_DATE', {
+        selection_step: 'choose_date',
+        navigation_chain: [],
+      });
+      await db.updateSession(session.id, { context: JSON.stringify({ region: 'HK' }) });
+      const refreshed = await db.getSession(session.id);
+      await callHandler(engine, ['handleBookSpecificDate'], refreshed, '1');
+      const d = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(d.appointment_type_list).toHaveLength(1);
+      expect(d.appointment_type_list[0].name).toBe('New Patient-Osteopathy');
+      expect(d.appointment_type_list[0].ids).toEqual(['AT-OSTEO']);
+    });
   });
 
   // ─── BOOK_SPECIFIC_PHYSIO — choose_type baseline ─────────────────────────────
