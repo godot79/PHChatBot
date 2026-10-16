@@ -874,6 +874,49 @@ class ChatbotEngine {
   }
 
   /**
+   * Detects a specific, narrow Cliniko workaround pattern found live
+   * 2026-10-15 (HK): a type literally named "<other type's name>-<its own
+   * category-derived service>" (e.g. "Follow-Up Appointment-Physiotherapy",
+   * when a bare "Follow-Up Appointment" type already exists in the same raw
+   * list). Root cause confirmed live: the bare type's only self-pay
+   * (null-insurer) ids are for OTHER categories (Women's Health/Paediatrics/
+   * GYROTONIC — a separate, already-known dormant HK collision), so it has
+   * no self-pay Physiotherapy entry at all; the clinic created a second type
+   * to cover that gap instead of adding a null-insurer id to the first. This
+   * produced two near-identical menu rows for what the existing insurer/
+   * self-pay step (_stepTypeInsurer) should resolve as ONE bucket.
+   * Deliberately an exact name+service-suffix match, not a broader
+   * heuristic — same precision requirement as TIER_ADJECTIVE_RE's doc, so
+   * genuinely distinct types that happen to end in a service word are never
+   * swept in by accident.
+   * @param {Array<{name:string, category:string}>} allTypes - raw Cliniko types
+   * @returns {Map<string, string>} suffixed display name (lowercased) -> sibling's real display name to merge into
+   */
+  _serviceSuffixDuplicateBaseNames(allTypes) {
+    const byNorm = new Map(); // lowercased display name -> first-seen real display name
+    for (const t of allTypes || []) {
+      if (!t || !t.name) continue;
+      const display = String(t.name).replace(/\s+/g, ' ').trim();
+      if (!byNorm.has(display.toLowerCase())) byNorm.set(display.toLowerCase(), display);
+    }
+    const result = new Map();
+    for (const t of allTypes || []) {
+      if (!t || !t.name) continue;
+      const display = String(t.name).replace(/\s+/g, ' ').trim();
+      const { service } = parseApptCategory(t.category);
+      if (!service) continue;
+      const escaped = service.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const suffixRe = new RegExp(`[-\\s]+${escaped}$`, 'i');
+      if (!suffixRe.test(display)) continue;
+      const base = display.replace(suffixRe, '').trim();
+      if (!base || base.toLowerCase() === display.toLowerCase()) continue;
+      const sibling = byNorm.get(base.toLowerCase());
+      if (sibling) result.set(display.toLowerCase(), sibling);
+    }
+    return result;
+  }
+
+  /**
    * Full clinic-wide raw type list, used ONLY to detect genuine tier-
    * adjective pairs across practitioners — a single physio's own type list
    * can never reveal this: Cliniko splits tiers as different id records
@@ -926,13 +969,24 @@ class ChatbotEngine {
    * @param {Set<string>} servicesWithPatientTypeSplit - from _servicesWithPatientTypeSplit()
    * @param {boolean} hasTierMerge - hasCapability(region, 'physioTiers')
    * @param {Set<string>} tierBaseNamesWithVariants - from _tierBaseNamesWithVariants()
+   * @param {Map<string,string>} [serviceSuffixDuplicates] - from _serviceSuffixDuplicateBaseNames(), region-agnostic
    * @returns {{ bucketKey: string, displayName: string, service: string, duration: number|undefined }}
    */
-  _bucketApptType(t, normName, isSG, servicesWithPatientTypeSplit, hasTierMerge, tierBaseNamesWithVariants) {
+  _bucketApptType(t, normName, isSG, servicesWithPatientTypeSplit, hasTierMerge, tierBaseNamesWithVariants, serviceSuffixDuplicates) {
     const display = String(t.name).replace(/\s+/g, ' ').replace(/([A-Za-z])\(/g, '$1 (').replace(/\s+\)/g, ')').trim();
     const { service, insurer } = parseApptCategory(t.category);
     const duration = t.duration_in_minutes;
     const patientType = parseApptPatientType(t.name);
+    // Region-agnostic (unlike the tier-merge branch below): a type whose name
+    // is exactly a sibling's name plus its own service as a suffix always
+    // means the same real-world visit split across two Cliniko records by
+    // mistake, regardless of region — see _serviceSuffixDuplicateBaseNames.
+    const suffixDupBase = serviceSuffixDuplicates && serviceSuffixDuplicates.get(display.toLowerCase());
+    if (suffixDupBase) {
+      const n = normName(suffixDupBase);
+      const bucketKey = isSG ? `${n} ${service || ''}` : n;
+      return { bucketKey, displayName: suffixDupBase, service, duration };
+    }
     const baseName = display.replace(ChatbotEngine.TIER_ADJECTIVE_RE, '').trim();
     const baseNorm = baseName.toLowerCase();
     if (hasTierMerge && !patientType && service && tierBaseNamesWithVariants && tierBaseNamesWithVariants.has(baseNorm)) {
@@ -2470,12 +2524,13 @@ async handleMessageEnvelope(message, phoneNumber) {
         // (see _clinicWideTypesForTierDetection's doc) — use the clinic-wide
         // list for detection only; bucketing itself still uses `types`.
         const tierBaseNames = this._tierBaseNamesWithVariants(await this._clinicWideTypesForTierDetection(session));
+        const serviceSuffixDupes = this._serviceSuffixDuplicateBaseNames(types);
         const buckets = new Map(); // bucketKey -> { displayName, entries: [{id, insurer}] }
         for (const t of types || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
           if (/\b(initial|new\s*clients?)\b/i.test(t.name)) continue; // no Initial/New in history flow
-          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames, serviceSuffixDupes);
           const { insurer } = parseApptCategory(t.category);
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -3308,11 +3363,12 @@ if (/^p(rev)?$/i.test(text)) {
       const isSG = this._getSessionRegion(session) === 'SG';
       const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
       const tierBaseNames = this._tierBaseNamesWithVariants(allTypes);
+      const serviceSuffixDupes = this._serviceSuffixDuplicateBaseNames(allTypes);
       const buckets = new Map(); // bucketKey -> { displayName, ids:Set }
       for (const t of allTypes || []) {
         if (!t || !t.name) continue;
         if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-        const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
+        const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames, serviceSuffixDupes);
         if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, ids: new Set(), service, duration });
         buckets.get(bucketKey).ids.add(String(t.id));
       }
@@ -3904,11 +3960,12 @@ if (/^p(rev)?$/i.test(text)) {
             const isSG = this._getSessionRegion(session) === 'SG';
             const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
             const tierBaseNames = this._tierBaseNamesWithVariants(allTypes);
+            const serviceSuffixDupes = this._serviceSuffixDuplicateBaseNames(allTypes);
             const buckets = new Map();
             for (const t of allTypes || []) {
               if (!t || !t.name) continue;
               if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-              const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
+              const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames, serviceSuffixDupes);
               const { insurer } = parseApptCategory(t.category);
               if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
               buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -3978,11 +4035,12 @@ if (/^p(rev)?$/i.test(text)) {
         const isSG = this._getSessionRegion(session) === 'SG';
         const servicesSplit = this._servicesWithPatientTypeSplit(allTypes);
         const tierBaseNames = this._tierBaseNamesWithVariants(allTypes);
+        const serviceSuffixDupes = this._serviceSuffixDuplicateBaseNames(allTypes);
         const buckets = new Map();
         for (const t of allTypes || []) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames, serviceSuffixDupes);
           const { insurer } = parseApptCategory(t.category);
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -4451,11 +4509,12 @@ if (/^p(rev)?$/i.test(text)) {
         // (see _clinicWideTypesForTierDetection's doc) — use the clinic-wide
         // list for detection only; bucketing itself still uses `apptTypes`.
         const tierBaseNames = this._tierBaseNamesWithVariants(await this._clinicWideTypesForTierDetection(session));
+        const serviceSuffixDupes = this._serviceSuffixDuplicateBaseNames(apptTypes);
         const buckets = new Map();
         for (const t of (apptTypes || [])) {
           if (!t || !t.name) continue;
           if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
+          const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames, serviceSuffixDupes);
           const { insurer } = parseApptCategory(t.category);
           if (!buckets.has(bucketKey)) buckets.set(bucketKey, { displayName, entries: [], service, duration });
           buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
@@ -4828,11 +4887,12 @@ if (/^p(rev)?$/i.test(text)) {
         const isSG = this._getSessionRegion(session) === 'SG';
         const servicesSplit = this._servicesWithPatientTypeSplit(clinicTypesByPractitioner.flat().filter(Boolean));
         const tierBaseNames = this._tierBaseNamesWithVariants(clinicTypesByPractitioner.flat().filter(Boolean));
+        const serviceSuffixDupes = this._serviceSuffixDuplicateBaseNames(clinicTypesByPractitioner.flat().filter(Boolean));
         for (const types of clinicTypesByPractitioner) {
           for (const t of (types || [])) {
             if (!t || !t.name) continue;
             if (/UWC/i.test(t.name) || /online\s*booking/i.test(t.name)) continue;
-            const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames);
+            const { bucketKey, displayName, service, duration } = this._bucketApptType(t, normName, isSG, servicesSplit, hasCapability(this._getSessionRegion(session), 'physioTiers'), tierBaseNames, serviceSuffixDupes);
             const { insurer } = parseApptCategory(t.category);
             if (!buckets.has(bucketKey)) buckets.set(bucketKey, { display: displayName, entries: [], service, duration });
             buckets.get(bucketKey).entries.push({ id: String(t.id), insurer: insurer || null });
