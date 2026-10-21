@@ -88,9 +88,16 @@ router.post(
       if (object !== 'whatsapp_business_account') return;
       for (const ent of entry) {
         for (const change of ent.changes) {
-          if (change.field === 'messages') {
+          // Meta sends both inbound messages AND delivery-status updates under
+          // field: "messages" — the actual payload shape (messages vs statuses
+          // array) is what distinguishes them, never a separate "message_status"
+          // field value. Routing on change.field alone meant handleStatusUpdate
+          // was unreachable dead code — real delivery status (sent/delivered/
+          // read/failed) was silently dropped with no error, confirmed live
+          // 2026-10-21. Route on the payload shape itself instead.
+          if (Array.isArray(change.value?.messages)) {
             await handleIncomingMessage(change.value);
-          } else if (change.field === 'message_status') {
+          } else if (Array.isArray(change.value?.statuses)) {
             await handleStatusUpdate(change.value);
           }
         }
