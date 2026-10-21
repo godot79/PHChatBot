@@ -212,11 +212,22 @@ async function sendReply(api, phone, reply) {
 async function handleStatusUpdate(data) {
   const { statuses = [] } = data;
   for (const status of statuses) {
-    logger.debug('Message Status:', {
+    const logMeta = {
       id: status.id,
       status: status.status,
-      timestamp: status.timestamp
-    });
+      timestamp: status.timestamp,
+      recipient_id: status.recipient_id,
+      errors: status.errors,
+    };
+    // A failed delivery is worth seeing regardless of LOG_LEVEL — this is the
+    // only place Meta ever tells us a message didn't actually reach the
+    // recipient (confirmed live 2026-10-21: our send succeeds and returns a
+    // message id, but the real delivery outcome only shows up here).
+    if (status.status === 'failed') {
+      logger.error('Message delivery failed:', logMeta);
+    } else {
+      logger.debug('Message Status:', logMeta);
+    }
   }
 }
 
