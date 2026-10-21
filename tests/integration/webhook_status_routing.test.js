@@ -113,6 +113,46 @@ describe('webhook POST / — status-callback vs user-message routing (fix/status
     expect(ChatbotEngine.prototype.handleMessageEnvelope).toHaveBeenCalledWith('Hi', '85298377469');
   });
 
+  test('a failed delivery status is logged at error level with the real error detail, regardless of LOG_LEVEL (fix/log-status-callback-errors)', async () => {
+    // Confirmed live 2026-10-21: our send always succeeds and returns a
+    // message id — the ONLY place Meta ever reveals a real delivery failure
+    // is this status callback's `errors` array. Must not depend on debug-level
+    // logging being left on, since that's not the production default.
+    const errorLogSpy = jest.spyOn(Logger.prototype, 'error');
+    const handler = getPostHandler();
+    const failedPayload = {
+      object: 'whatsapp_business_account',
+      entry: [{
+        id: 'WABA_ID',
+        changes: [{
+          field: 'messages',
+          value: {
+            messaging_product: 'whatsapp',
+            metadata: { display_phone_number: '85262170979', phone_number_id: '1153340851204354' },
+            statuses: [{
+              id: 'wamid.FAILED',
+              status: 'failed',
+              timestamp: '1792568600',
+              recipient_id: '85298377469',
+              errors: [{ code: 131026, title: 'Message Undeliverable' }],
+            }],
+          },
+        }],
+      }],
+    };
+    const { req, res } = signedRequest(failedPayload);
+    await handler(req, res);
+    await new Promise((r) => setImmediate(r));
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+    expect(errorLogSpy).toHaveBeenCalledWith('Message delivery failed:', expect.objectContaining({
+      id: 'wamid.FAILED',
+      status: 'failed',
+      recipient_id: '85298377469',
+      errors: [{ code: 131026, title: 'Message Undeliverable' }],
+    }));
+    errorLogSpy.mockRestore();
+  });
+
   test('a payload with neither messages[] nor statuses[] is ignored (no crash, no engine call)', async () => {
     const handler = getPostHandler();
     const malformed = {
