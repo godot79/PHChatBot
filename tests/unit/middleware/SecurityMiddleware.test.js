@@ -78,6 +78,36 @@ describe('SecurityMiddleware.checkSignature — returns boolean, never responds'
   });
 });
 
+describe('SecurityMiddleware.computeExpectedSignature — diagnostic companion (fix/webhook-sig-drop-diagnostics)', () => {
+  let middleware;
+
+  beforeEach(() => {
+    process.env.WHATSAPP_WEBHOOK_SECRET = SECRET;
+    middleware = new SecurityMiddleware();
+  });
+
+  afterEach(() => { delete process.env.WHATSAPP_WEBHOOK_SECRET; });
+
+  test('produces the exact hex digest that checkSignature expects — agrees with a real valid signature', () => {
+    const header = makeSignature(BODY, SECRET);
+    const received = header.slice(7); // strip "sha256="
+    expect(middleware.computeExpectedSignature(BODY)).toBe(received);
+    expect(middleware.checkSignature(BODY, header)).toBe(true);
+  });
+
+  test('disagrees with a signature computed from a different secret — same case the real SG mismatch hit', () => {
+    const header = makeSignature(BODY, 'a-different-secret');
+    const received = header.slice(7);
+    expect(middleware.computeExpectedSignature(BODY)).not.toBe(received);
+  });
+
+  test('returns null when no secret is configured', () => {
+    delete process.env.WHATSAPP_WEBHOOK_SECRET;
+    middleware = new SecurityMiddleware();
+    expect(middleware.computeExpectedSignature(BODY)).toBeNull();
+  });
+});
+
 describe('SecurityMiddleware.verifyWebhookSignature', () => {
   let middleware;
   const next = jest.fn();
