@@ -144,6 +144,23 @@ checkSignature(rawBody, signatureHeader) {
   }
 }
 
+/**
+ * Diagnostic-only companion to checkSignature — recomputes what WE expect
+ * the signature to be, for side-by-side logging on a drop. Never logs the
+ * secret itself, only the resulting hex digest (safe: it's a one-way hash
+ * output, not the key). Added 2026-10-22 to debug a real SG-prod signature
+ * mismatch where the app secret was independently confirmed current/correct
+ * on Meta's side, ruling out the obvious "stale secret" explanation.
+ */
+computeExpectedSignature(rawBody) {
+  if (!this.config.webhookSecret) return null;
+  try {
+    return crypto.createHmac('sha256', this.config.webhookSecret).update(rawBody).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 verifyWebhookSignature(req, res, next) {
   console.log('✅ ENTERED verifyWebhookSignature');
 console.log('🧾 Content-Type:', req.get('Content-Type'));

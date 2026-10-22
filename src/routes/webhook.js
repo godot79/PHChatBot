@@ -68,7 +68,22 @@ router.post(
     const rawBody = req.body;
     const sigHeader = req.get('X-Hub-Signature-256');
     if (!securityMiddleware.checkSignature(rawBody, sigHeader)) {
-      console.warn('⚠️ WEBHOOK_SIG_DROP sig:', sigHeader?.slice(0, 16), 'bytes:', Buffer.isBuffer(rawBody) ? rawBody.length : typeof rawBody);
+      // Diagnostic detail added 2026-10-22: a real SG-prod mismatch kept
+      // occurring after independently confirming the app secret itself was
+      // current/correct — logging the FULL received vs. locally-expected
+      // signature (never the secret) lets us see whether this is a genuine
+      // byte-level mismatch (secret/body-encoding issue) or something else
+      // (e.g. checkSignature never even being reached with the real body).
+      const received = sigHeader && sigHeader.startsWith('sha256=') ? sigHeader.slice(7) : sigHeader;
+      const expected = securityMiddleware.computeExpectedSignature(rawBody);
+      console.warn('⚠️ WEBHOOK_SIG_DROP', {
+        receivedSig: received,
+        expectedSig: expected,
+        match: received === expected,
+        bytes: Buffer.isBuffer(rawBody) ? rawBody.length : typeof rawBody,
+        contentType: req.get('Content-Type'),
+        bodyPreview: Buffer.isBuffer(rawBody) ? rawBody.toString('utf8').slice(0, 120) : String(rawBody).slice(0, 120),
+      });
       return;
     }
 
