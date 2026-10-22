@@ -1,3 +1,10 @@
+# NOTE (2026-10-22): for routine deploys, prefer `scripts/deploy.sh <service-name>` over
+# raw `gcloud run deploy --source .` below — it re-syncs the current directory's .env onto
+# the service via --update-env-vars every time, so a drift like the SG incident (a one-off
+# --set-env-vars call silently wiping every other env var for 10 days) can't recur silently.
+# The commands below are kept as historical reference / one-off config commands, not the
+# routine deploy path.
+
 gcloud run services update chatbot-webhook \
   --region asia-southeast1 \
   --min-instances 1 \
