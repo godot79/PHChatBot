@@ -353,7 +353,6 @@ class ClinikoAPI {
     try {
       const result = await this._get429Retry(url);
       console.info(`Total slots : ${result.total_entries}`);
-      console.info(result.available_times?.[0]);
       const output = result.available_times || [];
       _cacheSet(_availableTimesCache, cacheKey, output, config.availableTimesCacheTtlMs);
       return output;
@@ -833,8 +832,13 @@ class ClinikoAPI {
         // went wrong (as opposed to this practitioner genuinely having zero
         // appointment types).
         if (apptTypes._partial) hadFetchFailure = true;
-        for (const apptType of apptTypes) {
-          let slots = [];
+
+        // Fan out across this practitioner's appointment types in parallel
+        // (throttled via bulkAll/BulkContext, same pattern BOOK_SOONEST's
+        // fan-outs already use) instead of one Cliniko round-trip at a time —
+        // a practitioner with ~30 appointment types was taking ~9s sequentially
+        // for a single BOOK_SPECIFIC_DATE lookup (live-measured 2026-10-23).
+        const apptResults = await bulkAll(apptTypes, async (apptType) => {
           try {
             // Build the exact inner URL we expect getAvailableTimes to call (for log visibility)
             const innerParams = new URLSearchParams();
@@ -851,7 +855,7 @@ class ClinikoAPI {
             });
 
             // Call through the official method (keeps behavior identical)
-            slots = await this.getAvailableTimes({
+            const slots = await this.getAvailableTimes({
               practitioner_id: practitioner.id,
               business_id,
               appt_type: apptType.id,
@@ -864,7 +868,7 @@ class ClinikoAPI {
             // now, kept only as defense-in-depth for anything else that might
             // still throw. Check the marker directly so a real failure here
             // is still detected the same way it always was.
-            if (slots._partial) hadFetchFailure = true;
+            return { apptType, slots };
           } catch (slotErr) {
             const safeMsg = (slotErr && (slotErr.message || slotErr.status || slotErr.code)) || 'unknown_error';
             // Log the failed inner query with full context
@@ -879,22 +883,29 @@ class ClinikoAPI {
             // This combo silently contributes zero slots below — indistinguishable
             // from a genuine zero unless a caller checks the _partial marker set
             // on the returned array (see bottom of this method).
-            hadFetchFailure = true;
+            return { apptType, slots: [], _failed: true };
           }
+        });
 
-          if (slots.length) {
-            const businessName = businessObj?.business_name || '';
-            if (!EXCLUDED_CLINIC_PATTERN.test(businessName)) {
-              allSlots.push(...slots.map(slot => ({
-                practitioner_id: practitioner.id,
-                practitioner_name: `${practitioner.first_name || ''} ${practitioner.last_name || ''}`.trim() || practitioner.display_name,
-                appointment_type_id: apptType.id,
-                appointment_type_name: apptType.name,
-                business_id: business_id,
-                business_name: businessName,
-                slot: slot.appointment_start || slot.start_time || slot.starts_at,
-              })));
-            }
+        const businessName = businessObj?.business_name || '';
+        for (const r of apptResults) {
+          // bulkAll leaves an entry `undefined` if its fetch hadn't settled
+          // by the fan-out deadline — same degrade-to-partial contract as a
+          // caught error below, not a confirmed-zero result.
+          if (!r) { hadFetchFailure = true; continue; }
+          const { apptType, slots, _failed } = r;
+          if (_failed || slots._partial) hadFetchFailure = true;
+
+          if (slots.length && !EXCLUDED_CLINIC_PATTERN.test(businessName)) {
+            allSlots.push(...slots.map(slot => ({
+              practitioner_id: practitioner.id,
+              practitioner_name: `${practitioner.first_name || ''} ${practitioner.last_name || ''}`.trim() || practitioner.display_name,
+              appointment_type_id: apptType.id,
+              appointment_type_name: apptType.name,
+              business_id: business_id,
+              business_name: businessName,
+              slot: slot.appointment_start || slot.start_time || slot.starts_at,
+            })));
           }
         }
       }
