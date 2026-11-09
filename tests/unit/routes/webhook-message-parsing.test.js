@@ -193,11 +193,15 @@ describe('webhook: other message types', () => {
     expect(mockEngineInstance.handleMessageEnvelope).toHaveBeenCalledWith('Confirm', '222');
   });
 
-  test('unknown type (image) → silent drop, no engine call', async () => {
+  test('unknown type (image) → no engine call, but a graceful fallback reply is sent (not silent)', async () => {
+    // Was a pure silent drop — confirmed live (30-day HK prod log review,
+    // 2026-11) that image/audio/reaction messages happen often enough (20
+    // occurrences/30 days) that a customer sending a photo of a referral
+    // letter getting total silence is a real problem, not a theoretical one.
     await postWebhook([{ from: '333', type: 'image', image: { id: 'img1' } }]);
     await settle();
     expect(mockEngineInstance.handleMessageEnvelope).not.toHaveBeenCalled();
-    expect(mockApiInstance.sendTextMessage).not.toHaveBeenCalled();
+    expect(mockApiInstance.sendTextMessage).toHaveBeenCalledWith('333', expect.stringContaining("can't read images"));
   });
 
   test('empty messages array → no processing', async () => {
