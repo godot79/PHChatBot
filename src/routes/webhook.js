@@ -174,7 +174,16 @@ async function handleIncomingMessage(data) {
       }
     }
     if (!content) {
+      // Confirmed live (30-day HK prod log review, 2026-11): images, voice
+      // notes, and reactions arrive fairly often (20 occurrences/30 days) —
+      // a customer sending a photo of a referral letter or insurance card is
+      // a real, plausible case for this bot, not a theoretical one. Previously
+      // this was a pure `continue` — zero reply, total silence. At minimum
+      // tell them what we can and can't handle instead of going dark.
       logger.warn(`Unsupported message type: ${type}`);
+      // phone is guaranteed non-empty here (guarded above), same as the
+      // "Unhandled interactive subtype" branch's send just above this.
+      await whatsAppAPI.sendTextMessage(phone, "Sorry, I can't read images, voice notes, or other media yet — please describe your question in text and I'll help.");
       continue;
     }
 
