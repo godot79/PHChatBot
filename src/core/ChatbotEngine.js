@@ -8,7 +8,7 @@ const SessionManager = require('./SessionManager');
 const Logger = require('./Logger.js');
 const axios = require('axios');
 const { bookingConfirmed, appointmentCancelled, cancellationBlocked, appointmentRescheduled, rescheduleBlocked } = require('../../prohealth-mailer/EmailTemplates');
-const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage, hasCapability } = require('../config/regions');
+const { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage, getRegionLanguages, hasCapability } = require('../config/regions');
 const { LANGUAGE_LABELS } = require('../config/languages');
 
 // LANGUAGE_LABELS entries may carry a "(English gloss)" suffix for readability
@@ -1388,7 +1388,6 @@ async handleMessageEnvelope(message, phoneNumber) {
       PH: 'Philippines 🇵🇭'
     };
     const regionCodes = Object.keys(regionLabels);
-    const languageCodes = Object.keys(LANGUAGE_LABELS);
 
     let context = (session.context && typeof session.context === 'string')
       ? JSON.parse(session.context)
@@ -1423,20 +1422,20 @@ async handleMessageEnvelope(message, phoneNumber) {
         if (idx >= 0 && idx < regionCodes.length) {
           context.region = regionCodes[idx];
           delete context.awaiting_region_selection;
-          if (context.region !== 'HK' && context.language !== 'en') {
+          if (context.language && !getRegionLanguages(context.region).includes(context.language)) {
             context.language = 'en';
             delete context.awaiting_language_selection;
           }
           await this.sessionManager.updateSession(session.id, { context });
           this.sessionManager.db.upsertPatientState(session.phone_number || session.phoneNumber, { region: context.region, language: context.language }).catch(() => {});
-          // Re-enter (rather than jump to the main menu) so the HK language gate below still runs if needed
+          // Re-enter (rather than jump to the main menu) so the language gate below still runs if needed
           return await this.handleIntroState(await this.sessionManager.getSession(session.id), '');
         }
       } else if (regionCodes.some(code => text.includes(regionLabels[code].toLowerCase()))) {
         const found = regionCodes.find(code => text.includes(regionLabels[code].toLowerCase()));
         context.region = found;
         delete context.awaiting_region_selection;
-        if (context.region !== 'HK' && context.language !== 'en') {
+        if (context.language && !getRegionLanguages(context.region).includes(context.language)) {
           context.language = 'en';
           delete context.awaiting_language_selection;
         }
@@ -1451,9 +1450,12 @@ async handleMessageEnvelope(message, phoneNumber) {
       );
     }
 
-    // Non-HK regions never offer language selection — silently force English if not already,
-    // and ignore any stray language-change command instead of falling through to unmatched-text handling.
-    if (context.region !== 'HK') {
+    const languageCodes = getRegionLanguages(context.region);
+
+    // Regions with only one language never offer a selection — silently force
+    // English if not already, and ignore any stray language-change command
+    // instead of falling through to unmatched-text handling.
+    if (languageCodes.length <= 1) {
       if (context.language !== 'en' || context.awaiting_language_selection) {
         context.language = 'en';
         delete context.awaiting_language_selection;
@@ -1465,8 +1467,8 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
     }
 
-    // Show language selection if needed — HK only.
-    if (context.region === 'HK' && (!context.language || text === 'language' || text === 'change language' || context.awaiting_language_selection)) {
+    // Show language selection if needed — only for regions offering more than one.
+    if (languageCodes.length > 1 && (!context.language || text === 'language' || text === 'change language' || context.awaiting_language_selection)) {
       context.awaiting_language_selection = true;
       if (/^\d+$/.test(text)) {
         const idx = parseInt(text, 10) - 1;
@@ -1487,10 +1489,16 @@ async handleMessageEnvelope(message, phoneNumber) {
       }
 
       await this.sessionManager.updateSession(session.id, { context });
+      // Only include each script's own prompt line for languages actually
+      // offered to this region (e.g. SG offers zh but not yue — Cantonese
+      // isn't a Singapore language, so its line would be out of place there).
+      const languagePromptLines = {
+        en: "Welcome! Please select your language so I can help you properly — you can change this anytime by typing 'language'.",
+        yue: '請先選擇你嘅語言，方便我哋為你提供協助 — 隨時可以打「language」更改。',
+        zh: '请先选择您的语言，方便我们为您提供帮助 — 随时可以输入"language"更改。',
+      };
       const languageList = list(
-        "Welcome! Please select your language so I can help you properly — you can change this anytime by typing 'language'.\n\n"
-        + '請先選擇你嘅語言，方便我哋為你提供協助 — 隨時可以打「language」更改。\n\n'
-        + '请先选择您的语言，方便我们为您提供帮助 — 随时可以输入"language"更改。',
+        languageCodes.map((code) => languagePromptLines[code]).filter(Boolean).join('\n\n'),
         'Select language',
         languageCodes.map((code, i) => ({ id: String(i + 1), title: LANGUAGE_LABELS[code] }))
       );
