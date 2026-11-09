@@ -123,6 +123,27 @@ function getRegionFeesForLanguage(region, language) {
 }
 
 /**
+ * Which language codes (from config/languages.js's LANGUAGE_LABELS) a region
+ * offers in the language-selection menu. A region not listed here only gets
+ * 'en' — no selection prompt is shown at all (ChatbotEngine.handleIntroState
+ * only offers a choice when a region's list has more than one entry).
+ * Cantonese ('yue') is HK-specific (not a Singapore language); Mandarin
+ * ('zh') applies to both.
+ */
+const REGION_LANGUAGES = {
+  HK: ['en', 'yue', 'zh'],
+  SG: ['en', 'zh'],
+};
+
+/**
+ * @param {string} region
+ * @returns {string[]} language codes offered for this region, 'en' only if unlisted.
+ */
+function getRegionLanguages(region) {
+  return REGION_LANGUAGES[region] || ['en'];
+}
+
+/**
  * Region capability flags — feature gates keyed by capability name, not by
  * literal region checks scattered through ChatbotEngine.js. A region simply
  * omits a flag (or sets it false) when the capability doesn't apply; callers
@@ -151,4 +172,4 @@ function hasCapability(region, capability) {
   return !!(REGION_CAPABILITIES[region] && REGION_CAPABILITIES[region][capability]);
 }
 
-module.exports = { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage, REGION_CAPABILITIES, hasCapability };
+module.exports = { REGION_SUPPORT_INFO, REGION_FEES, getRegionFeesForLanguage, REGION_LANGUAGES, getRegionLanguages, REGION_CAPABILITIES, hasCapability };
