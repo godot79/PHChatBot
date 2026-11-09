@@ -137,6 +137,20 @@ async function handleIncomingMessage(data) {
     const type = message.type;
     let content = '';
 
+    // Confirmed live 2026-10-20 (HK prod): a real message arrived with no
+    // `from` field at all — the raw payload that would explain why is long
+    // gone (predates the console-log metadata fix, so it was never
+    // captured). Without this guard it cascaded into 3 separate unhelpful
+    // error lines from session creation ("Invalid phone number provided")
+    // instead of one clear warning, and there's genuinely no address to
+    // reply to either way — this is a skip, not a fix for the root cause,
+    // which still isn't known. The full payload logged just above (now
+    // captured, post metadata-fix) is what to check if this recurs.
+    if (!phone) {
+      logger.warn('Incoming message has no phone number (message.from missing) — skipping, cannot reply', { type });
+      continue;
+    }
+
     if (type === 'text') {
       content = message.text?.body;
     } else if (type === 'button') {
