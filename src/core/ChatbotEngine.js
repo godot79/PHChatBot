@@ -6348,16 +6348,48 @@ if (/^p(rev)?$/i.test(text)) {
     const text = (message || '').trim();
     const language = this._getSessionLanguage(session);
 
-    // Back/cancel to Intro from any step
+    // Collect required fields in order. DOB is required so this patient can
+    // later re-verify via "Yes, I'm registered" (email + DOB) — without it,
+    // Cliniko's record has a blank date_of_birth that can never match a real
+    // DOB the patient enters, permanently locking them out of re-verification.
+    const required = ['first_name', 'last_name', 'email', 'dob'];
+    let next = null;
+    for (const f of required) {
+      if (!data[f]) { next = f; break; }
+    }
+
+    // "0/back/menu" steps back ONE field (clears it, re-prompts for it) rather
+    // than wiping the whole registration — a real customer hit this twice in
+    // one sitting (2026-11 log review) trying to correct an earlier answer and
+    // got bounced to the main menu both times instead. Only the very first
+    // field (first_name) has nothing earlier to step back to, so that case
+    // still exits to Intro, same as before. Mid-duplicate-check ("already
+    // registered?") steps back to re-asking DOB, clearing the prompt/confirm
+    // flags so the check re-runs cleanly against whatever DOB comes next.
     if (['0', 'back', 'menu'].includes(text.toLowerCase())) {
-      await this.sessionManager.updateSession(session.id, {
-        conversation_state: this.STATES.INTRO,
-        verified: false,
-        data: null
-      });
-      const updated = await this.sessionManager.getSession(session.id);
-      log.info('Registration cancelled -> Intro');
-      return await this.renderMainMenu(updated);
+      // currentStep is whichever field is still being collected, or
+      // 'duplicate_check' if all 4 are already in and that gate hasn't
+      // cleared yet — the step order the back button walks backward through.
+      const currentStep = next || (!data.duplicate_check_confirmed ? 'duplicate_check' : null);
+      const stepOrder = [...required, 'duplicate_check'];
+      const idx = stepOrder.indexOf(currentStep);
+      if (currentStep === 'first_name' || idx <= 0) {
+        await this.sessionManager.updateSession(session.id, {
+          conversation_state: this.STATES.INTRO,
+          verified: false,
+          data: null
+        });
+        const updated = await this.sessionManager.getSession(session.id);
+        log.info('Registration cancelled -> Intro');
+        return await this.renderMainMenu(updated);
+      }
+      const prevField = stepOrder[idx - 1];
+      delete data[prevField];
+      delete data.duplicate_check_prompted;
+      delete data.duplicate_check_confirmed;
+      await this.sessionManager.updateSession(session.id, { data: JSON.stringify(data) });
+      log.info('Registration stepped back one field', { to: prevField });
+      return await this.handleRegisterPatientState(await this.sessionManager.getSession(session.id), '');
     }
 
     // Same DOB parser as handleVerifyState's step — accepts "dd mm yyyy", "dd/mm/yyyy", etc.
@@ -6368,16 +6400,6 @@ if (/^p(rev)?$/i.test(text)) {
       const d = new Date(Date.UTC(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10)));
       return isNaN(d.getTime()) ? null : `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
     };
-
-    // Collect required fields in order. DOB is required so this patient can
-    // later re-verify via "Yes, I'm registered" (email + DOB) — without it,
-    // Cliniko's record has a blank date_of_birth that can never match a real
-    // DOB the patient enters, permanently locking them out of re-verification.
-    const required = ['first_name', 'last_name', 'email', 'dob'];
-    let next = null;
-    for (const f of required) {
-      if (!data[f]) { next = f; break; }
-    }
 
     if (next) {
       if (text) {

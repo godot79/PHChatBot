@@ -8083,6 +8083,75 @@ describe('Dead-end standardization', () => {
     });
   });
 
+  // ─── Register new patient — "0/back" steps back ONE field, not the whole flow ──
+  // A real customer (log review, 2026-11) hit "0" twice trying to correct an
+  // earlier answer and got bounced to the main menu both times, losing
+  // everything — she never completed the booking. "0" now clears just the
+  // previous field and re-prompts for it; only the very first field
+  // (first_name) still exits to the main menu, since there's nothing earlier
+  // to step back to.
+  describe('Register new patient — "0" steps back one field', () => {
+    test('"0" at the very first field (first_name) exits to the main menu, same as before', async () => {
+      const session = await seedAt('REGISTER_PATIENT', { first_name: undefined, last_name: undefined, email: undefined });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '0');
+      expect(reply).toMatch(/register as new patient/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('INTRO');
+    });
+
+    test('"0" while being asked for last_name clears first_name and re-asks it', async () => {
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: undefined, email: undefined });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '0');
+      expect(reply).toMatch(/first name/i);
+      const updated = await db.getSession(session.id);
+      expect(updated.conversation_state).toBe('REGISTER_PATIENT');
+      const data = JSON.parse(updated.data || '{}');
+      expect(data.first_name).toBeUndefined();
+    });
+
+    test('"0" while being asked for email clears last_name and re-asks it', async () => {
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: undefined });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '0');
+      expect(reply).toMatch(/last name/i);
+      const data = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(data.last_name).toBeUndefined();
+      expect(data.first_name).toBe('Jane'); // untouched — only one field back
+    });
+
+    test('"0" while being asked for DOB clears email and re-asks it', async () => {
+      const session = await seedAt('REGISTER_PATIENT', { first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com' });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '0');
+      expect(reply).toMatch(/email/i);
+      const data = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(data.email).toBeUndefined();
+    });
+
+    test('"0" while the duplicate-check prompt is showing clears DOB and re-asks it, resetting the check', async () => {
+      const session = await seedAt('REGISTER_PATIENT', {
+        first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com', dob: '1990-03-15', duplicate_check_prompted: true,
+      });
+      const reply = await callHandler(engine, ['handleRegisterPatientState'], session, '0');
+      expect(reply).toMatch(/date of birth/i);
+      const data = JSON.parse((await db.getSession(session.id)).data || '{}');
+      expect(data.dob).toBeUndefined();
+      expect(data.duplicate_check_prompted).toBeUndefined();
+      expect(data.duplicate_check_confirmed).toBeUndefined();
+      expect(engine.clinikoAPI.registerNewPatient).not.toHaveBeenCalled();
+    });
+
+    test('after stepping back from the duplicate-check prompt and re-entering a corrected DOB, the check runs again (not skipped)', async () => {
+      const session = await seedAt('REGISTER_PATIENT', {
+        first_name: 'Jane', last_name: 'Tan', email: 'jane@test.com', dob: '1990-03-15', duplicate_check_prompted: true,
+      });
+      await callHandler(engine, ['handleRegisterPatientState'], session, '0'); // back to DOB, clears both duplicate_check_* flags
+      engine.clinikoAPI.findPatientsByNameAndDob.mockResolvedValueOnce([]);
+      engine.clinikoAPI.registerNewPatient.mockResolvedValueOnce({ id: 'NEW-PATIENT-020' });
+      const refetched = await db.getSession(session.id);
+      await callHandler(engine, ['handleRegisterPatientState'], refetched, '20 04 1991');
+      expect(engine.clinikoAPI.findPatientsByNameAndDob).toHaveBeenCalledWith('Jane', 'Tan', '1991-04-20');
+    });
+  });
+
   // ─── Reschedule no-slots ─────────────────────────────────────────────────────
   describe('Reschedule — no available slots', () => {
     const rescheduleAppt = () => ({
