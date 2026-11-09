@@ -1,5 +1,8 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const config = require('../config/anthropic.js');
+const Logger = require('./Logger.js');
+
+const logger = new Logger('NluRouter');
 
 // Sentinel returned on any failure (timeout, API error, malformed/low-confidence
 // output). Callers must treat this identically to "no classification" and fall
@@ -202,6 +205,17 @@ async function classifyIntent(text, currentState, sessionContext) {
 
     return { intent, slots: slots || {}, confidence };
   } catch (err) {
+    // This used to swallow every failure silently, including auth errors —
+    // a missing/invalid ANTHROPIC_API_KEY on a deployed service produced
+    // zero error signal and was indistinguishable from a genuine
+    // low-confidence miss (confirmed live, 2026-11: HK/SG prod ran with no
+    // ANTHROPIC_API_KEY for weeks, 100% of real classifyIntent calls failed,
+    // and nothing in the logs pointed at it). Never log the raw text here —
+    // this is user message content.
+    logger.error('classifyIntent failed', {
+      error: (err && (err.message || err.status || err.code)) || 'unknown_error',
+      currentState,
+    });
     return NO_CLASSIFICATION;
   }
 }
