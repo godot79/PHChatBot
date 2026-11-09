@@ -103,7 +103,10 @@ class DatabaseManager {
   }
 
   // Create a new session
-  async createSession(phoneNumber, patientId = null, durationMinutes = 30) {
+  // Default only matters if a caller omits durationMinutes — SessionManager
+  // always passes its own defaultSessionDuration explicitly (120 as of
+  // 2026-11), this is just a safety-net default kept in sync with that.
+  async createSession(phoneNumber, patientId = null, durationMinutes = 120) {
     return new Promise((resolve, reject) => {
       const sessionId = this.generateSessionId();
       const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
