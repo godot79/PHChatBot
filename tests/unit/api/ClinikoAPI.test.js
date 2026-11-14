@@ -749,4 +749,57 @@ describe('ClinikoAPI', () => {
       expect(result._partial).toBe(true);
     });
   });
+
+  // ─── _get429Retry analytics tagging ────────────────────────────────────────
+  // 429s were previously a silent retry with no signal anywhere outside this
+  // function — these events are what lets the ops dashboard see a burst at all.
+  describe('_get429Retry() analytics events', () => {
+    test('no 429 → no analytics events emitted', async () => {
+      api.logger.analyticsEvent = jest.fn();
+      mockGet.mockResolvedValue({ ok: true });
+
+      await api._get429Retry('/some-url');
+
+      expect(api.logger.analyticsEvent).not.toHaveBeenCalled();
+    });
+
+    test('429 then success on retry → cliniko_429 followed by recovered outcome', async () => {
+      api.logger.analyticsEvent = jest.fn();
+      mockGet
+        .mockRejectedValueOnce({ status: 429 })
+        .mockResolvedValueOnce({ ok: true });
+
+      const result = await api._get429Retry('/some-url');
+
+      expect(result).toEqual({ ok: true });
+      expect(api.logger.analyticsEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'cliniko_429', url: '/some-url' })
+      );
+      expect(api.logger.analyticsEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'cliniko_429_retry_outcome', url: '/some-url', outcome: 'recovered' })
+      );
+    });
+
+    test('429 then 429 again on retry → cliniko_429 followed by failed outcome, error still thrown', async () => {
+      api.logger.analyticsEvent = jest.fn();
+      mockGet
+        .mockRejectedValueOnce({ status: 429 })
+        .mockRejectedValueOnce({ status: 429 });
+
+      await expect(api._get429Retry('/some-url')).rejects.toEqual({ status: 429 });
+
+      expect(api.logger.analyticsEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'cliniko_429_retry_outcome', url: '/some-url', outcome: 'failed' })
+      );
+    });
+
+    test('non-429 error → rethrows immediately, no analytics event', async () => {
+      api.logger.analyticsEvent = jest.fn();
+      mockGet.mockRejectedValueOnce({ status: 500 });
+
+      await expect(api._get429Retry('/some-url')).rejects.toEqual({ status: 500 });
+
+      expect(api.logger.analyticsEvent).not.toHaveBeenCalled();
+    });
+  });
 });

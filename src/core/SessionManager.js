@@ -103,6 +103,7 @@ class SessionManager {
         }
 
         this.logger.info(`Created new session ${sessionId} for ${normalizedPhone}`);
+        this.logger.analyticsEvent({ event: 'session_started', sessionId, region: this.getRegionFromPhoneNumber(normalizedPhone), ts: Date.now() });
 
         // Load patient_state up front — it's the durable source of truth for verification
         // (survives logout/expiry cleanup) and is used to sanity-check the prior-session
@@ -254,9 +255,14 @@ class SessionManager {
             // Check if session is expired
             if (this.isSessionExpired(session)) {
                 this.logger.debug(`Session ${sessionId} is expired`);
+                // Approximate, not exact — a single request can touch the same stale
+                // session via both getSession and getSessionByPhone before a new one
+                // is created, so this may double-count a given expiry. Fine for the
+                // dashboard's drop-off counts, not meant as a precise ledger.
+                this.logger.analyticsEvent({ event: 'session_ended', sessionId, endReason: 'expired', ts: Date.now() });
                 return null;
             }
-            
+
             await this.updateSessionActivity(sessionId);
             return this.parseSession(session);
         } catch (error) {
@@ -279,10 +285,12 @@ class SessionManager {
             if (!session) {
                 return null;
             }
-            
+
             // Check if session is expired
             if (this.isSessionExpired(session)) {
                 this.logger.debug(`Session ${session.id} is expired for phone ${normalizedPhone}`);
+                // See getSession's matching comment — same approximate-counting caveat.
+                this.logger.analyticsEvent({ event: 'session_ended', sessionId: session.id, endReason: 'expired', region: this.getRegionFromPhoneNumber(normalizedPhone), ts: Date.now() });
                 return null;
             }
             
@@ -641,7 +649,10 @@ class SessionManager {
             
             this.clearVerificationTimeout(sessionId);
             this.logger.info(`Ended session ${sessionId}, reason: ${reason}`);
-            
+            // No region here — ingestion joins this to session_started by sessionId
+            // rather than re-fetching the phone number for one extra DB round-trip.
+            this.logger.analyticsEvent({ event: 'session_ended', sessionId, endReason: reason, ts: Date.now() });
+
             return true;
         } catch (error) {
             this.logger.error(`Failed to end session ${sessionId}:`, error);
