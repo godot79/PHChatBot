@@ -77,8 +77,19 @@ class ClinikoAPI {
       return await new SendMessage(url, params).get();
     } catch (err) {
       if (err?.status !== 429) throw err;
+      // 429s were previously invisible outside this one silent retry — no session id
+      // available at this layer, so tagged by region + endpoint only; good enough for
+      // the ops dashboard to detect bursts, not a per-customer trail.
+      this.logger.analyticsEvent({ event: 'cliniko_429', region: RegionContext.get(), url, ts: Date.now() });
       await new Promise((r) => setTimeout(r, 1500));
-      return await new SendMessage(url, params).get();
+      try {
+        const result = await new SendMessage(url, params).get();
+        this.logger.analyticsEvent({ event: 'cliniko_429_retry_outcome', region: RegionContext.get(), url, outcome: 'recovered', ts: Date.now() });
+        return result;
+      } catch (retryErr) {
+        this.logger.analyticsEvent({ event: 'cliniko_429_retry_outcome', region: RegionContext.get(), url, outcome: 'failed', ts: Date.now() });
+        throw retryErr;
+      }
     }
   }
 

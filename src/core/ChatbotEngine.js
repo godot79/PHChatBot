@@ -1569,7 +1569,10 @@ async handleMessageEnvelope(message, phoneNumber) {
           return await this.handleCheckInsuranceState(session);
         }
       }
-      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'INTRO', intent: nlu.intent, confidence: nlu.confidence });
+      // Raw text included deliberately (2026-11-14, explicit product decision) so the
+      // ops dashboard can show what the bot actually misread — overrides the earlier
+      // "never log raw text" stance that applied to classifyIntent's own error path.
+      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'INTRO', intent: nlu.intent, confidence: nlu.confidence, text });
     }
 
     const fallbackPrefix = session._isFirstContactMessage
@@ -1921,7 +1924,8 @@ async handleMessageEnvelope(message, phoneNumber) {
           return await this.handleRescheduleAppointmentState(session, '');
         }
       }
-      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOK_MANAGE_OPTIONS', intent: nlu.intent, confidence: nlu.confidence });
+      // See INTRO's nlu_fallback_low_confidence for the raw-text logging decision note.
+      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOK_MANAGE_OPTIONS', intent: nlu.intent, confidence: nlu.confidence, text });
     }
 
     return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.optionsNotUnderstood'), await this.goToInteractiveMenu(session));
@@ -2166,7 +2170,8 @@ async handleMessageEnvelope(message, phoneNumber) {
           return await handler.call(this, session, '');
         }
       }
-      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOKING_METHOD_OPTIONS', intent: nlu.intent, confidence: nlu.confidence });
+      // See INTRO's nlu_fallback_low_confidence for the raw-text logging decision note.
+      this.logger.analyticsEvent({ event: 'nlu_fallback_low_confidence', sessionId: session.id, region: this._getSessionRegion(session), ts: Date.now(), state: 'BOOKING_METHOD_OPTIONS', intent: nlu.intent, confidence: nlu.confidence, text });
     }
 
     return prependTextToEnvelope(t(this._getSessionLanguage(session), 'common.invalidBookingMethod'), await this.renderBookingMethodMenu(session));
