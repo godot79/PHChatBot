@@ -103,7 +103,10 @@ class SessionManager {
         }
 
         this.logger.info(`Created new session ${sessionId} for ${normalizedPhone}`);
-        this.logger.analyticsEvent({ event: 'session_started', sessionId, region: this.getRegionFromPhoneNumber(normalizedPhone), ts: Date.now() });
+        // isTest lets the analytics pipeline exclude dev/QA traffic from real customer
+        // counts — computed here, never the phone number itself, which stays out of
+        // every analytics event by design.
+        this.logger.analyticsEvent({ event: 'session_started', sessionId, region: this.getRegionFromPhoneNumber(normalizedPhone), isTest: this.isTestPhoneNumber(normalizedPhone), ts: Date.now() });
 
         // Load patient_state up front — it's the durable source of truth for verification
         // (survives logout/expiry cleanup) and is used to sanity-check the prior-session
@@ -1102,6 +1105,23 @@ class SessionManager {
             : await this.db.deleteSession(sessionId);
         this.logger.debug(`[deleteSessionAndData] Deleted session row(s) for phone: ${phoneNumber}`);
         return deleted;
+    }
+
+    /**
+     * Whether a (normalized) phone number is one of the dev/QA numbers listed in
+     * TEST_PHONE_NUMBERS (comma-separated, matches digits only — format-agnostic).
+     * Used only to tag analytics events for exclusion; never changes bot behavior.
+     * @param {string} normalizedPhone
+     * @returns {boolean}
+     */
+    isTestPhoneNumber(normalizedPhone) {
+        const raw = process.env.TEST_PHONE_NUMBERS || '';
+        if (!raw.trim() || !normalizedPhone) return false;
+        const digits = normalizedPhone.replace(/\D/g, '');
+        return raw.split(',')
+            .map((n) => n.trim().replace(/\D/g, ''))
+            .filter(Boolean)
+            .includes(digits);
     }
 
     /**
