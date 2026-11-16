@@ -7,14 +7,15 @@ class SessionManager {
         this.db = databaseManager || new DatabaseManager();
         this.logger = new Logger('SessionManager');
         this.sessionTimeouts = new Map();
-        // Was 30 — real WhatsApp reply gaps regularly exceed that (live-confirmed
-        // 2026-11: a customer naming a specific practitioner/date got silently
-        // reset to the main menu, losing all funnel progress, after two
-        // ordinary 35-44 min gaps between her own replies — never completed
-        // the booking). 120 covers realistic same-sitting pauses; expiry still
-        // extends on every message (see updateActivity below), so an actually
-        // abandoned session still times out, just later.
-        this.defaultSessionDuration = 120; // minutes
+        // Was 30, then 120 — real WhatsApp reply gaps regularly exceed both
+        // (live-confirmed 2026-11: a customer naming a specific
+        // practitioner/date got silently reset to the main menu, losing all
+        // funnel progress, after two ordinary 35-44 min gaps between her own
+        // replies — never completed the booking). 180 gives more headroom for
+        // same-sitting pauses; expiry still extends on every message (see
+        // updateActivity below), so an actually abandoned session still
+        // times out, just later.
+        this.defaultSessionDuration = 180; // minutes
         this.verificationTimeout = 5; // minutes
         this.maxVerificationAttempts = 3;
         
