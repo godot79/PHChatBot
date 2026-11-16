@@ -106,7 +106,7 @@ class SessionManager {
         // isTest lets the analytics pipeline exclude dev/QA traffic from real customer
         // counts — computed here, never the phone number itself, which stays out of
         // every analytics event by design.
-        this.logger.analyticsEvent({ event: 'session_started', sessionId, region: this.getRegionFromPhoneNumber(normalizedPhone), isTest: this.isTestPhoneNumber(normalizedPhone), ts: Date.now() });
+        this.logger.analyticsEvent({ event: 'session_started', sessionId, region: this.getRegionFromPhoneNumber(normalizedPhone).region, isTest: this.isTestPhoneNumber(normalizedPhone), ts: Date.now() });
 
         // Load patient_state up front — it's the durable source of truth for verification
         // (survives logout/expiry cleanup) and is used to sanity-check the prior-session
@@ -293,7 +293,7 @@ class SessionManager {
             if (this.isSessionExpired(session)) {
                 this.logger.debug(`Session ${session.id} is expired for phone ${normalizedPhone}`);
                 // See getSession's matching comment — same approximate-counting caveat.
-                this.logger.analyticsEvent({ event: 'session_ended', sessionId: session.id, endReason: 'expired', region: this.getRegionFromPhoneNumber(normalizedPhone), ts: Date.now() });
+                this.logger.analyticsEvent({ event: 'session_ended', sessionId: session.id, endReason: 'expired', region: this.getRegionFromPhoneNumber(normalizedPhone).region, ts: Date.now() });
                 return null;
             }
             

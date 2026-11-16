@@ -97,6 +97,30 @@ describe('SessionManager.getRegionFromPhoneNumber', () => {
   });
 });
 
+describe('SessionManager.getOrCreateSession — session_started analytics event', () => {
+  // Regression: getRegionFromPhoneNumber() returns {region, ...}, not a bare
+  // string — a call site that logs the whole object instead of .region
+  // silently breaks any aggregation keyed on region downstream (caught live,
+  // 2026-11-16, via a dashboard showing 0 sessions despite real traffic).
+  test('region on the emitted event is a plain string, not the whole lookup object', async () => {
+    const fakeDb = {
+      getSessionByPhone: jest.fn().mockResolvedValue(null),
+      createSession: jest.fn().mockResolvedValue('sess-1'),
+      getSession: jest.fn().mockResolvedValue({ id: 'sess-1', conversation_state: 'INTRO', data: null }),
+      getPatientState: jest.fn().mockResolvedValue(null),
+    };
+    const sm = new SessionManager(fakeDb);
+    sm.logger.analyticsEvent = jest.fn();
+
+    await sm.getOrCreateSession('+85298377469');
+
+    const call = sm.logger.analyticsEvent.mock.calls.find(([payload]) => payload.event === 'session_started');
+    expect(call).toBeDefined();
+    expect(typeof call[0].region).toBe('string');
+    expect(call[0].region).toBe('HK');
+  });
+});
+
 describe('SessionManager.isTestPhoneNumber', () => {
   let sm;
   const originalEnv = process.env.TEST_PHONE_NUMBERS;
