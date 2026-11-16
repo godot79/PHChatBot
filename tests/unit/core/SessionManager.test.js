@@ -96,3 +96,40 @@ describe('SessionManager.getRegionFromPhoneNumber', () => {
     expect(sm.getRegionFromPhoneNumber(input).region).toBe(expectedRegion);
   });
 });
+
+describe('SessionManager.isTestPhoneNumber', () => {
+  let sm;
+  const originalEnv = process.env.TEST_PHONE_NUMBERS;
+
+  beforeAll(() => {
+    sm = new SessionManager({ on: () => {} });
+  });
+
+  afterEach(() => {
+    process.env.TEST_PHONE_NUMBERS = originalEnv;
+  });
+
+  test('matches a number in the list regardless of formatting', () => {
+    process.env.TEST_PHONE_NUMBERS = '85298377469,12345678901';
+    expect(sm.isTestPhoneNumber('85298377469')).toBe(true);
+    expect(sm.isTestPhoneNumber('+852 9837 7469')).toBe(true);
+  });
+
+  test('returns false for a number not in the list', () => {
+    process.env.TEST_PHONE_NUMBERS = '85298377469';
+    expect(sm.isTestPhoneNumber('85212345678')).toBe(false);
+  });
+
+  test('returns false when TEST_PHONE_NUMBERS is unset or blank', () => {
+    delete process.env.TEST_PHONE_NUMBERS;
+    expect(sm.isTestPhoneNumber('85298377469')).toBe(false);
+    process.env.TEST_PHONE_NUMBERS = '   ';
+    expect(sm.isTestPhoneNumber('85298377469')).toBe(false);
+  });
+
+  test('returns false for empty/missing input', () => {
+    process.env.TEST_PHONE_NUMBERS = '85298377469';
+    expect(sm.isTestPhoneNumber('')).toBe(false);
+    expect(sm.isTestPhoneNumber(undefined)).toBe(false);
+  });
+});
